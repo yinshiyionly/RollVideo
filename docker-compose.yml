@@ -1,0 +1,158 @@
+services:
+  # MySQL服务
+  mysql:
+    image: mysql:8.0
+    container_name: media_symphony_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./app/services/mysql/my.cnf:/etc/mysql/conf.d/my.cnf
+      - ./data/mysql:/var/lib/mysql
+    restart: unless-stopped
+    networks:
+      - media_symphony_net
+    command: --default-authentication-plugin=mysql_native_password
+
+  # Redis服务
+  redis:
+    image: redis:7.0
+    container_name: media_symphony_redis
+    command: redis-server /usr/local/etc/redis/redis.conf --requirepass ${REDIS_PASSWORD}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - ./app/services/redis/redis.conf:/usr/local/etc/redis/redis.conf
+      - ./data/redis:/data/redis
+      - /etc/localtime:/etc/localtime
+      - /etc/timezone:/etc/timezone
+    restart: unless-stopped
+    networks:
+      - media_symphony_net
+
+  # 视频场景分割服务
+  video_scene_split:
+    image: catchoco/transnetv2:latest
+    container_name: video_scene_split
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+        limits:
+          memory: 4G
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility,graphics
+    volumes:
+      - ./app/services/video_scene_split:/app
+      - /data:/data
+      - /etc/localtime:/etc/localtime
+      - /etc/timezone:/etc/timezone
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+    healthcheck:
+      test: nvidia-smi || exit 1
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+    networks:
+      - media_symphony_net
+
+  # 音频分离服务
+  audio_separation:
+    image: catchoco/as:latest
+    container_name: audio_separation
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./app/services/audio_separation:/app
+      - /data:/data
+      - /etc/localtime:/etc/localtime
+      - /etc/timezone:/etc/timezone
+    networks:
+      - media_symphony_net
+    restart: unless-stopped
+    healthcheck:
+      test: nvidia-smi || exit 1
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+
+  # 音频转写服务
+  audio_transcription:
+    image: catchoco/audio-transcription:latest
+    container_name: audio_transcription
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    ports:
+      - "5002:5002"
+    volumes:
+      - ./app/services/audio_transcription:/app
+      - /data:/data
+      - /etc/localtime:/etc/localtime
+      - /etc/timezone:/etc/timezone
+    networks:
+      - media_symphony_net
+    restart: unless-stopped
+    healthcheck:
+      test: nvidia-smi || exit 1
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+  # 非健康状态自动重启
+  autoheal:
+    restart: always
+    image: willfarrell/autoheal
+    container_name: autoheal
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=all
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  media_symphony_net:
+    driver: bridge
