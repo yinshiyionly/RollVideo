@@ -1,4 +1,4 @@
-from app.models.roll_video_task import (
+from app.services.roll_video.models.roll_video_task import (
     TaskState,
     TaskStatus,
     RollVideoTaskBase,
