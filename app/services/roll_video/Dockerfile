@@ -11,8 +11,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     wget \
     cmake \
-    git \
-    vim \
     clang \
     llvm \
     clang-tools \
@@ -64,7 +62,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gfortran \
     libblas3 \
     libopenblas-dev \
-    git-lfs \
     libswresample-dev \
     libfreetype6-dev \
     libtheora-dev \
@@ -151,16 +148,11 @@ WORKDIR /app
 # 安装Python依赖，并使用阿里云PyPI镜像加速
 RUN pip3 install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple \
     ffmpeg-python==0.2.0 \
-    opencv-python==4.11.0.86 \
-    numpy==1.26.4 \
     flask==3.1.0 \
     gunicorn==23.0.0 \
-    tensorflow==2.15.0 \
-    pillow==10.4.0 \
     tqdm==4.67.1 \
     moviepy==2.1.2 \
     psutil==7.0.0 \
-    nvidia-ml-py3==7.352.0
 
 # 设置环境变量
 ENV NVIDIA_VISIBLE_DEVICES=all
@@ -171,4 +163,4 @@ ENV NVIDIA_REQUIRE_CUDA="cuda>=12.0"
 EXPOSE 5000
 
 # 启动命令
-CMD ["python3", "/app/server/api_server.py"]
+CMD ["tail", "-f", "/dev/null"]
