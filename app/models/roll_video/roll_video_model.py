@@ -9,17 +9,10 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
 
-class AudioMode(str, Enum):
-    """音频处理模式枚举类"""
-    BOTH = "both"
-    MUTE = "mute"
-    UNMUTE = "un-mute"
-
 class CreateTaskRequest(BaseModel):
     """创建任务请求模型"""
     video_url: str
     uid: Annotated[str, StringConstraints(min_length=1, max_length=64)]
-    video_split_audio_mode: AudioMode = AudioMode.BOTH
 
 class TaskResponse(BaseModel):
     """任务响应模型"""

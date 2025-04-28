@@ -16,6 +16,17 @@ import aiofiles
 logger = Logger("celery_tasks")
 tasks_db = VideoTasksDB()
 
+"""
+1. 提交生成视频任务，入库保存，异步插入队列，返回 task_id
+2. 队列流程中通过 cli 调用生成视频服务，成功或失败都回调修改数据库状态
+3. 提供生成任务状态查询接口，记录失败信息
+"""
+
+"""
+1. TOS 上传
+2. 任务-curd 修改服务
+"""
+
 
 class AsyncTask(Task):
     """异步任务的基类"""
