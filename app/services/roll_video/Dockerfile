@@ -153,7 +153,7 @@ RUN pip3 install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple \
     gunicorn==23.0.0 \
     tqdm==4.67.1 \
     moviepy==2.1.2 \
-    psutil==7.0.0 \
+    psutil==7.0.0
 
 # 设置环境变量
 ENV NVIDIA_VISIBLE_DEVICES=all
