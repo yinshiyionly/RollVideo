@@ -276,16 +276,17 @@ class VideoRenderer:
         else:
             ffmpeg_pix_fmt = "rgb24"
             output_path = os.path.splitext(output_path)[0] + ".mp4"
-            # GPU 参数: h264_nvenc, preset p3, VBR CQ 21, faststart
+            # GPU 参数: h264_nvenc, preset p3, VBR CQ 21, pix_fmt yuv420p, faststart
             video_codec_and_output_params = [
                 "-c:v", preferred_codec, # h264_nvenc
                 "-preset", "p3",         # Medium preset
                 "-rc:v", "vbr",          # Variable Bitrate Rate Control
                 "-cq:v", "21",           # Constant Quality level (good quality)
                 "-b:v", "0",              # Let CQ control bitrate
+                "-pix_fmt", "yuv420p",   # << 添加此行以提高兼容性
                 "-movflags", "+faststart"
             ]
-            # CPU 回退参数: libx264, preset medium(默认), CRF 21, faststart
+            # CPU 回退参数: libx264, preset medium(默认), CRF 21, pix_fmt yuv420p, faststart
             cpu_fallback_codec_and_output_params = [
                 "-c:v", "libx264",
                 "-crf", "21",            # Constant Rate Factor (good quality)

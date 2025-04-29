@@ -52,12 +52,13 @@
         # 尝试 GPU
         ffmpeg -y \
           -f rawvideo -vcodec rawvideo -s 450x700 -pix_fmt rgb24 -r 30 -i - \
-          -c:v h264_nvenc -preset p3 -rc:v vbr -cq:v 21 -b:v 0 -movflags +faststart \
+          -c:v h264_nvenc -preset p3 -rc:v vbr -cq:v 21 -b:v 0 -pix_fmt yuv420p -movflags +faststart \
           -map 0:v:0 \
           output.mp4
         ```
         *   `-f rawvideo ... -i -`: 从标准输入读取原始 RGB24 像素数据。
         *   `-c:v h264_nvenc ...`: 尝试使用 Nvidia H.264 GPU 编码器，`p3` 预设，VBR 质量 21。
+        *   `-pix_fmt yuv420p`: **设置兼容性最佳的像素格式**。
         *   `-movflags +faststart`: 优化 MP4 文件结构以利于流式播放。
         *   `-map 0:v:0`: 仅映射视频流。
     *   **FFmpeg 命令示例 (CPU 回退)** (GPU失败后自动执行):
