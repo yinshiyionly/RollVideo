@@ -2,8 +2,8 @@ from typing import Optional, Dict, Any, List
 from fastapi import HTTPException
 from sqlalchemy import create_engine, text, exc
 from sqlalchemy.exc import SQLAlchemyError
-from utils.logger import Logger
-from models.roll_video_task import TaskState, TaskStatus, RollVideoTaskCreate, RollVideoTaskResponse, RollVideoTaskUpdate
+from app.utils.logger import Logger
+from app.models.roll_video_task import TaskState, TaskStatus, RollVideoTaskCreate, RollVideoTaskResponse, RollVideoTaskUpdate
 import json
 from functools import wraps
 import time
@@ -13,7 +13,7 @@ from sqlalchemy import Column, String, Integer, Text, DateTime, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import Session
 
-from utils.mysql_pool import MySQLPool
+from app.utils.mysql_pool import MySQLPool
 
 Base = declarative_base()
 
@@ -33,7 +33,7 @@ class RollVideoTaskModel(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.now, comment="创建时间")
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now, comment="更新时间")
 
-logger = Logger("roll_video_task_db")
+logger = Logger("roll-video-task-db")
 
 def retry_on_connection_error(max_retries=3, initial_delay=1):
     """数据库连接错误重试装饰器
@@ -123,27 +123,44 @@ class RollVideoTaskDB:
         try:
             with self.mysql_pool.session_scope() as session:
                 query = session.query(RollVideoTaskModel).filter(RollVideoTaskModel.task_id == task_id).first()
+                logger.info(f"获取任务: {query}")
                 
                 if not query:
                     return None
                 
-                try:
-                    payload = json.loads(query.payload) if query.payload else None
-                except json.JSONDecodeError as e:
-                    logger.error(f"payload JSON解析失败: {str(e)}", {
-                        "task_id": task_id,
-                        "payload": query.payload
-                    })
-                    payload = None
+                # 处理payload字段
+                payload = None
+                if query.payload is not None:
+                    if isinstance(query.payload, dict):
+                        logger.info(f"payload是字典: {query.payload}")
+                        # 已经是字典，直接使用
+                        payload = query.payload
+                    elif isinstance(query.payload, str):
+                        logger.info(f"payload是字符串: {query.payload}")
+                        # 是字符串，需要解析
+                        try:
+                            payload = json.loads(query.payload)
+                        except json.JSONDecodeError as e:
+                            logger.error(f"payload JSON解析失败: {str(e)}", {
+                                "task_id": task_id,
+                                "payload": query.payload
+                            })
                 
-                try:
-                    result_json = json.loads(query.result) if query.result else None
-                except json.JSONDecodeError as e:
-                    logger.error(f"result JSON解析失败: {str(e)}", {
-                        "task_id": task_id,
-                        "result": query.result
-                    })
-                    result_json = None
+                # 处理result字段
+                result_json = None
+                if query.result is not None:
+                    if isinstance(query.result, dict):
+                        # 已经是字典，直接使用
+                        result_json = query.result
+                    elif isinstance(query.result, str):
+                        # 是字符串，需要解析
+                        try:
+                            result_json = json.loads(query.result)
+                        except json.JSONDecodeError as e:
+                            logger.error(f"result JSON解析失败: {str(e)}", {
+                                "task_id": task_id,
+                                "result": query.result
+                            })
                 
                 return RollVideoTaskResponse(
                     id=query.id,
@@ -192,10 +209,20 @@ class RollVideoTaskDB:
                     query.task_state = task_update.task_state.value
                 
                 if task_update.result is not None:
-                    query.result = json.dumps(task_update.result)
+                    # 尝试直接赋值，出错则使用JSON序列化
+                    try:
+                        query.result = task_update.result
+                    except Exception as e:
+                        logger.warning(f"直接赋值结果失败，尝试JSON序列化: {str(e)}")
+                        query.result = json.dumps(task_update.result, ensure_ascii=False)
                 
                 if task_update.payload is not None:
-                    query.payload = json.dumps(task_update.payload)
+                    # 尝试直接赋值，出错则使用JSON序列化
+                    try:
+                        query.payload = task_update.payload
+                    except Exception as e:
+                        logger.warning(f"直接赋值载荷失败，尝试JSON序列化: {str(e)}")
+                        query.payload = json.dumps(task_update.payload, ensure_ascii=False)
                 
                 if task_update.status is not None:
                     query.status = task_update.status.value
@@ -230,7 +257,16 @@ class RollVideoTaskDB:
                     query.task_state = task_state.value
                 
                 if result is not None:
-                    query.result = json.dumps(result)
+                    # 对于SQLAlchemy JSON列，根据底层数据库驱动可能需要不同处理：
+                    # MySQL (pymysql): 直接赋值字典
+                    # 其他数据库: 可能需要使用json.dumps序列化
+                    try:
+                        # 尝试直接赋值字典
+                        query.result = result
+                    except Exception as e:
+                        logger.warning(f"直接赋值结果失败，尝试JSON序列化: {str(e)}")
+                        # 使用ensure_ascii=False确保中文不被转换为Unicode转义序列
+                        query.result = json.dumps(result, ensure_ascii=False)
                 
                 session.commit()
                 return True
@@ -307,15 +343,37 @@ class RollVideoTaskDB:
                 
                 tasks = []
                 for row in results:
-                    try:
-                        payload = json.loads(row.payload) if row.payload else None
-                    except json.JSONDecodeError:
-                        payload = None
-                        
-                    try:
-                        result_json = json.loads(row.result) if row.result else None
-                    except json.JSONDecodeError:
-                        result_json = None
+                    # 处理payload字段
+                    payload = None
+                    if row.payload is not None:
+                        if isinstance(row.payload, dict):
+                            # 已经是字典，直接使用
+                            payload = row.payload
+                        elif isinstance(row.payload, str):
+                            # 是字符串，需要解析
+                            try:
+                                payload = json.loads(row.payload)
+                            except json.JSONDecodeError:
+                                logger.error(f"list_task - payload JSON解析失败", {
+                                    "task_id": row.task_id,
+                                    "payload": row.payload
+                                })
+                    
+                    # 处理result字段
+                    result_json = None
+                    if row.result is not None:
+                        if isinstance(row.result, dict):
+                            # 已经是字典，直接使用
+                            result_json = row.result
+                        elif isinstance(row.result, str):
+                            # 是字符串，需要解析
+                            try:
+                                result_json = json.loads(row.result)
+                            except json.JSONDecodeError:
+                                logger.error(f"list_task - result JSON解析失败", {
+                                    "task_id": row.task_id,
+                                    "result": row.result
+                                })
                     
                     tasks.append(RollVideoTaskResponse(
                         id=row.id,

@@ -1,16 +1,11 @@
 from celery import Celery
-
-
-
-REDIS_HOST="127.0.0.1"
-REDIS_PORT=6379
-REDIS_PASSWORD="GTO4mjZQXZkWYgspMWHHgla0Lf5yNew8zlgRyq"
+from app.config import settings
 
 # 创建Celery实例
 celery_app = Celery(
     "roll-video",
-    broker=f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0",
-    backend=f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/1",
+    broker=f"redis://:{settings.REDIS_PASSWORD}@{settings.REDIS_HOST}:{settings.REDIS_PORT}/0",
+    backend=f"redis://:{settings.REDIS_PASSWORD}@{settings.REDIS_HOST}:{settings.REDIS_PORT}/1",
     broker_transport_options={
         'visibility_timeout': 3600,
         'socket_timeout': 30,

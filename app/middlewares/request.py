@@ -27,7 +27,7 @@ class RequestMiddleware(BaseHTTPMiddleware):
         """
         super().__init__(app)
         self.exclude_paths = exclude_paths or ["/docs", "/redoc", "/openapi.json", "/favicon.ico"]
-        self.logger = Logger()
+        self.logger = Logger('request-middleware')
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         """处理请求

@@ -4,7 +4,7 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from typing import Optional, Dict, Any
 
-from config import settings
+from app.config import settings
 
 
 class Logger:

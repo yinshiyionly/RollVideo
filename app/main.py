@@ -1,16 +1,16 @@
 import logging
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from config import settings
-from utils.logger import Logger
+from app.config import settings
+from app.utils.logger import Logger
 from typing import Any
 
 # 导入自定义中间件
-from models.response import error_response, StatusCode, StatusMessage
-from middlewares.auth import AuthMiddleware
+from app.models.response import error_response, StatusCode, StatusMessage
+from app.middlewares.auth import AuthMiddleware
 
 # 导入路由
-from routers import example_router
+from app.routers import router
 
 # 初始化日志系统
 log = Logger()
@@ -49,7 +49,7 @@ app.add_middleware(
 
 # 注册示例路由
 app.include_router(
-    example_router.router,
+    router.router,
     prefix=f"{settings.API_V1_STR}",
 )
 
@@ -138,7 +138,7 @@ if __name__ == "__main__":
     
     # 启动服务
     uvicorn.run(
-        "main:app", 
+        "app.main:app", 
         host=settings.APP_HOST, 
         port=settings.APP_PORT,
         reload=settings.DEBUG,

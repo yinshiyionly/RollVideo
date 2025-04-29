@@ -1,11 +1,13 @@
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
-# 修改镜像源
-RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' /etc/apt/sources.list
+# 设置工作目录
+WORKDIR /roll-video
 
-# 安装系统依赖
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 1.1 修改镜像源
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' /etc/apt/sources.list \
+    # 1.2 安装系统依赖
+    && apt-get update 
+    && apt-get install -y --no-install-recommends \
     build-essential \
     python3-dev \
     python3-pip \
@@ -70,27 +72,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     texinfo \
     libmp3lame-dev \
     libopus-dev \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# 安装cuDNN
-RUN cd /tmp && \
-    wget https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz && \
-    tar -xf cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz && \
-    cp -r cudnn-linux-x86_64-8.9.4.25_cuda12-archive/lib/* /usr/local/cuda/lib64/ && \
-    cp -r cudnn-linux-x86_64-8.9.4.25_cuda12-archive/include/* /usr/local/cuda/include/ && \
-    rm -rf /tmp/cudnn* && \
-    ldconfig
-
-# 下载并安装nv-codec-headers 注意显卡驱动版本
-RUN git clone https://github.com/FFmpeg/nv-codec-headers.git && \
-    cd nv-codec-headers && \
-    git checkout sdk/12.0 && \
-    make -j$(nproc) && \
-    make install
-
-# 安装 CUDA 开发工具
-RUN apt-get update && apt-get install -y --no-install-recommends \
+    # 1.3 安装supervisor
+    supervisor \
+    # 1.4 安装cuda
+    && apt-get install -y --no-install-recommends \
     cuda-nvcc-12-4 \
     cuda-nvrtc-12-4 \
     cuda-nvrtc-dev-12-4 \
@@ -98,10 +83,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cuda-command-line-tools-12-4 \
     cuda-libraries-dev-12-4 \
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    # 1.5 安装cuDNN
+    && wget -O /tmp/cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz \
+    && tar -xf /tmp/cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz \
+    && cp -r /tmp/cudnn-linux-x86_64-8.9.4.25_cuda12-archive/lib/* /usr/local/cuda/lib64/ \
+    && cp -r /tmp/cudnn-linux-x86_64-8.9.4.25_cuda12-archive/include/* /usr/local/cuda/include/ \
+    && rm -rf /tmp/cudnn* \
+    && ldconfig
 
-# 下载并编译支持NVIDIA硬件加速的FFmpeg
-RUN cd /tmp && \
+# 2. 安装 nv-codec-headers
+RUN set -ex && \
+    # 2.1 下载并安装 nv-codec-headers（注意显卡驱动版本）
+    git clone https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers && \
+    cd /tmp/nv-codec-headers && \
+    git checkout sdk/12.0 && \
+    make -j$(nproc) && \
+    make install && \
+    rm -rf /tmp/nv-codec-headers && \
+    \
+    # 2.2 下载并编译支持 NVIDIA 硬件加速的 FFmpeg
+    cd /tmp && \
     wget https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz && \
     tar xvf ffmpeg-7.1.tar.gz && \
     cd ffmpeg-7.1 && \
@@ -132,36 +134,29 @@ RUN cd /tmp && \
     rm -rf ffmpeg* && \
     ldconfig
 
-# 设置CUDA、FFmpeg环境变量
+
+# 3. 设置CUDA、FFmpeg环境变量
 ENV PATH="/usr/local/cuda/bin:${PATH}" \
     LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/lib:${LD_LIBRARY_PATH}" \
     CUDA_HOME="/usr/local/cuda" \
     CUDA_PATH="/usr/local/cuda" \
     FFMPEG_NVENC_FLAGS="-I/usr/local/cuda/include" \
-    FFMPEG_BINARY="/usr/local/bin/ffmpeg"
+    FFMPEG_BINARY="/usr/local/bin/ffmpeg" \
+    # 设置nvidia变量
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility,graphics \
+    NVIDIA_REQUIRE_CUDA="cuda>=12.0"
 
-# 验证FFmpeg是否支持NVIDIA编码器
-RUN ffmpeg -encoders | grep nvenc
+# 4. 安装Python依赖，并使用阿里云PyPI镜像加速
+RUN pip3 install --no-cache-dir --trusted-host mirrors.aliyun.com \
+    -i https://mirrors.aliyun.com/pypi/simple \
+    -r requirements.txt
 
-# 设置工作目录
-WORKDIR /app
-
-# 安装Python依赖，并使用阿里云PyPI镜像加速
-RUN pip3 install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple \
-    ffmpeg-python==0.2.0 \
-    flask==3.1.0 \
-    gunicorn==23.0.0 \
-    tqdm==4.67.1 \
-    moviepy==2.1.2 \
-    psutil==7.0.0
-
-# 设置环境变量
-ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility,graphics
-ENV NVIDIA_REQUIRE_CUDA="cuda>=12.0"
 
 # 暴露API端口
 EXPOSE 5000
 
 # 启动命令
+# 5. 用 supervisor 启动主程序和 celery 队列
+# CMD ["supervisord", "-c", "/roll-video/supervisor-conf/supervisord.conf"]
 CMD ["tail", "-f", "/dev/null"]

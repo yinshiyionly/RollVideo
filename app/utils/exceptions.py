@@ -1,6 +1,6 @@
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from utils.logger import Logger
+from app.utils.logger import Logger
 # 初始化日志系统
 log = Logger()
 

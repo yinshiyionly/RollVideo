@@ -5,11 +5,11 @@ import json
 from datetime import datetime
 from pydantic import BaseModel
 
-from models.response import success_response, error_response, StatusCode, StatusMessage
-from models.roll_video_task import RollVideoTaskCreate
-from models.roll_video_task_db import RollVideoTaskDB
-from tasks.roll_video_tasks import generate_roll_video_task
-from utils.logger import Logger
+from app.models.response import success_response, error_response, StatusCode, StatusMessage
+from app.models.roll_video_task import RollVideoTaskCreate
+from app.models.roll_video_task_db import RollVideoTaskDB
+from app.tasks.roll_video_tasks import generate_roll_video_task
+from app.utils.logger import Logger
 
 # 创建路由器
 router = APIRouter()
@@ -19,7 +19,7 @@ log = Logger()
 
 # 定义请求体模型
 class TaskCreateRequest(BaseModel):
-    text: str
+    payload: Dict
     source: str
     uid: int
 
@@ -45,7 +45,7 @@ async def create_task(request: TaskCreateRequest):
             "task_id": task_id,
             "uid": request.uid,
             "source": request.source,
-            "payload": {"text": request.text}
+            "payload": request.payload
         }
 
         # 记录参数

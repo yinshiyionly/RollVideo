@@ -2,11 +2,11 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
-from models.response import error_response, StatusCode, StatusMessage
-from config import settings
-from utils.logger import Logger
+from app.models.response import error_response, StatusCode, StatusMessage
+from app.config import settings
+from app.utils.logger import Logger
 
-log = Logger()
+log = Logger('auth-middleware')
 
 class AuthMiddleware(BaseHTTPMiddleware):
     """认证中间件

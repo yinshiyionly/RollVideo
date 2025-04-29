@@ -10,7 +10,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 
-from config import settings
+from app.config import settings
 
 # 设置日志
 logger = logging.getLogger(__name__)
