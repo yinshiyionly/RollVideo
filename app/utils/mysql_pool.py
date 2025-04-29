@@ -5,12 +5,12 @@ from contextlib import contextmanager
 
 import pymysql
 from pymysql.cursors import DictCursor
-from DBUtils.PooledDB import PooledDB
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.pool import QueuePool
 
-from app.config import settings
+from config import settings
 
 # 设置日志
 logger = logging.getLogger(__name__)
@@ -38,10 +38,10 @@ class TransactionError(MySQLPoolError):
 class MySQLPool:
     """MySQL连接池管理器
     
-    基于DBUtils.PooledDB实现的MySQL连接池，支持异常重试和监控
+    基于SQLAlchemy实现的MySQL连接池，支持异常重试和监控
     
     Attributes:
-        pool: 数据库连接池
+        engine: SQLAlchemy引擎
         max_connections: 最大连接数
         host: 数据库主机
         port: 数据库端口
@@ -92,7 +92,7 @@ class MySQLPool:
             retry_delay: 重试延迟时间(秒)，默认0.5秒
         """
         # 如果已经初始化过，则直接返回
-        if hasattr(self, 'pool'):
+        if hasattr(self, 'engine'):
             return
         
         # 默认使用配置文件中的数据库配置
@@ -110,9 +110,6 @@ class MySQLPool:
         self.retry_count = retry_count
         self.retry_delay = retry_delay
         
-        # 初始化连接池
-        self._init_pool()
-        
         # 初始化SQLAlchemy
         self._init_sqlalchemy()
         
@@ -120,28 +117,6 @@ class MySQLPool:
             f"MySQL连接池初始化成功 - 主机:{self.host} 端口:{self.port} "
             f"数据库:{self.database} 最大连接数:{self.max_connections}"
         )
-    
-    def _init_pool(self) -> None:
-        """初始化DBUtils连接池"""
-        try:
-            self.pool = PooledDB(
-                creator=pymysql,
-                maxconnections=self.max_connections,
-                mincached=self.min_connections,
-                host=self.host,
-                port=self.port,
-                user=self.user,
-                password=self.password,
-                database=self.database,
-                charset=self.charset,
-                autocommit=True,
-                cursorclass=DictCursor,
-                blocking=True,
-                ping=1,  # 自动检测连接是否可用
-            )
-        except Exception as e:
-            logger.error(f"MySQL连接池初始化失败: {str(e)}")
-            raise ConnectionError(f"MySQL连接池初始化失败: {str(e)}")
     
     def _init_sqlalchemy(self) -> None:
         """初始化SQLAlchemy引擎和会话工厂"""
@@ -153,6 +128,7 @@ class MySQLPool:
         # 创建引擎，配置连接池
         self.engine = create_engine(
             connection_str,
+            poolclass=QueuePool,  # 使用队列池
             pool_size=self.min_connections,
             max_overflow=self.max_connections - self.min_connections,
             pool_timeout=self.timeout,
@@ -163,18 +139,18 @@ class MySQLPool:
         # 创建会话工厂
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
     
-    def get_connection(self) -> pymysql.connections.Connection:
+    def get_connection(self):
         """获取数据库连接
         
         Returns:
-            pymysql.connections.Connection: 数据库连接对象
+            sqlalchemy.engine.Connection: 数据库连接对象
         
         Raises:
             ConnectionError: 获取连接失败时抛出
         """
         for attempt in range(self.retry_count):
             try:
-                connection = self.pool.connection()
+                connection = self.engine.connect()
                 return connection
             except Exception as e:
                 logger.warning(f"获取MySQL连接失败 (尝试 {attempt+1}/{self.retry_count}): {str(e)}")
@@ -185,66 +161,57 @@ class MySQLPool:
                     raise ConnectionError(f"获取MySQL连接失败: {str(e)}")
     
     @contextmanager
-    def get_cursor(self) -> DictCursor:
-        """获取数据库游标上下文管理器
+    def get_cursor(self):
+        """获取原生SQL执行上下文
         
         使用方法:
-            with mysql_pool.get_cursor() as cursor:
-                cursor.execute("SELECT * FROM table")
-                results = cursor.fetchall()
+            with mysql_pool.get_cursor() as conn:
+                result = conn.execute(text("SELECT * FROM table"))
+                for row in result:
+                    print(row)
         
         Yields:
-            DictCursor: 返回字典格式结果的游标对象
+            sqlalchemy.engine.Connection: 返回 SQLAlchemy 连接对象
         
         Raises:
-            ConnectionError: 获取连接或游标失败时抛出
+            ConnectionError: 获取连接失败时抛出
         """
         conn = None
-        cursor = None
         try:
             conn = self.get_connection()
-            cursor = conn.cursor()
-            yield cursor
+            yield conn
         except Exception as e:
-            logger.error(f"获取MySQL游标失败: {str(e)}")
-            raise ConnectionError(f"获取MySQL游标失败: {str(e)}")
+            logger.error(f"获取SQL执行上下文失败: {str(e)}")
+            raise ConnectionError(f"获取SQL执行上下文失败: {str(e)}")
         finally:
-            if cursor:
-                cursor.close()
             if conn:
                 conn.close()
     
     @contextmanager
-    def transaction(self) -> DictCursor:
+    def transaction(self):
         """事务上下文管理器
         
         使用方法:
-            with mysql_pool.transaction() as cursor:
-                cursor.execute("INSERT INTO table VALUES (%s, %s)", (1, 'test'))
-                cursor.execute("UPDATE table SET value = %s WHERE id = %s", ('new', 1))
+            with mysql_pool.transaction() as conn:
+                conn.execute(text("INSERT INTO table VALUES (:id, :value)"), {"id": 1, "value": "test"})
+                conn.execute(text("UPDATE table SET value = :value WHERE id = :id"), {"id": 1, "value": "new"})
         
         Yields:
-            DictCursor: 返回字典格式结果的游标对象
+            sqlalchemy.engine.Connection: 返回 SQLAlchemy 连接对象
         
         Raises:
             TransactionError: 事务执行失败时抛出
         """
         conn = None
-        cursor = None
         try:
             conn = self.get_connection()
-            conn.begin()  # 开始事务
-            cursor = conn.cursor()
-            yield cursor
-            conn.commit()  # 提交事务
+            with conn.begin():  # 开始事务
+                yield conn
+                # 事务会自动提交或回滚
         except Exception as e:
-            if conn:
-                conn.rollback()  # 回滚事务
             logger.error(f"MySQL事务执行失败: {str(e)}")
             raise TransactionError(f"MySQL事务执行失败: {str(e)}")
         finally:
-            if cursor:
-                cursor.close()
             if conn:
                 conn.close()
     
@@ -258,26 +225,29 @@ class MySQLPool:
         
         Args:
             sql: SQL语句
-            params: SQL参数
-            commit: 是否自动提交，默认True
-        
+            params: 参数，可以是元组、列表或字典
+            commit: 是否自动提交
+            
         Returns:
             int: 影响的行数
-        
+            
         Raises:
             ExecuteError: SQL执行失败时抛出
         """
-        with self.get_cursor() as cursor:
+        for attempt in range(self.retry_count):
             try:
-                affected_rows = cursor.execute(sql, params)
-                if commit:
-                    cursor.connection.commit()
-                return affected_rows
+                with self.get_cursor() as conn:
+                    result = conn.execute(text(sql), params)
+                    if commit:
+                        conn.commit()
+                    return result.rowcount
             except Exception as e:
-                if commit:
-                    cursor.connection.rollback()
-                logger.error(f"执行SQL失败: {str(e)}, SQL: {sql}, 参数: {params}")
-                raise ExecuteError(f"执行SQL失败: {str(e)}")
+                logger.warning(f"执行SQL失败 (尝试 {attempt+1}/{self.retry_count}): {str(e)}")
+                if attempt < self.retry_count - 1:
+                    time.sleep(self.retry_delay)
+                else:
+                    logger.error(f"执行SQL失败，已达到最大重试次数: {str(e)}")
+                    raise ExecuteError(f"执行SQL失败: {str(e)}")
     
     def executemany(
         self, 
@@ -289,71 +259,86 @@ class MySQLPool:
         
         Args:
             sql: SQL语句
-            params_list: SQL参数列表
-            commit: 是否自动提交，默认True
-        
+            params_list: 参数列表，每个元素可以是元组或字典
+            commit: 是否自动提交
+            
         Returns:
             int: 影响的行数
-        
+            
         Raises:
-            ExecuteError: SQL批量执行失败时抛出
+            ExecuteError: SQL执行失败时抛出
         """
-        with self.get_cursor() as cursor:
+        for attempt in range(self.retry_count):
             try:
-                affected_rows = cursor.executemany(sql, params_list)
-                if commit:
-                    cursor.connection.commit()
-                return affected_rows
+                with self.get_cursor() as conn:
+                    result = conn.execute(text(sql), params_list)
+                    if commit:
+                        conn.commit()
+                    return result.rowcount
             except Exception as e:
-                if commit:
-                    cursor.connection.rollback()
-                logger.error(f"批量执行SQL失败: {str(e)}, SQL: {sql}")
-                raise ExecuteError(f"批量执行SQL失败: {str(e)}")
+                logger.warning(f"批量执行SQL失败 (尝试 {attempt+1}/{self.retry_count}): {str(e)}")
+                if attempt < self.retry_count - 1:
+                    time.sleep(self.retry_delay)
+                else:
+                    logger.error(f"批量执行SQL失败，已达到最大重试次数: {str(e)}")
+                    raise ExecuteError(f"批量执行SQL失败: {str(e)}")
     
     def query_one(self, sql: str, params: Union[tuple, list, dict] = None) -> Optional[Dict[str, Any]]:
         """查询单条记录
         
         Args:
-            sql: SQL查询语句
-            params: SQL参数
-        
+            sql: SQL语句
+            params: 参数，可以是元组、列表或字典
+            
         Returns:
-            Optional[Dict[str, Any]]: 查询结果字典，未找到时返回None
-        
+            Optional[Dict[str, Any]]: 查询结果，没有结果时返回None
+            
         Raises:
             ExecuteError: SQL执行失败时抛出
         """
-        with self.get_cursor() as cursor:
+        for attempt in range(self.retry_count):
             try:
-                cursor.execute(sql, params)
-                return cursor.fetchone()
+                with self.get_cursor() as conn:
+                    result = conn.execute(text(sql), params)
+                    row = result.fetchone()
+                    return dict(row) if row else None
             except Exception as e:
-                logger.error(f"查询失败: {str(e)}, SQL: {sql}, 参数: {params}")
-                raise ExecuteError(f"查询失败: {str(e)}")
+                logger.warning(f"查询单条记录失败 (尝试 {attempt+1}/{self.retry_count}): {str(e)}")
+                if attempt < self.retry_count - 1:
+                    time.sleep(self.retry_delay)
+                else:
+                    logger.error(f"查询单条记录失败，已达到最大重试次数: {str(e)}")
+                    raise ExecuteError(f"查询单条记录失败: {str(e)}")
     
     def query_all(self, sql: str, params: Union[tuple, list, dict] = None) -> List[Dict[str, Any]]:
         """查询多条记录
         
         Args:
-            sql: SQL查询语句
-            params: SQL参数
-        
+            sql: SQL语句
+            params: 参数，可以是元组、列表或字典
+            
         Returns:
             List[Dict[str, Any]]: 查询结果列表
-        
+            
         Raises:
             ExecuteError: SQL执行失败时抛出
         """
-        with self.get_cursor() as cursor:
+        for attempt in range(self.retry_count):
             try:
-                cursor.execute(sql, params)
-                return cursor.fetchall()
+                with self.get_cursor() as conn:
+                    result = conn.execute(text(sql), params)
+                    rows = result.fetchall()
+                    return [dict(row) for row in rows]
             except Exception as e:
-                logger.error(f"查询失败: {str(e)}, SQL: {sql}, 参数: {params}")
-                raise ExecuteError(f"查询失败: {str(e)}")
+                logger.warning(f"查询多条记录失败 (尝试 {attempt+1}/{self.retry_count}): {str(e)}")
+                if attempt < self.retry_count - 1:
+                    time.sleep(self.retry_delay)
+                else:
+                    logger.error(f"查询多条记录失败，已达到最大重试次数: {str(e)}")
+                    raise ExecuteError(f"查询多条记录失败: {str(e)}")
     
     def get_session(self) -> Session:
-        """获取SQLAlchemy会话
+        """获取新的会话
         
         Returns:
             Session: SQLAlchemy会话对象
@@ -362,15 +347,19 @@ class MySQLPool:
     
     @contextmanager
     def session_scope(self) -> Session:
-        """SQLAlchemy会话上下文管理器
+        """会话上下文管理器
         
         使用方法:
             with mysql_pool.session_scope() as session:
-                user = User(name="test", email="test@example.com")
+                user = User(name="test")
                 session.add(user)
+                # 会话自动提交或回滚
         
         Yields:
             Session: SQLAlchemy会话对象
+            
+        Raises:
+            Exception: 会话执行失败时抛出
         """
         session = self.get_session()
         try:
@@ -378,20 +367,20 @@ class MySQLPool:
             session.commit()
         except Exception as e:
             session.rollback()
-            logger.error(f"SQLAlchemy会话操作失败: {str(e)}")
+            logger.error(f"会话执行失败: {str(e)}")
             raise
         finally:
             session.close()
     
     def check_connection(self) -> bool:
-        """检查数据库连接是否正常
+        """检查数据库连接是否可用
         
         Returns:
-            bool: 连接正常返回True，否则返回False
+            bool: 连接是否可用
         """
         try:
-            with self.get_cursor() as cursor:
-                cursor.execute("SELECT 1")
+            with self.get_cursor() as conn:
+                conn.execute(text("SELECT 1"))
                 return True
         except Exception as e:
             logger.error(f"数据库连接检查失败: {str(e)}")
@@ -400,25 +389,24 @@ class MySQLPool:
     def close(self) -> None:
         """关闭连接池
         
-        注意: 由于DBUtils.PooledDB没有提供直接关闭连接池的方法，
-        该方法仅用于记录关闭操作，实际连接会在应用退出时自动关闭
+        在应用程序结束时调用，释放所有连接
         """
-        logger.info("MySQL连接池准备关闭")
+        try:
+            self.engine.dispose()
+            logger.info("MySQL连接池已关闭")
+        except Exception as e:
+            logger.error(f"关闭MySQL连接池失败: {str(e)}")
 
 
-# 创建连接池单例
-mysql_pool = MySQLPool()
-
-# 提供SQLAlchemy ORM相关组件的快捷访问
 def get_db():
-    """获取数据库会话
+    """依赖注入获取数据库会话
     
-    用于FastAPI的依赖注入
+    用于FastAPI依赖注入，确保会话在请求结束后关闭
     
     Yields:
         Session: SQLAlchemy会话对象
     """
-    db = mysql_pool.get_session()
+    db = MySQLPool().get_session()
     try:
         yield db
     finally:

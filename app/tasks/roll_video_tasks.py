@@ -1,7 +1,7 @@
 from celery import Celery
-from app.models.roll_video_task_db import RollVideoTaskDB
-from app.services.roll_video.models.roll_video_task import TaskState
-from app.utils.logger import Logger
+from models.roll_video_task_db import RollVideoTaskDB
+from models.roll_video_task import TaskState
+from utils.logger import Logger
 
 # 初始化 Celery
 celery_app = Celery('roll_video_tasks')

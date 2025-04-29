@@ -3,7 +3,7 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine, text, exc
 from sqlalchemy.exc import SQLAlchemyError
 from utils.logger import Logger
-from services.roll_video.models.roll_video_task import TaskState, TaskStatus, RollVideoTaskCreate, RollVideoTaskResponse, RollVideoTaskUpdate
+from models.roll_video_task import TaskState, TaskStatus, RollVideoTaskCreate, RollVideoTaskResponse, RollVideoTaskUpdate
 import json
 from functools import wraps
 import time

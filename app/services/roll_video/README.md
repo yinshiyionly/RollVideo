@@ -1,172 +1,128 @@
-# TransNet V2: 镜头边界检测神经网络
+# 滚动视频制作服务
 
-本仓库包含了论文 [TransNet V2: 用于快速镜头转场检测的高效深度网络架构](https://arxiv.org/abs/2008.04838) 的代码实现。
+## 需求：
+   我想根据【参数】制作一个滚动视频。
+整体方案：
+   把文字排版成一张超长的图片，然后在固定尺寸的窗口（宽x高）里，通过控制这张图片向上移动，录制成视频。例如用Pillow生成文字画布，MoviePy做滚动。或者你有更好的方案也可以使用。先帮我实现CPU的效果。
+    1、根据视频的宽度、字体、字体颜色、字号、字间距、行间距  计算每一行的文字与换行
+    2、把每一行的文字渲染到指定宽度的图片上，图片要根据 视频背景颜色设置好
+    3、根据滚动速度和视频高度，控制图片向上滚动
+    4、把整个图片滚动完成后，渲染视频结束
 
-## 性能对比
+## 实现方案
 
-我们对其他公开可用的最新镜头边界检测方法进行了重新评估（F1 分数）：
+该服务使用Python实现，主要依赖以下库：
+- PIL (Pillow): 用于文字渲染和图片处理
+- MoviePy: 用于视频生成和处理
+- NumPy: 用于数据处理
 
-模型 | ClipShots | BBC Planet Earth | RAI
---- | :---: | :---: | :---:
-TransNet V2 (本仓库) | **77.9** | **96.2** | 93.9
-[TransNet](https://arxiv.org/abs/1906.03363) [(github)](https://github.com/soCzech/TransNet) | 73.5 | 92.9 | **94.3**
-[Hassanien et al.](https://arxiv.org/abs/1705.03281) [(github)](https://github.com/melgharib/DSBD) | 75.9 | 92.6 | 93.9
-[Tang et al., ResNet baseline](https://arxiv.org/abs/1808.04234) [(github)](https://github.com/Tangshitao/ClipShots_basline) | 76.1 | 89.3 | 92.8
+## 功能特点
 
-## 环境要求
-
-- Python 3.6+
-- NVIDIA GPU (推荐)
-- Docker (可选，推荐使用)
-- FFmpeg (如需直接处理视频文件)
-
-## 快速开始
-
-### Docker 部署（推荐）
-
-#### 自动化部署
-
-我们提供了自动化部署脚本，可以自动配置用户权限并构建镜像：
-
-```bash
-# 赋予脚本执行权限
-chmod +x start.sh
-
-# 运行安装脚本
-./start.sh
-```
-
-脚本会自动：
-1. 创建必要的目录结构
-2. 使用当前用户的 UID 和 GID 构建 Docker 镜像
-3. 设置正确的目录权限
-
-#### 手动部署
-
-如果您想手动部署，我们也提供了预构建的 Docker 镜像：
-
-```bash
-# 拉取镜像
-docker pull catchoco/transnetv2:latest
-
-# 运行容器
-docker run -d \
-  --gpus all \
-  -p 5000:5000 \
-  -v /path/to/videos:/app/videos \
-  catchoco/transnetv2:latest
-```
-
-### 本地安装
-
-1. 安装依赖：
-```bash
-pip install tensorflow==2.1
-
-# 如需处理视频文件
-apt-get install ffmpeg
-pip install ffmpeg-python pillow
-```
-
-2. 克隆仓库：
-```bash
-git clone https://github.com/soCzech/TransNetV2.git
-cd TransNetV2
-
-# 下载模型权重
-git lfs pull
-```
+- 支持自定义视频尺寸、字体、颜色等参数
+- 自动处理文本换行和排版
+- 平滑的滚动效果
+- 支持添加背景音乐
+- 支持从文件读取文本内容
 
 ## 使用方法
 
-### HTTP API
+### 通过代码调用
 
-启动容器后，可以通过 HTTP API 进行视频场景检测：
+```python
+from app.services.roll_video.roll_video_service import RollVideoService
+
+# 创建服务实例
+service = RollVideoService()
+
+# 创建滚动视频
+result = service.create_roll_video(
+    text="要展示的文本内容",
+    output_path="output.mp4",
+    width=1080,                              # 视频宽度
+    height=1920,                             # 视频高度
+    font_path="/path/to/font.ttf",           # 可选，字体路径
+    font_size=40,                            # 字体大小
+    font_color=(255, 255, 255),              # 字体颜色 (RGB)
+    bg_color=(0, 0, 0),                      # 背景颜色 (RGB)
+    line_spacing=20,                         # 行间距
+    char_spacing=0,                          # 字符间距
+    fps=30,                                  # 视频帧率
+    scroll_speed=2,                          # 滚动速度(像素/帧)
+    audio_path="/path/to/audio.mp3"          # 可选，背景音乐路径
+)
+
+# 输出结果
+print(result)
+```
+
+### 通过命令行工具
 
 ```bash
-# 上传视频并进行场景检测
-curl -X POST \
-  -F "video=@/path/to/video.mp4" \
-  http://localhost:5000/detect_scenes
+# 使用文本字符串
+python -m app.services.roll_video.cli --text "要展示的文本内容" --output output.mp4
+
+# 使用文本文件
+python -m app.services.roll_video.cli --text path/to/text.txt --output output.mp4
+
+# 使用更多自定义参数
+python -m app.services.roll_video.cli \
+    --text "要展示的文本内容" \
+    --output output.mp4 \
+    --width 1080 \
+    --height 1920 \
+    --font-path /path/to/font.ttf \
+    --font-size 40 \
+    --font-color "255,255,255" \
+    --bg-color "0,0,0" \
+    --line-spacing 20 \
+    --char-spacing 0 \
+    --fps 30 \
+    --scroll-speed 2 \
+    --audio /path/to/audio.mp3
 ```
 
-返回结果示例：
-```json
-{
-  "status": "success",
-  "scenes": [
-    {"start": 0, "end": 120},
-    {"start": 121, "end": 350}
-  ],
-  "output_dir": "videos/outputs/video_name"
-}
-```
+## 参数说明
 
-### 命令行工具
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| text | str | 必填 | 要展示的文本内容 |
+| output_path | str | 必填 | 输出视频的路径 |
+| width | int | 1080 | 视频宽度 |
+| height | int | 1920 | 视频高度 |
+| font_path | str | 系统默认 | 字体文件路径 |
+| font_size | int | 40 | 字体大小 |
+| font_color | (r,g,b) | (255,255,255) | 字体颜色 |
+| bg_color | (r,g,b) | (0,0,0) | 背景颜色 |
+| line_spacing | int | 20 | 行间距 |
+| char_spacing | int | 0 | 字符间距 |
+| fps | int | 30 | 视频帧率 |
+| scroll_speed | int | 2 | 滚动速度(像素/帧) |
+| audio_path | str | None | 背景音乐路径 |
 
-您可以使用 `scene_detection.py` 脚本直接处理视频：
+## 依赖安装
 
 ```bash
-python scene_detection.py \
-  --video /path/to/video.mp4 \
-  --output /path/to/output/dir \
-  --batch-size 32
+pip install pillow moviepy numpy
 ```
 
-### PyTorch 版本
+## 注意事项
 
-如果您需要 PyTorch 版本，请查看 [_inference-pytorch_ 文件夹](https://github.com/soCzech/TransNetV2/tree/master/inference-pytorch) 及其说明文档。
+- 滚动速度越大，视频时长越短
+- 文本内容较多时，可能需要较长的处理时间
+- 如果使用中文字体，请确保指定了正确的字体文件路径
 
-##  复现研究
+参数：
+    文字：最多5000字
+    视频宽：450 px
+    视频高：700 px
+    滚动速度：1
+    字体：PingFang
+    字号：16 px
+    字体颜色：#000000
+    字间距：1
+    行间距：1.2
+    视频背景颜色：#FFFFFF
 
-> 注意：训练数据集的大小为数十 GB，导出后可达数百 GB。
->
-> **如果您只需要使用模型进行预测，建议使用上述 Docker 部署或命令行工具。**
 
-要复现我们的研究工作，需要按以下步骤进行（在 [_training_ 文件夹](https://github.com/soCzech/TransNetV2/tree/master/training) 中）：
 
-1. 下载数据集：
-   - RAI 和 BBC Planet Earth 测试数据集 [(链接)](https://aimagelab.ing.unimore.it/imagelab/researchActivity.asp?idActivity=19)
-   - ClipShots 训练/测试数据集 [(链接)](https://github.com/Tangshitao/ClipShots)
-   - IACC.3 数据集（可选）
 
-2. 数据准备：
-   - 运行 `consolidate_datasets.py` 统一数据集格式
-   - 从 ClipShotsTrain 分出验证数据集
-   - 运行 `create_dataset.py` 创建数据集
-
-3. 训练与评估：
-   - 运行 `training.py ../configs/transnetv2.gin` 训练模型
-   - 运行 `evaluate.py /path/to/run_log_dir epoch_no /path/to/test_dataset` 评估模型
-
-## 常见问题
-
-1. **GPU 相关问题**
-   - 确保已正确安装 NVIDIA 驱动和 CUDA
-   - Docker 部署时确保添加 `--gpus all` 参数
-
-2. **内存不足**
-   - 调整 batch size 大小
-   - 使用较小的输入视频分辨率
-
-3. **模型权重下载**
-   - 确保已安装 git-lfs
-   - 运行 `git lfs pull` 下载权重文件
-
-## 引用
-
-如果您觉得本工作有用，请引用我们的论文 ;)
-
-- 本论文：[TransNet V2: 用于快速镜头转场检测的高效深度网络架构](https://arxiv.org/abs/2008.04838)
-    ```
-    @article{soucek2020transnetv2,
-        title={TransNet V2: An effective deep network architecture for fast shot transition detection},
-        author={Sou{\v{c}}ek, Tom{\a{s}} and Loko{\v{c}}, Jakub},
-        year={2020},
-        journal={arXiv preprint arXiv:2008.04838},
-    }
-    ```
-
-- 旧版本的 ACM Multimedia 论文：[视频中已知项搜索的有效框架](https://dl.acm.org/doi/abs/10.1145/3343031.3351046)
-
-- 旧版本论文：[TransNet: 用于快速检测常见镜头转场的深度网络](https://arxiv.org/abs/1906.03363)

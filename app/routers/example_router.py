@@ -6,9 +6,9 @@ from datetime import datetime
 
 from models.response import success_response, error_response, StatusCode, StatusMessage
 from models.request import PaginationParams, CreateVideoTaskRequest
-# from services.roll_video.models.roll_video_task import RollVideoTaskCreate
-from services.mysql.roll_video_task_db import RollVideoTaskDB
-from tasks.roll_video_tasks import process_video_task
+from models.roll_video_task import RollVideoTaskCreate
+from models.roll_video_task_db import RollVideoTaskDB
+#from tasks.roll_video_tasks import process_video_task
 from utils.logger import Logger
 
 # 创建路由器
