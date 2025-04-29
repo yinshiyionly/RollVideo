@@ -1,8 +1,9 @@
 pillow>=9.0.0
 moviepy>=1.0.3
-numpy==2.2.2
+numpy>=1.20.0,<=2.2.2
 tqdm>=4.60.0
 fastapi>=0.95.0
 uvicorn>=0.15.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
+concurrent-futures-extra>=1.0.0
