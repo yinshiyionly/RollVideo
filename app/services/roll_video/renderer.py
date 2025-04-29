@@ -337,17 +337,6 @@ class VideoRenderer:
         else:
             ffmpeg_pix_fmt = "rgb24"
             output_path = os.path.splitext(output_path)[0] + ".mp4"
-            # GPU 参数: 优先尝试H.265/HEVC (如果支持)，性能比H.264更好
-            hevc_gpu_params = [
-                "-c:v", "hevc_nvenc", # 尝试使用HEVC/H.265 GPU加速
-                "-preset", "p3",      # 中性能预设
-                "-rc:v", "vbr",       # 变速率控制
-                "-cq:v", "24",        # 对于HEVC，质量参数略有不同
-                "-b:v", "0",          # 让CQ控制比特率
-                "-pix_fmt", "yuv420p",
-                "-tag:v", "hvc1",     # 添加兼容标签
-                "-movflags", "+faststart"
-            ]
             
             # GPU H.264参数
             gpu_params = [
@@ -360,14 +349,7 @@ class VideoRenderer:
                 "-movflags", "+faststart"
             ]
             
-            # 选择最合适的GPU编码器
-            # 如果首选是h264_nvenc，尝试先用hevc_nvenc
-            if preferred_codec == "h264_nvenc":
-                video_codec_and_output_params = hevc_gpu_params
-                gpu_fallback_params = gpu_params
-            else:
-                video_codec_and_output_params = gpu_params
-                gpu_fallback_params = hevc_gpu_params
+            video_codec_and_output_params = gpu_params
             
             # CPU 参数：libx264，针对速度做更多优化
             cpu_fallback_codec_and_output_params = [
@@ -379,9 +361,8 @@ class VideoRenderer:
                 "-movflags", "+faststart"
             ]
             logger.info(f"设置ffmpeg(不透明): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
-            logger.info(f"  首选GPU参数: {' '.join(video_codec_and_output_params)}")
-            logger.info(f"  备选GPU参数: {' '.join(gpu_fallback_params)}")
-            logger.info(f"  回退CPU参数: {' '.join(cpu_fallback_codec_and_output_params)}")
+            logger.info(f"  GPU参数: {' '.join(video_codec_and_output_params)}")
+            logger.info(f"  CPU回退参数: {' '.join(cpu_fallback_codec_and_output_params)}")
             
             # 准备背景色 (RGB)
             final_bg_color_rgb = (0, 0, 0)
@@ -406,6 +387,13 @@ class VideoRenderer:
         def run_ffmpeg_with_pipe(current_codec_params: List[str], is_gpu_attempt: bool) -> bool:
             ffmpeg_cmd = self._get_ffmpeg_command(output_path, ffmpeg_pix_fmt, current_codec_params, audio_path)
             logger.info(f"执行ffmpeg命令: {' '.join(ffmpeg_cmd)}")
+            
+            # 获取编码器名称
+            try: 
+                codec_idx = current_codec_params.index("-c:v") + 1
+                codec_name = current_codec_params[codec_idx] if codec_idx < len(current_codec_params) else "unknown"
+            except (ValueError, IndexError): 
+                codec_name = "unknown"
             
             # 创建队列和事件标志
             frame_queue = queue.Queue(maxsize=self.frame_buffer_size)
@@ -473,10 +461,6 @@ class VideoRenderer:
                 
                 # 帧写入线程 - 消费者
                 def frame_consumer():
-                    codec_name = "unknown"
-                    try: codec_name = current_codec_params[current_codec_params.index("-c:v") + 1]
-                    except (ValueError, IndexError): pass
-                    
                     progress_bar = tqdm.tqdm(total=total_frames, desc=f"编码 ({codec_name}) ")
                     
                     try:
@@ -605,11 +589,6 @@ class VideoRenderer:
         
         # --- 执行编码 --- 
         success = run_ffmpeg_with_pipe(video_codec_and_output_params, is_gpu_attempt=(not transparency_required))
-        
-        # 如果 HEVC 失败，尝试 H.264 GPU编码
-        if not success and not transparency_required and preferred_codec == "h264_nvenc":
-            logger.info(f"HEVC GPU编码失败，尝试回退到H.264 GPU...")
-            success = run_ffmpeg_with_pipe(gpu_fallback_params, is_gpu_attempt=True)
         
         # 如果 GPU 失败，尝试 CPU 编码
         if not success and not transparency_required and cpu_fallback_codec_and_output_params:
