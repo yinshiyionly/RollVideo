@@ -528,6 +528,24 @@ def main():
                 "fps": 30,
                 "scroll_speed": 1,
             }
+        },
+        {
+            # 透明背景 -> 自动使用 CPU (prores_ks) -> 输出 .mov
+            "description": "透明背景黑字（自动CPU -> MOV）",
+            "params": {
+                "text": sample_text,  # 使用较少文字以加快测试
+                "width": 450,
+                "height": 700,
+                "font_path": "方正黑体简体.ttf",
+                "font_size": 24,
+                "font_color": (0, 0, 0),
+                "bg_color": (255, 255, 255, 0.5),  # 半透明背景
+                "line_spacing": int(24 * 1.5),
+                "char_spacing": 5,
+                "fps": 30,
+                "scroll_speed": 2,  # 较快的滚动速度
+                "worker_threads": 4  # 指定工作线程数
+            }
         }
     ]
 
