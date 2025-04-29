@@ -3,6 +3,9 @@ FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 # 设置工作目录
 WORKDIR /roll-video
 
+# 在apt-get install之前设置非交互式环境
+ENV DEBIAN_FRONTEND=noninteractive
+
 # 1.1 修改镜像源
 RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' /etc/apt/sources.list \
     # 1.2 安装系统依赖
