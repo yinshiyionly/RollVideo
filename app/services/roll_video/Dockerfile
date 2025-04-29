@@ -88,11 +88,12 @@ RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     # 1.5 安装cuDNN
-    && wget -O /tmp/cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz \
-    && tar -xf /tmp/cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz \
-    && cp -r /tmp/cudnn-linux-x86_64-8.9.4.25_cuda12-archive/lib/* /usr/local/cuda/lib64/ \
-    && cp -r /tmp/cudnn-linux-x86_64-8.9.4.25_cuda12-archive/include/* /usr/local/cuda/include/ \
-    && rm -rf /tmp/cudnn* \
+    && wget -O /tmp/cudnn.tar.xz https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz \
+    && mkdir -p /tmp/cudnn \
+    && tar -xf /tmp/cudnn.tar.xz -C /tmp/cudnn --strip-components=1 \
+    && cp -P /tmp/cudnn/lib/* /usr/local/cuda/lib64/ \
+    && cp -P /tmp/cudnn/include/* /usr/local/cuda/include/ \
+    && rm -rf /tmp/cudnn /tmp/cudnn.tar.xz \
     && ldconfig
 
 # 2. 安装 nv-codec-headers
