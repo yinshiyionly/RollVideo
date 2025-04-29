@@ -98,7 +98,7 @@ class RollVideoTaskDB:
                 source=task.source,
                 task_state=TaskState.PENDING,
                 payload=task.payload,
-                status=TaskStatus.NORMAL
+                status=TaskStatus.NORMAL.value
             )
             
             # 添加到会话

@@ -131,4 +131,4 @@ class ResponseMiddleware(BaseHTTPMiddleware):
             500: StatusCode.SERVER_ERROR,
             503: StatusCode.SERVICE_UNAVAILABLE
         }
-        return code_map.get(http_status, StatusCode.SERVER_ERROR) 
+        return code_map.get(http_status, StatusCode.SERVER_ERROR)

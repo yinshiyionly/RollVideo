@@ -1,35 +1,22 @@
 from celery import Celery
-from app.config import settings
 
-class TaskRouter:
-    def route_for_task(self, task_name, args=None, kwargs=None):
-        if task_name == 'app.tasks.process_video':
-            # 尝试从 kwargs 中获取 uid
-            if kwargs and 'uid' in kwargs:
-                uid = kwargs['uid']
-            # 如果在 kwargs 中找不到，尝试从 args 中获取
-            elif args and len(args) > 2:
-                uid = args[2]
-            else:
-                # 如果都找不到，使用默认队列
-                return {'queue': 'person'}
-            
-            # 根据 uid 决定队列
-            return {
-                'queue': 'batch' if uid == '0' else 'person'
-            }
-        return None
+
+
+REDIS_HOST="127.0.0.1"
+REDIS_PORT=6379
+REDIS_PASSWORD="GTO4mjZQXZkWYgspMWHHgla0Lf5yNew8zlgRyq"
 
 # 创建Celery实例
 celery_app = Celery(
-    "media_symphony",
-    broker=f"redis://:{settings.REDIS_PASSWORD}@{settings.REDIS_HOST}:{settings.REDIS_PORT}/0",
-    backend=f"redis://:{settings.REDIS_PASSWORD}@{settings.REDIS_HOST}:{settings.REDIS_PORT}/1",
+    "roll-video",
+    broker=f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0",
+    backend=f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/1",
     broker_transport_options={
         'visibility_timeout': 3600,
         'socket_timeout': 30,
         'socket_connect_timeout': 30,
-    }
+    },
+    include=['app.tasks.roll_video_tasks']  # 显式包含任务模块
 )
 
 # 配置Celery
@@ -46,20 +33,6 @@ celery_app.conf.update(
         }
     },
     redis_backend_health_check_interval = 5,
-    
-    # 队列配置
-    task_default_queue="person",  # 默认队列改为 person
-    task_queues={
-        'batch': {
-            'exchange': 'batch',
-            'routing_key': 'batch'
-        },
-        'person': {
-            'exchange': 'person',
-            'routing_key': 'person'
-        }
-    },
-    task_routes=(TaskRouter(),),  # 使用自定义路由类
     
     # 任务执行设置
     result_expires=18000,
@@ -83,8 +56,15 @@ celery_app.conf.update(
     # 明确指定 broker 类型
     broker_transport='redis',
     result_backend_transport='redis',
+    
+    # 任务名称设置 - 确保与使用的路径一致
+    task_create_missing_queues=True,
+    task_default_queue="celery",
+    task_default_exchange="celery",
+    task_default_routing_key="celery",
 )
 
-# 自动发现任务
-celery_app.autodiscover_tasks(['app'])
-__all__ = ['celery_app', 'broker_url', 'result_backend']
+# 自动发现任务 - 这里不再使用
+# celery_app.autodiscover_tasks(['app'])
+
+__all__ = ['celery_app']

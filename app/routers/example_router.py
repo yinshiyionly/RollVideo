@@ -3,12 +3,12 @@ from typing import List, Optional, Dict, Any
 from uuid import uuid4
 import json
 from datetime import datetime
+from pydantic import BaseModel
 
 from models.response import success_response, error_response, StatusCode, StatusMessage
-from models.request import PaginationParams, CreateVideoTaskRequest
 from models.roll_video_task import RollVideoTaskCreate
 from models.roll_video_task_db import RollVideoTaskDB
-#from tasks.roll_video_tasks import process_video_task
+from tasks.roll_video_tasks import generate_roll_video_task
 from utils.logger import Logger
 
 # 创建路由器
@@ -17,14 +17,15 @@ router = APIRouter()
 # 初始化日志系统
 log = Logger()
 
+# 定义请求体模型
+class TaskCreateRequest(BaseModel):
+    text: str
+    source: str
+    uid: int
 
 # 创建任务
 @router.post("/task/create")
-async def create_task(
-    uid: int,
-    source: str,
-    video_url: str
-):
+async def create_task(request: TaskCreateRequest):
     """创建视频处理任务
     
     Args:
@@ -38,14 +39,17 @@ async def create_task(
     try:
         # 生成任务ID
         task_id = f"{uuid4()}"
-        
-        # 构建任务参数
+
+         # 构建任务参数
         task_data = {
             "task_id": task_id,
-            "uid": uid,
-            "source": source,
-            "payload": {"video_url": video_url}
+            "uid": request.uid,
+            "source": request.source,
+            "payload": {"text": request.text}
         }
+
+        # 记录参数
+        log.info(f"创建任务参数: {task_data}")
         
         # 创建任务对象
         task = RollVideoTaskCreate(**task_data)
@@ -61,7 +65,7 @@ async def create_task(
             )
             
         # 将任务加入处理队列
-        # process_video_task.delay(task_id)
+        generate_roll_video_task.delay(task_id)
         
         # 返回成功响应
         return success_response(
@@ -72,7 +76,7 @@ async def create_task(
     except Exception as e:
         log.error(f"创建任务失败: {str(e)}")
         return error_response(
-            code=StatusCode.SERVER_ERROR,
+            code=StatusCode.TASK_CREATION_FAILED,
             message=f"创建任务失败: {str(e)}"
         )
 

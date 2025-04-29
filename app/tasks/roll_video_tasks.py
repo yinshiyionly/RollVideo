@@ -1,16 +1,13 @@
-from celery import Celery
-from models.roll_video_task_db import RollVideoTaskDB
+from app.models.roll_video_task_db import RollVideoTaskDB
 from models.roll_video_task import TaskState
-from utils.logger import Logger
+from app.utils.logger import Logger
+from celery_app import celery_app
 
-# 初始化 Celery
-celery_app = Celery('roll_video_tasks')
-celery_app.config_from_object('app.config.celery_config')
+# 初始化日志
+log = Logger('roll-video-celery')
 
-log = Logger()
-
-@celery_app.task(bind=True)
-async def process_video_task(self, task_id: str):
+@celery_app.task(name='app.tasks.roll_video_tasks.generate_roll_video_task', bind=True)
+def generate_roll_video_task(self, task_id: str):
     """处理视频任务
     
     Args:

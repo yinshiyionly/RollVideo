@@ -6,7 +6,7 @@ from utils.logger import Logger
 from typing import Any
 
 # 导入自定义中间件
-from models.response import error_response, StatusCode
+from models.response import error_response, StatusCode, StatusMessage
 from middlewares.auth import AuthMiddleware
 
 # 导入路由
@@ -50,8 +50,7 @@ app.add_middleware(
 # 注册示例路由
 app.include_router(
     example_router.router,
-    prefix=f"{settings.API_V1_STR}/example",
-    tags=["示例API"]
+    prefix=f"{settings.API_V1_STR}",
 )
 
 # HTTP 异常处理
@@ -77,6 +76,15 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             message=f"HTTP异常: {str(e)}",
             status_code=StatusCode.SERVER_ERROR,
         )
+    
+# 覆盖 404 处理器
+@app.exception_handler(404)
+async def not_found_exception_handler(request: Request, exc: HTTPException):
+    return error_response(
+        code=StatusCode.NOT_FOUND,
+        message=StatusMessage.NOT_FOUND,
+        status_code=StatusCode.NOT_FOUND,
+    )
 
 # 全局异常处理
 @app.exception_handler(Exception)
