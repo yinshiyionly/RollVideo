@@ -8,7 +8,7 @@
 import os
 import logging
 import time
-from app.services.roll_video.roll_video_service import RollVideoService
+from roll_video_service import RollVideoService
 
 # 配置日志
 logging.basicConfig(
@@ -20,8 +20,10 @@ logger = logging.getLogger(__name__)
 
 def main():
     # 示例文本
-    sample_text = """滚动视频示例文本
-感谢使用滚动视频服务!"""  # 更短的文本用于测试
+    sample_text = """
+    滚动视频示例文本
+感谢使用滚动视频服务!
+"""
 
     # 路径
     output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
