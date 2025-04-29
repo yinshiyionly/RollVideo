@@ -1,115 +1,143 @@
 # 滚动视频制作服务
 
-## 需求：
-   我想根据【参数】制作一个滚动视频。
-整体方案：
-   把文字排版成一张超长的图片，然后在固定尺寸的窗口（宽x高）里，通过控制这张图片向上移动，录制成视频。例如用Pillow生成文字画布，MoviePy做滚动。或者你有更好的方案也可以使用。先帮我实现CPU的效果。
-    1、根据视频的宽度、字体、字体颜色、字号、字间距、行间距  计算每一行的文字与换行
-    2、把每一行的文字渲染到指定宽度的图片上，图片要根据 视频背景颜色设置好
-    3、根据滚动速度和视频高度，控制图片向上滚动
-    4、把整个图片滚动完成后，渲染视频结束
-
 ## 实现方案
 
 该服务使用Python实现，主要依赖以下库：
-- PIL (Pillow): 用于文字渲染和图片处理
-- MoviePy: 用于视频生成和处理
-- NumPy: 用于数据处理
+- **Pillow (PIL)**: 用于文字渲染和图片处理。
+- **NumPy**: **用于高效处理图像帧数据**。
+- **FFmpeg**: 作为核心的视频编码引擎，通过`subprocess`直接调用。
+- **concurrent.futures**: 支持多线程并行处理帧生成。
+
+服务通过 Pillow 将文本渲染成包含透明通道（RGBA）的长图片，然后在内存中**并行生成视频帧**，通过**生产者-消费者模式和管道 (Pipe)** 直接将原始像素数据流式传输给 FFmpeg 进程进行编码，避免了磁盘I/O瓶颈。
 
 ## 功能特点
 
-- 支持自定义视频尺寸、字体、颜色等参数
-- 自动处理文本换行和排版
-- 平滑的滚动效果
-- 支持添加背景音乐
-- 支持从文件读取文本内容
+- 支持自定义视频尺寸、字体、颜色（包括透明度）等参数。
+- **自动处理文本换行**和排版。
+- **平滑的滚动**效果。
+- **自动优化编码策略**：根据背景是否透明，自动选择最优的编码器和输出格式（透明使用CPU+ProRes+MOV，不透明使用GPU加速的H.264+MP4）。
+- **双级编码策略**：对于不透明视频，优先尝试使用Nvidia GPU的H.264编码器(NVENC)，失败则回退到CPU编码。
+- **并行处理优化**：使用多线程并行生成视频帧，大幅提升处理速度。
+- **生产者-消费者模式**：一边生成帧，一边发送给ffmpeg，充分利用CPU多核心。
+- 支持添加背景音乐。
+- 支持从文件读取文本内容。
 
-## 使用方法
+## 技术细节：多重优化机制
 
-### 通过代码调用
+服务采用了多重优化机制来提高编码速度：
 
-```python
-from app.services.roll_video.roll_video_service import RollVideoService
+1. **并行帧生成**：
+   - 使用`ThreadPoolExecutor`并行生成视频帧
+   - 可配置的工作线程数（默认根据CPU核心数自动调整）
+   - 线程数上限为8以避免过度竞争资源
 
-# 创建服务实例
-service = RollVideoService()
+2. **生产者-消费者架构**：
+   - 主线程（生产者）负责生成帧并放入缓冲区
+   - 消费者线程负责从缓冲区取出帧并写入ffmpeg管道
+   - 可配置的帧缓冲区大小（默认为帧率的80%）
 
-# 创建滚动视频
-result = service.create_roll_video(
-    text="要展示的文本内容",
-    output_path="output.mp4",
-    width=1080,                              # 视频宽度
-    height=1920,                             # 视频高度
-    font_path="/path/to/font.ttf",           # 可选，字体路径
-    font_size=40,                            # 字体大小
-    font_color=(255, 255, 255),              # 字体颜色 (RGB)
-    bg_color=(0, 0, 0),                      # 背景颜色 (RGB)
-    line_spacing=20,                         # 行间距
-    char_spacing=0,                          # 字符间距
-    fps=30,                                  # 视频帧率
-    scroll_speed=2,                          # 滚动速度(像素/帧)
-    audio_path="/path/to/audio.mp3"          # 可选，背景音乐路径
-)
+3. **优化的编码器选择**：
+   - 透明视频：`prores_ks` Profile 4444（保持高质量透明通道）
+   - 不透明视频分两级：
+     1. 优先尝试：`h264_nvenc`（H.264 GPU加速）
+     2. 回退选择：`libx264`（CPU编码，使用"fast"预设提升速度）
 
-# 输出结果
-print(result)
-```
+4. **内存优化**：
+   - 预计算所有帧的滚动位置
+   - 优化Alpha通道混合计算，使用矢量化操作
+   - 减少不必要的数据复制操作
 
-### 通过命令行工具
+## 技术细节：编码策略
 
-```bash
-# 使用文本字符串
-python -m app.services.roll_video.cli --text "要展示的文本内容" --output output.mp4
+为了平衡质量、性能和文件格式兼容性，服务根据背景颜色 (`bg_color`) 的透明度自动选择不同的编码策略：
 
-# 使用文本文件
-python -m app.services.roll_video.cli --text path/to/text.txt --output output.mp4
+1.  **需要透明背景** (Alpha < 1.0 或 < 255):
+    *   **目标**: 保证高质量的透明通道。
+    *   **编码器**: `prores_ks` (Profile 4444)。这是一个高质量的专业编码器，良好支持Alpha通道。
+    *   **处理方式**: **CPU** 进行编码 (ProRes目前没有广泛可用的GPU加速方案)。
+    *   **输出格式**: `.mov`。这是支持ProRes编码和透明通道的常用容器。
+    *   **性能**: 由于使用CPU和高质量编码，速度可能相对较慢，但质量最好。
+    *   **FFmpeg 命令示例** (假设无音频, 宽450, 高700, 帧率30):
+        ```bash
+        ffmpeg -y \
+          -f rawvideo -vcodec rawvideo -s 450x700 -pix_fmt rgba -r 30 -i - \
+          -c:v prores_ks -profile:v 4 -pix_fmt yuva444p10le -alpha_bits 16 -vendor ap10 \
+          -map 0:v:0 \
+          output.mov
+        ```
+        *   `-f rawvideo ... -i -`: 从标准输入读取原始 RGBA 像素数据。
+        *   `-c:v prores_ks ...`: 使用 ProRes 4444 编码器进行 CPU 编码，保留 Alpha 通道。
+        *   `-map 0:v:0`: 仅映射视频流。
 
-# 使用更多自定义参数
-python -m app.services.roll_video.cli \
-    --text "要展示的文本内容" \
-    --output output.mp4 \
-    --width 1080 \
-    --height 1920 \
-    --font-path /path/to/font.ttf \
-    --font-size 40 \
-    --font-color "255,255,255" \
-    --bg-color "0,0,0" \
-    --line-spacing 20 \
-    --char-spacing 0 \
-    --fps 30 \
-    --scroll-speed 2 \
-    --audio /path/to/audio.mp3
-```
+2.  **不需要透明背景** (Alpha = 1.0 或 255):
+    *   **目标**: 优先考虑编码速度，生成适合网络播放的格式。
+    *   **编码器 (优先选择)**: `h264_nvenc`。使用 **Nvidia GPU** 进行H.264硬件加速编码，速度较快。
+    *   **编码器 (回退选择)**: `libx264`。如果 GPU 尝试失败，则自动回退到使用 **CPU** 进行编码，使用"fast"预设提高速度。
+    *   **输出格式**: `.mp4`。使用 `-movflags +faststart` 参数优化，适合网络流式播放。
+    *   **性能**: 双级回退保证在各种环境下都能获得最佳性能。
+    *   **FFmpeg 命令示例 (H.264 GPU)** (假设无音频, 宽450, 高700, 帧率30):
+        ```bash
+        # 尝试 H.264 GPU
+        ffmpeg -y \
+          -f rawvideo -vcodec rawvideo -s 450x700 -pix_fmt rgb24 -r 30 -i - \
+          -c:v h264_nvenc -preset p3 -rc:v vbr -cq:v 21 -b:v 0 -pix_fmt yuv420p -movflags +faststart \
+          -map 0:v:0 \
+          output.mp4
+        ```
+    *   **FFmpeg 命令示例 (CPU 回退)** (GPU失败后自动执行):
+        ```bash
+        # CPU 回退
+        ffmpeg -y \
+          -f rawvideo -vcodec rawvideo -s 450x700 -pix_fmt rgb24 -r 30 -i - \
+          -c:v libx264 -crf 23 -preset fast -tune fastdecode -pix_fmt yuv420p -movflags +faststart \
+          -map 0:v:0 \
+          output.mp4
+        ```
+        *   `-preset fast`: 使用更快的预设而不是默认的`medium`。
+        *   `-tune fastdecode`: 优化解码速度，减少解码资源需求。
+
+**核心优化**: 通过并行帧生成和生产者-消费者模式，结合管道直接传输，实现了最大化的渲染和编码效率。
 
 ## 参数说明
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | text | str | 必填 | 要展示的文本内容 |
-| output_path | str | 必填 | 输出视频的路径 |
+| output_path | str | 必填 | **期望的**输出视频路径 (最终扩展名会根据透明度自动调整为`.mov`或`.mp4`) |
 | width | int | 1080 | 视频宽度 |
 | height | int | 1920 | 视频高度 |
 | font_path | str | 系统默认 | 字体文件路径 |
 | font_size | int | 40 | 字体大小 |
 | font_color | (r,g,b) | (255,255,255) | 字体颜色 |
-| bg_color | (r,g,b) | (0,0,0) | 背景颜色 |
+| bg_color | (r,g,b) 或 (r,g,b,a) | (0,0,0,255) | 背景颜色 (元组)。Alpha值(0-255或0.0-1.0)决定是否透明。省略alpha或alpha=255/1.0表示不透明。 |
 | line_spacing | int | 20 | 行间距 |
 | char_spacing | int | 0 | 字符间距 |
 | fps | int | 30 | 视频帧率 |
 | scroll_speed | int | 2 | 滚动速度(像素/帧) |
 | audio_path | str | None | 背景音乐路径 |
+| worker_threads | int | None | 用于帧处理的工作线程数 (默认为CPU核心数，最大8) |
+| frame_buffer_size | int | None | 帧缓冲区大小 (默认为fps的80%，最大24) |
 
 ## 依赖安装
 
 ```bash
-pip install pillow moviepy numpy
+# Python 库 (参考 requirements.txt)
+pip install pillow numpy tqdm concurrent-futures-extra
+
+# 核心依赖：FFmpeg
+# 需要安装 FFmpeg。为了使用GPU加速(可选)，
+# FFmpeg 需要编译时启用 NVENC 支持。
+# 检查是否支持: ffmpeg -encoders | grep nvenc
 ```
 
 ## 注意事项
 
-- 滚动速度越大，视频时长越短
-- 文本内容较多时，可能需要较长的处理时间
-- 如果使用中文字体，请确保指定了正确的字体文件路径
+- 滚动速度越大，视频时长越短。
+- 文本内容较多时处理速度已经过优化，但仍需考虑内容量。
+- 如果使用中文字体，请确保指定了正确的字体文件路径。
+- **GPU 加速依赖**: 若需使用GPU加速（仅限不透明视频），请确保：
+    - 安装了兼容的 Nvidia 显卡及最新驱动。
+    - 安装了支持 NVENC 的 FFmpeg 版本。
 
 参数：
     文字：最多5000字
