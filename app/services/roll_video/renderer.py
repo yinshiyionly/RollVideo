@@ -384,7 +384,9 @@ class VideoRenderer:
                                 except queue.Empty: break
                                 if line is None: break
                                 stderr_lines_on_error.append(line.decode(errors='ignore').strip())
-                            logger.error(f"ffmpeg stderr (写入时):\n{"\n".join(stderr_lines_on_error)}")
+                            # 修正：先 join 再放入 f-string
+                            stderr_content_on_error = "\n".join(stderr_lines_on_error)
+                            logger.error(f"ffmpeg stderr (写入时):\n{stderr_content_on_error}")
                             raise Exception(f"ffmpeg进程意外终止: {e}") from e
                 
                 logger.info("所有帧已写入管道，关闭stdin...")
@@ -412,8 +414,12 @@ class VideoRenderer:
                     if line is not None: stderr_lines.append(line.decode(errors='ignore').strip())
                 
                 # 记录输出
-                if stdout_lines: logger.info(f"ffmpeg stdout:\n{"\n".join(stdout_lines)}")
-                if stderr_lines: logger.info(f"ffmpeg stderr:\n{"\n".join(stderr_lines)}")
+                if stdout_lines: 
+                    stdout_content = "\n".join(stdout_lines)
+                    logger.info(f"ffmpeg stdout:\n{stdout_content}")
+                if stderr_lines: 
+                    stderr_content = "\n".join(stderr_lines)
+                    logger.info(f"ffmpeg stderr:\n{stderr_content}")
                 # --- 结束收集输出 --- 
                 
                 if return_code == 0:
@@ -435,7 +441,10 @@ class VideoRenderer:
                     except queue.Empty: break
                     if line is None: break
                     stderr_lines_on_except.append(line.decode(errors='ignore').strip())
-                if stderr_lines_on_except: logger.error(f"ffmpeg stderr (异常时):\n{"\n".join(stderr_lines_on_except)}")
+                # 修正：先 join 再放入 f-string
+                if stderr_lines_on_except: 
+                    stderr_content_on_except = "\n".join(stderr_lines_on_except)
+                    logger.error(f"ffmpeg stderr (异常时):\n{stderr_content_on_except}")
                 # 不返回 False，让异常传播
             finally: 
                 # 清理：确保进程终止和管道关闭
