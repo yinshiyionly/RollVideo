@@ -1,13 +1,16 @@
 import os
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from typing import Optional, Dict, Any
 
+from app.config import settings
+
 
 class Logger:
-    def __init__(self, app_name: str = "app"):
+    def __init__(self, app_name: str = None):
         self.logger = None
-        self.app_name = app_name
+        self.app_name = app_name or settings.APP_NAME
         self.setup_logger()
 
     def setup_logger(self):
@@ -17,32 +20,35 @@ class Logger:
         day = now.strftime("%d")
 
         # 创建日志目录
-        log_dir = os.path.join("log", year_month)
+        log_dir = os.path.join(settings.LOG_DIR, year_month)
         os.makedirs(log_dir, exist_ok=True)
 
         # 设置日志文件路径
-        log_file = os.path.join(log_dir, f"{day}.log")
+        log_file = os.path.join(log_dir, f"{settings.LOG_FILE_PREFIX}_{day}.log")
 
         # 创建logger
         self.logger = logging.getLogger(self.app_name)
-        self.logger.setLevel(logging.DEBUG)
+        
+        # 设置日志级别
+        log_level = getattr(logging, settings.LOG_LEVEL.upper())
+        self.logger.setLevel(log_level)
 
         # 清除现有的处理器
         if self.logger.handlers:
             self.logger.handlers.clear()
 
-        # 创建文件处理器
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
-        file_handler.setLevel(logging.DEBUG)
+        # 创建文件处理器 (使用RotatingFileHandler代替FileHandler)
+        file_handler = RotatingFileHandler(
+            log_file, 
+            maxBytes=settings.LOG_FILE_MAX_BYTES,
+            backupCount=settings.LOG_FILE_BACKUP_COUNT,
+            encoding="utf-8"
+        )
+        file_handler.setLevel(log_level)
 
         # 创建控制台处理器
         console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-
-        # 设置日志格式
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s - %(extra_data)s"
-        )
+        console_handler.setLevel(log_level)
 
         # 添加自定义过滤器来处理extra_data
         class ExtraDataFilter(logging.Filter):
@@ -52,6 +58,11 @@ class Logger:
                 return True
 
         self.logger.addFilter(ExtraDataFilter())
+
+        # 设置日志格式（在配置的格式基础上添加extra_data）
+        formatter = logging.Formatter(
+            settings.LOG_FORMAT + " - %(extra_data)s"
+        )
 
         file_handler.setFormatter(formatter)
         console_handler.setFormatter(formatter)

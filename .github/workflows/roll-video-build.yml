@@ -39,7 +39,7 @@ jobs:
           file: app/services/roll_video/Dockerfile
           push: true
           tags: |
-            catchoco/roll-video:latest
+            catchoco/roll-video:supervisor
           platforms: linux/amd64
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max

@@ -1,6 +1,5 @@
 from pydantic_settings import BaseSettings
-from typing import Optional, Set
-from pathlib import Path
+from typing import Set
 
 
 class Settings(BaseSettings):
@@ -12,33 +11,15 @@ class Settings(BaseSettings):
 
     # 基础配置
     APP_NAME: str  # 应用程序名称
+    APP_HOST: str # 应用主机
+    APP_PORT: int  # 应用端口
     API_V1_STR: str  # API版本前缀
     DEBUG: bool  # 调试模式开关
-    APP_PORT: int  # 应用端口
-    X_TOKEN: str = "" # 接口鉴权
-
-    # API服务端口配置
-    SCENE_DETECTION_API_PORT: int = 5000  # 场景分割服务端口
-    AUDIO_SEPARATION_API_PORT: int = 5001  # 音频分离服务端口
-    AUDIO_TRANSCRIPTION_API_PORT: int = 5002  # 语音转写服务端口
-
-    # API超时配置（单位：秒）
-    SCENE_DETECTION_TIMEOUT: int = 1800  # 场景分割超时时间
-    AUDIO_SEPARATION_TIMEOUT: int = 1800  # 音频分离超时时间
-    AUDIO_TRANSCRIPTION_TIMEOUT: int = 1800  # 语音转写超时时间
-
-    # 文件存储路径配置
-    DATA_DIR: str  # 数据根目录
-    UPLOAD_DIR: str  # 上传文件存储目录
-    PROCESSED_DIR: str  # 处理后文件存储目录
-
-    # 音频处理配置
-    MAX_AUDIO_SIZE: int  # 最大音频文件大小（字节）
-    ALLOWED_AUDIO_TYPES: Set[str]  # 允许的音频文件类型集合
+    X_TOKEN: str # 接口鉴权
 
     # 视频处理配置
-    MAX_VIDEO_SIZE: int  # 最大视频文件大小（字节）
-    ALLOWED_VIDEO_TYPES: Set[str]  # 允许的视频文件类型集合
+    VIDEO_TMP_DIR: str # 视频临时保存目录
+    VIDEO_DEFAULT_EXTENSION: str # 视频默认后缀
 
     # MySQL配置
     MYSQL_HOST: str  # MySQL主机地址

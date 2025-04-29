@@ -4,34 +4,10 @@ from typing import Union, Optional
 from pathlib import Path
 import tos
 from app.config import settings
+from app.utils.logger import Logger
 
 # 配置日志记录器
-logger = logging.getLogger("tos_client")
-logger.setLevel(getattr(logging, settings.LOG_LEVEL))
-
-# 创建文件处理器
-log_file = os.path.join(settings.LOG_DIR, f"{settings.LOG_FILE_PREFIX}_tos.log")
-os.makedirs(os.path.dirname(log_file), exist_ok=True)
-file_handler = logging.handlers.RotatingFileHandler(
-    log_file,
-    maxBytes=settings.LOG_FILE_MAX_BYTES,
-    backupCount=settings.LOG_FILE_BACKUP_COUNT,
-    encoding="utf-8",
-)
-
-# 创建控制台处理器
-console_handler = logging.StreamHandler()
-
-# 设置日志格式
-formatter = logging.Formatter(settings.LOG_FORMAT)
-file_handler.setFormatter(formatter)
-console_handler.setFormatter(formatter)
-
-# 添加处理器
-if not logger.handlers:
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-
+logger = Logger('tos-client')
 
 class TOSClient:
     def __init__(self):
