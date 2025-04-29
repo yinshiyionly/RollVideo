@@ -6,7 +6,7 @@ WORKDIR /roll-video
 # 1.1 修改镜像源
 RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' /etc/apt/sources.list \
     # 1.2 安装系统依赖
-    && apt-get update 
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
     build-essential \
     python3-dev \
