@@ -4,7 +4,7 @@
 
 该服务使用Python实现，主要依赖以下库：
 - **Pillow (PIL)**: 用于文字渲染和图片处理。
-- **NumPy**: 用于高效处理图像帧数据。
+- **NumPy**: **用于高效处理图像帧数据**。
 - **FFmpeg**: 作为核心的视频编码引擎，通过`subprocess`直接调用。
 
 服务通过 Pillow 将文本渲染成包含透明通道（RGBA）的长图片，然后在内存中逐帧生成视频画面，通过**管道 (Pipe)** 直接将原始像素数据流式传输给 FFmpeg 进程进行编码，避免了磁盘I/O瓶颈。
@@ -29,6 +29,17 @@
     *   **处理方式**: **CPU** 进行编码 (ProRes目前没有广泛可用的GPU加速方案)。
     *   **输出格式**: `.mov`。这是支持ProRes编码和透明通道的常用容器。
     *   **性能**: 由于使用CPU和高质量编码，速度可能相对较慢，但质量最好。
+    *   **FFmpeg 命令示例** (假设无音频, 宽450, 高700, 帧率30):
+        ```bash
+        ffmpeg -y \
+          -f rawvideo -vcodec rawvideo -s 450x700 -pix_fmt rgba -r 30 -i - \
+          -c:v prores_ks -profile:v 4 -pix_fmt yuva444p10le -alpha_bits 16 -vendor ap10 \
+          -map 0:v:0 \
+          output.mov
+        ```
+        *   `-f rawvideo ... -i -`: 从标准输入读取原始 RGBA 像素数据。
+        *   `-c:v prores_ks ...`: 使用 ProRes 4444 编码器进行 CPU 编码，保留 Alpha 通道。
+        *   `-map 0:v:0`: 仅映射视频流。
 
 2.  **不需要透明背景** (Alpha = 1.0 或 255):
     *   **目标**: 优先考虑编码速度，生成适合网络播放的格式。
@@ -36,6 +47,32 @@
     *   **编码器 (备选)**: `libx264`。如果 GPU 尝试失败（例如系统无兼容GPU、驱动问题、ffmpeg未启用NVENC），则自动回退到使用 **CPU** 进行编码。
     *   **输出格式**: `.mp4`。使用 `-movflags +faststart` 参数优化，适合网络流式播放。
     *   **性能**: GPU可用时速度最快；若回退到CPU，速度依然受益于直接管道传输，优于旧方案。
+    *   **FFmpeg 命令示例 (GPU 优先)** (假设无音频, 宽450, 高700, 帧率30):
+        ```bash
+        # 尝试 GPU
+        ffmpeg -y \
+          -f rawvideo -vcodec rawvideo -s 450x700 -pix_fmt rgb24 -r 30 -i - \
+          -c:v h264_nvenc -preset p3 -rc:v vbr -cq:v 21 -b:v 0 -movflags +faststart \
+          -map 0:v:0 \
+          output.mp4
+        ```
+        *   `-f rawvideo ... -i -`: 从标准输入读取原始 RGB24 像素数据。
+        *   `-c:v h264_nvenc ...`: 尝试使用 Nvidia H.264 GPU 编码器，`p3` 预设，VBR 质量 21。
+        *   `-movflags +faststart`: 优化 MP4 文件结构以利于流式播放。
+        *   `-map 0:v:0`: 仅映射视频流。
+    *   **FFmpeg 命令示例 (CPU 回退)** (GPU失败后自动执行):
+        ```bash
+        # CPU 回退
+        ffmpeg -y \
+          -f rawvideo -vcodec rawvideo -s 450x700 -pix_fmt rgb24 -r 30 -i - \
+          -c:v libx264 -crf 21 -preset medium -pix_fmt yuv420p -movflags +faststart \
+          -map 0:v:0 \
+          output.mp4
+        ```
+        *   `-c:v libx264 ...`: 使用 H.264 CPU 编码器，CRF 质量 21，`medium` 预设。
+        *   `-pix_fmt yuv420p`: 设置与 MP4 兼容的像素格式。
+
+**核心优化**: 无论是哪种路径，视频帧数据都是在内存中生成后，通过**管道直接传输给 FFmpeg**，避免了因读写大量临时文件而造成的严重性能瓶颈。
 
 ## 参数说明
 
