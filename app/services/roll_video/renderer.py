@@ -198,8 +198,8 @@ class VideoRenderer:
         height: int,
         fps: int = 30,
         scroll_speed: int = 2,  # 每帧滚动的像素数
-        frame_buffer_size: int = 18, # 帧缓冲区大小 (调整默认值)
-        worker_threads: int = 6,  # 工作线程数 (调整默认值)
+        frame_buffer_size: int = 24, # 帧缓冲区大小 (恢复默认值)
+        worker_threads: int = 4,  # 工作线程数 (恢复默认值)
     ):
         """
         初始化视频渲染器
@@ -220,12 +220,11 @@ class VideoRenderer:
         self.height = height
         self.fps = fps
         self.scroll_speed = scroll_speed
-        # 限制缓冲区大小，基于fps或线程数*3，取较小者，确保不小于4
-        safe_buffer = max(4, min(frame_buffer_size, int(fps * 0.8), worker_threads * 3))
-        self.frame_buffer_size = safe_buffer
+        # 恢复之前的缓冲区大小限制逻辑
+        self.frame_buffer_size = max(4, min(frame_buffer_size, int(fps * 0.8))) # 限制缓冲区大小，确保不小于4
         # 限制线程数在1和CPU核心数之间
         self.worker_threads = max(1, min(worker_threads, os.cpu_count() or 4))
-        logger.info(f"VideoRenderer initialized with: worker_threads={self.worker_threads}, frame_buffer_size={self.frame_buffer_size}")
+        logger.info(f"VideoRenderer initialized with: worker_threads={self.worker_threads}, frame_buffer_size={self.frame_buffer_size}") # 更新日志信息以反映当前设置
     
     def _get_ffmpeg_command(
         self,
@@ -269,7 +268,7 @@ class VideoRenderer:
 
     def _generate_frame(self, frame_data):
         """
-        生成单个帧 - 这个函数会被并行调用 (优化内存使用)
+        生成单个帧 - 这个函数会被并行调用 (恢复 float32 Alpha 混合)
         """
         frame_idx, img_array, img_height, img_width, img_start_y, transparency_required, background_frame_rgb = frame_data
         
@@ -298,7 +297,7 @@ class VideoRenderer:
                 target_area[:copy_h, :copy_w] = source_section[:copy_h, :copy_w]
                 output_frame_data = frame_rgba.tobytes()
             else:
-                # For opaque video, blend onto the background frame (use integer math)
+                # For opaque video, blend onto the background frame (use float32 math - reverted)
                 frame_rgb = background_frame_rgb.copy() # Start with a copy of the background
                 target_area = frame_rgb[frame_h_slice, frame_w_slice] # RGB slice from background copy
                 
@@ -310,20 +309,16 @@ class VideoRenderer:
                 target_crop = target_area[:copy_h, :copy_w]
 
                 if source_crop.size > 0 and target_crop.size > 0:
-                    # Extract alpha channel (uint8) and RGB channels (uint8)
-                    alpha_byte = source_crop[:, :, 3:4] # Shape (copy_h, copy_w, 1)
-                    source_rgb_byte = source_crop[:, :, :3] # Shape (copy_h, copy_w, 3)
+                    # Extract alpha channel and convert to float (0.0 to 1.0)
+                    alpha_float = source_crop[:, :, 3:4].astype(np.float32) / 255.0 # Shape (copy_h, copy_w, 1)
+                    source_rgb_float = source_crop[:, :, :3].astype(np.float32) # Shape (copy_h, copy_w, 3)
+                    target_rgb_float = target_crop.astype(np.float32) # Shape (copy_h, copy_w, 3)
 
-                    # Perform integer alpha blending using uint16 to prevent overflow
-                    alpha_int = alpha_byte.astype(np.uint16) # Shape (copy_h, copy_w, 1)
-                    source_rgb_int = source_rgb_byte.astype(np.uint16) # Shape (copy_h, copy_w, 3)
-                    target_rgb_int = target_crop.astype(np.uint16) # Shape (copy_h, copy_w, 3)
-
-                    # Blend: (src * alpha + dst * (255 - alpha)) / 255
-                    blended_int = (source_rgb_int * alpha_int + target_rgb_int * (255 - alpha_int)) // 255
+                    # Blend using float32: src * alpha + dst * (1.0 - alpha)
+                    blended_float = source_rgb_float * alpha_float + target_rgb_float * (1.0 - alpha_float)
                     
                     # Copy the blended result (converted back to uint8) into the target area slice
-                    np.copyto(target_crop, blended_int.astype(np.uint8))
+                    np.copyto(target_crop, blended_float.astype(np.uint8))
 
                 output_frame_data = frame_rgb.tobytes()
         
