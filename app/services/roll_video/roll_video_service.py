@@ -163,6 +163,8 @@ class RollVideoService:
         fps: int = 30,
         scroll_speed: int = 2,
         audio_path: Optional[str] = None,
+        scale_factor: float = 1.0,   # 新增：缩放因子，小于1时降低分辨率
+        frame_skip: int = 1          # 新增：跳帧率，大于1时减少渲染帧
     ) -> Dict[str, Union[str, bool]]:
         """
         创建滚动视频，自动根据透明度选择CPU/GPU和格式。
@@ -183,6 +185,8 @@ class RollVideoService:
             fps: 视频帧率
             scroll_speed: 滚动速度(像素/帧)
             audio_path: 可选的音频文件路径
+            scale_factor: 缩放因子(0.5-1.0)，小于1时降低处理分辨率以提高速度
+            frame_skip: 跳帧率，大于1时减少渲染帧以提高速度
             
         Returns:
             包含处理结果的字典
@@ -212,6 +216,37 @@ class RollVideoService:
 
             transparency_required = bg_color_final[3] < 255
             
+            # 限制缩放因子范围
+            if scale_factor < 0.5:
+                scale_factor = 0.5
+                logger.warning(f"缩放因子太小，已调整为最小值0.5")
+            elif scale_factor > 1.0:
+                scale_factor = 1.0
+                logger.warning(f"缩放因子不应大于1.0，已调整为1.0")
+                
+            # 限制跳帧率范围
+            if frame_skip < 1:
+                frame_skip = 1
+                logger.warning(f"跳帧率不能小于1，已调整为1")
+                
+            # 应用缩放因子（如果不是1.0）
+            render_width = width
+            render_height = height
+            render_font_size = font_size
+            render_line_spacing = actual_line_spacing_pixels
+            render_scroll_speed = scroll_speed
+            
+            if scale_factor < 1.0 and not transparency_required:
+                logger.info(f"使用缩放因子: {scale_factor}，降低处理分辨率以提高速度")
+                render_width = int(width * scale_factor)
+                render_height = int(height * scale_factor)
+                render_font_size = int(font_size * scale_factor)
+                render_line_spacing = int(actual_line_spacing_pixels * scale_factor)
+                render_scroll_speed = max(1, int(scroll_speed * scale_factor))
+                logger.info(f"原始分辨率: {width}x{height}, 渲染分辨率: {render_width}x{render_height}")
+                logger.info(f"原始字体大小: {font_size}, 渲染字体大小: {render_font_size}")
+                logger.info(f"原始滚动速度: {scroll_speed}, 渲染滚动速度: {render_scroll_speed}")
+            
             # 根据透明度需求确定输出格式和编码器
             output_dir = os.path.dirname(os.path.abspath(output_path))
             base_name = os.path.splitext(os.path.basename(output_path))[0]
@@ -236,23 +271,23 @@ class RollVideoService:
             
             # 创建文字渲染器 (使用最终确定的bg_color和计算后的行距)
             text_renderer = TextRenderer(
-                width=width,
+                width=render_width,
                 font_path=font_path,
-                font_size=font_size,
+                font_size=render_font_size,
                 font_color=font_color_tuple, # 使用转换后的元组
                 bg_color=bg_color_final, 
-                line_spacing=actual_line_spacing_pixels, # 使用计算后的像素值
+                line_spacing=render_line_spacing, # 使用计算后的像素值
                 char_spacing=char_spacing,
             )
 
             # 将文本渲染为图片，并获取文本实际高度
             logger.info("将文本渲染为图片...")
-            text_image, text_actual_height = text_renderer.render_text_to_image(text, min_height=height)
+            text_image, text_actual_height = text_renderer.render_text_to_image(text, min_height=render_height)
             logger.info(f"文本实际高度: {text_actual_height}px, 渲染图像总高度: {text_image.height}px")
 
             # 创建视频渲染器
             video_renderer = VideoRenderer(
-                width=width, height=height, fps=fps, scroll_speed=scroll_speed
+                width=render_width, height=render_height, fps=fps, scroll_speed=render_scroll_speed
             )
 
             # 创建滚动视频，传递决策结果
@@ -264,7 +299,8 @@ class RollVideoService:
                 transparency_required=transparency_required, # 传递透明度需求
                 preferred_codec=preferred_codec, # 传递首选编码器
                 audio_path=audio_path,
-                bg_color=bg_color_final # 传递最终的bg_color供非透明路径使用
+                bg_color=bg_color_final, # 传递最终的bg_color供非透明路径使用
+                frame_skip=frame_skip # 传递跳帧率
             )
 
             logger.info(f"滚动视频创建完成: {final_output_path}")
