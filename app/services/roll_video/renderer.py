@@ -188,7 +188,8 @@ class VideoRenderer:
         self.height = height
         self.fps = fps
         self.scroll_speed = scroll_speed
-        self.num_threads = min(4, os.cpu_count() or 1)  # 使用最多4个线程或可用核心数
+        # 增加CPU线程使用数量，最大化利用8核CPU
+        self.num_threads = min(7, os.cpu_count() or 1)  # 使用7个线程用于帧生成，保留1个核心给ffmpeg
         logger.info(f"视频渲染器初始化: 宽={width}, 高={height}, 帧率={fps}, 滚动速度={scroll_speed}, 线程数={self.num_threads}")
     
     def _get_ffmpeg_command(
@@ -327,32 +328,20 @@ class VideoRenderer:
         logger.info(f"文本高:{text_actual_height}, 图像高:{img_height}, 视频高:{self.height}")
         logger.info(f"滚动距离:{scroll_distance}, 滚动帧:{scroll_frames}, 总帧:{total_frames}, 时长:{duration:.2f}s")
         
-        # 针对透明视频的特殊处理
-        actual_frame_skip = frame_skip
-        actual_threads = self.num_threads
-        vf_filters = []  # 用于存储视频滤镜
-        
-        # 优化所有视频类型的滚动平滑度
+        # 优先使用不跳帧模式，以保证滚动平滑度
+        actual_frame_skip = 1  # 强制设为1，不使用跳帧
         if frame_skip > 1:
-            # 无论透明与否，平衡速度和平滑度
-            actual_frame_skip = frame_skip  # 恢复用户设置的跳帧率以提高速度
-            logger.info(f"使用跳帧率{actual_frame_skip}以提高处理速度")
+            logger.info(f"为保证滚动平滑度，不使用跳帧，改用多线程优化")
             
-            # 使用更高效的平滑处理 - 只使用简单可靠的tblend滤镜
-            vf_filters.append("tblend=all_mode=average")  # 轻量级平滑，不使用复杂参数
-            
-        # 透明视频的额外处理
+        # 透明视频的线程优化
+        actual_threads = self.num_threads
         if transparency_required:
-            if frame_skip > 1:
-                # 提高透明视频的跳帧率以提高速度
-                actual_frame_skip = min(4, frame_skip * 2)  # 允许更高跳帧率
-                logger.info(f"透明视频增加跳帧率至{actual_frame_skip}以提高速度")
-            # 减少线程数以优化CPU使用
-            actual_threads = max(2, self.num_threads - 1)  # 减少CPU竞争，只减少1个线程
+            # 透明视频的ProRes编码较消耗CPU，留更多核心给编码器
+            actual_threads = max(3, self.num_threads - 4)  # 减少更多线程
             logger.info(f"透明视频特殊处理: 使用{actual_threads}个线程")
         
         logger.info(f"输出:{output_path}, 透明:{transparency_required}, 首选编码器:{preferred_codec}, 跳帧率:{actual_frame_skip}")
-        # --- 结束滚动参数计算 --- 
+        # --- 结束滚动参数计算 ---
         
         ffmpeg_pix_fmt = ""
         video_codec_and_output_params = [] 
@@ -430,23 +419,6 @@ class VideoRenderer:
                 ffmpeg_cmd.insert(-1, "-r")  # 在输出文件前插入
                 ffmpeg_cmd.insert(-1, str(self.fps))  # 在输出文件前插入
             
-            # 添加视频滤镜（如果需要）
-            if vf_filters:
-                # 检查是否已有-vf参数
-                has_vf = False
-                for i, param in enumerate(ffmpeg_cmd):
-                    if param == "-vf" and i < len(ffmpeg_cmd) - 1:
-                        ffmpeg_cmd[i+1] = ffmpeg_cmd[i+1] + "," + ",".join(vf_filters)
-                        has_vf = True
-                        break
-                
-                # 如果没有-vf参数，添加新的
-                if not has_vf:
-                    ffmpeg_cmd.insert(-1, "-vf")
-                    ffmpeg_cmd.insert(-1, ",".join(vf_filters))
-                
-                logger.info(f"添加视频滤镜: {','.join(vf_filters)}")
-            
             logger.info(f"执行ffmpeg命令: {' '.join(ffmpeg_cmd)}")
             process = None
             stdout_q = queue.Queue()
@@ -480,8 +452,13 @@ class VideoRenderer:
                     if total_frames % actual_frame_skip > 0:
                         render_frame_count += 1  # 确保渲染所有必要帧
                 
-                # 创建帧生成线程池和队列
-                frame_queue = queue.Queue(maxsize=24)  # 限制队列大小防止内存溢出
+                # 创建帧生成线程池和队列 - 增大队列大小以提高性能
+                # 增加队列容量以更好地平衡生产者和消费者
+                queue_size = 36  # 增加队列大小以提高性能
+                if transparency_required:
+                    queue_size = 24  # 透明视频使用稍小的队列以减少内存使用
+                
+                frame_queue = queue.Queue(maxsize=queue_size)
                 frame_pool = ThreadPoolExecutor(max_workers=actual_threads)
                 
                 # 帧生成函数
@@ -495,8 +472,8 @@ class VideoRenderer:
                     )
                     frame_queue.put(frame_data)
                 
-                # 预填充队列（启动初始帧生成任务）
-                prefill_count = min(12, render_frame_count)
+                # 预填充队列（启动初始帧生成任务） - 增加预填充数量
+                prefill_count = min(queue_size-4, render_frame_count)  # 预填充接近队列容量的帧数
                 logger.info(f"启动{prefill_count}个预填充帧生成任务，使用{actual_threads}个线程")
                 for i in range(prefill_count):
                     frame_pool.submit(generate_frame, i)
