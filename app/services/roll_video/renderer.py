@@ -12,9 +12,6 @@ import shutil
 import tqdm
 import threading
 import queue
-import concurrent.futures
-import time
-from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -34,22 +31,14 @@ class TextRenderer:
         """
         初始化文字渲染器
         
-        文字渲染器负责将文本内容渲染为包含透明度信息的RGBA图像，
-        支持自定义字体、颜色、行间距和字符间距，适用于生成透明或不透明背景的文本图像。
-        
-        颜色处理：
-        - 字体颜色：支持RGB格式，内部会转换为RGBA格式用于绘制
-        - 背景颜色：支持RGBA格式，A通道值决定背景透明度（0完全透明，255完全不透明）
-        
         Args:
-            width: 图片宽度（像素）
-            font_path: 字体文件路径（TTF、OTF、TTC格式）
-            font_size: 字体大小（像素）
-            font_color: 字体颜色，RGB元组 (R,G,B)
-            bg_color: 背景颜色，RGBA元组 (R,G,B,A)
-                    A为透明度，0表示完全透明，255表示完全不透明
-            line_spacing: 行间距（像素），控制文本行之间的垂直距离
-            char_spacing: 字符间距（像素），控制同一行文本字符之间的水平距离
+            width: 图片宽度
+            font_path: 字体文件路径
+            font_size: 字体大小
+            font_color: 字体颜色 (R,G,B)
+            bg_color: 背景颜色 (R,G,B,A)，A为透明度，0表示完全透明，255表示完全不透明
+            line_spacing: 行间距
+            char_spacing: 字符间距
         """
         self.width = width
         self.font = ImageFont.truetype(font_path, font_size)
@@ -118,28 +107,14 @@ class TextRenderer:
     
     def render_text_to_image(self, text: str, min_height: Optional[int] = None) -> Tuple[Image.Image, int]:
         """
-        将文本渲染到图片，并在末尾添加一个屏幕高度的空白区域
-        
-        渲染过程：
-        1. 根据图像宽度和字体大小计算文本布局，处理自动换行
-        2. 创建一个RGBA格式的图像，使用指定的背景颜色（支持透明度）
-        3. 将文本内容绘制到图像上，应用指定的字体颜色
-        4. 在图像末尾添加一个屏幕高度的空白区域，用于滚动过渡
-        
-        文本布局：
-        - 支持自动换行，根据图像宽度和字体大小计算每行可容纳的字符数
-        - 支持 \n 转义字符作为手动换行标记
-        - 空行将被保留，用于控制段落间距
+        将文本渲染到图片，并在末尾添加一个屏幕高度的空白
         
         Args:
-            text: 要渲染的文本内容，支持\n换行
-            min_height: 最小图片高度（像素），通常设置为视频高度
-                      用于计算底部空白区域的大小
+            text: 要渲染的文本内容
+            min_height: 最小图片高度，通常设置为视频高度
             
         Returns:
             元组: (包含渲染文本的PIL Image对象, 实际文本内容的高度)
-            - 第一个元素为RGBA格式的PIL图像对象
-            - 第二个元素为实际文本内容的高度（不包括底部空白区域）
         """
         lines = self._calculate_text_layout(text)
         
@@ -197,34 +172,21 @@ class VideoRenderer:
         width: int,
         height: int,
         fps: int = 30,
-        scroll_speed: int = 2,  # 每帧滚动的像素数
-        frame_buffer_size: int = 24, # 帧缓冲区大小 (恢复默认值)
-        worker_threads: int = 4,  # 工作线程数 (恢复默认值)
+        scroll_speed: int = 2  # 每帧滚动的像素数
     ):
         """
         初始化视频渲染器
         
         Args:
-            width: 视频宽度（像素）
-            height: 视频高度（像素）
-            fps: 视频帧率（帧/秒）
-            scroll_speed: 滚动速度（像素/帧），值越大滚动越快
-            frame_buffer_size: 帧缓冲区大小（帧数）
-                             控制生产者-消费者模式中的队列大小
-                             增加可提高编码效率，但也会增加内存占用
-            worker_threads: 用于帧处理的工作线程数
-                           增加可提高渲染速度，但也会增加内存占用
-                           建议不超过CPU核心数
+            width: 视频宽度
+            height: 视频高度
+            fps: 视频帧率
+            scroll_speed: 滚动速度(像素/帧)
         """
         self.width = width
         self.height = height
         self.fps = fps
         self.scroll_speed = scroll_speed
-        # 恢复之前的缓冲区大小限制逻辑
-        self.frame_buffer_size = max(4, min(frame_buffer_size, int(fps * 0.8))) # 限制缓冲区大小，确保不小于4
-        # 限制线程数在1和CPU核心数之间
-        self.worker_threads = max(1, min(worker_threads, os.cpu_count() or 4))
-        logger.info(f"VideoRenderer initialized with: worker_threads={self.worker_threads}, frame_buffer_size={self.frame_buffer_size}") # 更新日志信息以反映当前设置
     
     def _get_ffmpeg_command(
         self,
@@ -266,71 +228,6 @@ class VideoRenderer:
         finally:
             output_queue.put(None) # 发送结束信号
 
-    def _generate_frame(self, frame_data):
-        """
-        生成单个帧 - 这个函数会被并行调用 (恢复 float32 Alpha 混合)
-        """
-        frame_idx, img_array, img_height, img_width, img_start_y, transparency_required, background_frame_rgb = frame_data
-        
-        img_end_y = min(img_height, img_start_y + self.height)
-        frame_start_y = 0
-        frame_end_y = img_end_y - img_start_y
-        
-        output_frame_data = None # 初始化
-
-        if img_start_y < img_end_y and frame_start_y < frame_end_y and frame_end_y <= self.height:
-            img_h_slice = slice(img_start_y, img_end_y)
-            img_w_slice = slice(0, min(self.width, img_width))
-            frame_h_slice = slice(frame_start_y, frame_end_y)
-            frame_w_slice = slice(0, min(self.width, img_width))
-            
-            source_section = img_array[img_h_slice, img_w_slice] # RGBA section from source image
-            
-            if transparency_required:
-                # For transparency, create an RGBA frame and copy the source section
-                frame_rgba = np.zeros((self.height, self.width, 4), dtype=np.uint8)
-                target_area = frame_rgba[frame_h_slice, frame_w_slice]
-                
-                copy_h = min(target_area.shape[0], source_section.shape[0])
-                copy_w = min(target_area.shape[1], source_section.shape[1])
-                
-                target_area[:copy_h, :copy_w] = source_section[:copy_h, :copy_w]
-                output_frame_data = frame_rgba.tobytes()
-            else:
-                # For opaque video, blend onto the background frame (use float32 math - reverted)
-                frame_rgb = background_frame_rgb.copy() # Start with a copy of the background
-                target_area = frame_rgb[frame_h_slice, frame_w_slice] # RGB slice from background copy
-                
-                copy_h = min(target_area.shape[0], source_section.shape[0])
-                copy_w = min(target_area.shape[1], source_section.shape[1])
-
-                # Ensure we only work with the valid overlapping area
-                source_crop = source_section[:copy_h, :copy_w]
-                target_crop = target_area[:copy_h, :copy_w]
-
-                if source_crop.size > 0 and target_crop.size > 0:
-                    # Extract alpha channel and convert to float (0.0 to 1.0)
-                    alpha_float = source_crop[:, :, 3:4].astype(np.float32) / 255.0 # Shape (copy_h, copy_w, 1)
-                    source_rgb_float = source_crop[:, :, :3].astype(np.float32) # Shape (copy_h, copy_w, 3)
-                    target_rgb_float = target_crop.astype(np.float32) # Shape (copy_h, copy_w, 3)
-
-                    # Blend using float32: src * alpha + dst * (1.0 - alpha)
-                    blended_float = source_rgb_float * alpha_float + target_rgb_float * (1.0 - alpha_float)
-                    
-                    # Copy the blended result (converted back to uint8) into the target area slice
-                    np.copyto(target_crop, blended_float.astype(np.uint8))
-
-                output_frame_data = frame_rgb.tobytes()
-        
-        # Handle cases where the text image slice is empty or out of bounds
-        if output_frame_data is None:
-            if transparency_required: 
-                output_frame_data = np.zeros((self.height, self.width, 4), dtype=np.uint8).tobytes()
-            else: 
-                output_frame_data = background_frame_rgb.tobytes()
-        
-        return frame_idx, output_frame_data
-
     def create_scrolling_video(
         self,
         image: Image.Image,
@@ -339,38 +236,9 @@ class VideoRenderer:
         transparency_required: bool,
         preferred_codec: str, # 仍然接收 h264_nvenc 作为首选
         audio_path: Optional[str] = None,
-        bg_color: Optional[Tuple[int, int, int, int]] = None,
-        transparent_codec: str = "prores_4444"  # 新增：透明视频编码器选择
+        bg_color: Optional[Tuple[int, int, int, int]] = None
     ) -> str:
-        """
-        创建滚动视频，使用ffmpeg管道流式处理，并应用多线程优化
-        
-        根据透明度需求自动选择不同的编码策略：
-        - 透明背景：使用指定的透明编码器，生成.mov或.webm文件
-        - 不透明背景：优先尝试GPU加速(h264_nvenc)，失败后回退到CPU(libx264)，生成.mp4文件
-        
-        支持的透明编码选项：
-        - "prores_4444"：高质量，较大文件，输出为.mov
-        - "prores_422"：中等质量，中等文件大小，输出为.mov
-        - "vp9"：较低质量，最小文件大小，输出为.webm
-        
-        使用多线程生产者-消费者模式优化性能：
-        - 生产者线程池负责生成视频帧
-        - 消费者线程负责将帧传递给ffmpeg进行编码
-        
-        Args:
-            image: 包含渲染文本的PIL图像对象
-            output_path: 输出视频路径（扩展名会根据编码器自动调整）
-            text_actual_height: 实际文本内容的高度（像素）
-            transparency_required: 是否需要透明背景
-            preferred_codec: 首选视频编码器，如"h264_nvenc"
-            audio_path: 可选的音频文件路径，将被合并到视频中
-            bg_color: 背景颜色(RGBA)，用于非透明视频的背景
-            transparent_codec: 透明视频编码器选择："prores_4444", "prores_422", "vp9"
-            
-        Returns:
-            实际输出的视频文件路径（可能与输入的output_path不同，取决于所选编码器）
-        """
+        """创建滚动视频，使用ffmpeg管道优化，并应用推荐的编码参数"""
         
         img_array = np.array(image)
         img_height, img_width = img_array.shape[:2]
@@ -398,240 +266,141 @@ class VideoRenderer:
         
         if transparency_required:
             ffmpeg_pix_fmt = "rgba"
-            
-            # 根据透明编码器选择设置不同的参数
-            if transparent_codec == "prores_4444" or preferred_codec == "prores_ks":
-                output_path = os.path.splitext(output_path)[0] + ".mov"
-                # 高质量 ProRes 4444 编码参数
-                video_codec_and_output_params = [
-                    "-c:v", "prores_ks", "-profile:v", "4", 
-                    "-pix_fmt", "yuva444p10le", "-alpha_bits", "16", "-vendor", "ap10"
-                ]
-                logger.info(f"设置ffmpeg(透明ProRes 4444): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
-                logger.info(f"  参数: {' '.join(video_codec_and_output_params)}")
-                
-            elif transparent_codec == "prores_422" or preferred_codec == "prores_ks_422":
-                output_path = os.path.splitext(output_path)[0] + ".mov"
-                # 中等质量 ProRes 422HQ 编码参数 (较小文件)
-                video_codec_and_output_params = [
-                    "-c:v", "prores_ks", "-profile:v", "3", 
-                    "-pix_fmt", "yuva422p10le", "-alpha_bits", "8", "-vendor", "ap10"
-                ]
-                logger.info(f"设置ffmpeg(透明ProRes 422HQ): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
-                logger.info(f"  参数: {' '.join(video_codec_and_output_params)}")
-                
-            elif transparent_codec == "vp9" or preferred_codec == "libvpx-vp9":
-                output_path = os.path.splitext(output_path)[0] + ".webm"
-                # VP9 编码参数 (最小文件)
-                video_codec_and_output_params = [
-                    "-c:v", "libvpx-vp9",
-                    "-lossless", "0",
-                    "-crf", "30",
-                    "-b:v", "0",
-                    "-deadline", "good",  # 可选: "good", "best", "realtime"
-                    "-cpu-used", "2",     # 0-8，值越大速度越快，质量越低
-                    "-pix_fmt", "yuva420p",
-                    "-auto-alt-ref", "1",
-                    "-lag-in-frames", "25"
-                ]
-                logger.info(f"设置ffmpeg(透明VP9): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
-                logger.info(f"  参数: {' '.join(video_codec_and_output_params)}")
-            
-            else:
-                # 默认使用 ProRes 4444
-                output_path = os.path.splitext(output_path)[0] + ".mov"
-                video_codec_and_output_params = [
-                    "-c:v", "prores_ks", "-profile:v", "4", 
-                    "-pix_fmt", "yuva444p10le", "-alpha_bits", "16", "-vendor", "ap10"
-                ]
-                logger.info(f"未知的透明编码器选项: {transparent_codec}，使用默认的 ProRes 4444")
-                logger.info(f"设置ffmpeg(透明默认): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
-                logger.info(f"  参数: {' '.join(video_codec_and_output_params)}")
-            
+            output_path = os.path.splitext(output_path)[0] + ".mov"
+            # 透明视频保持 ProRes 参数不变
+            video_codec_and_output_params = [
+                "-c:v", "prores_ks", "-profile:v", "4", 
+                "-pix_fmt", "yuva444p10le", "-alpha_bits", "16", "-vendor", "ap10"
+            ]
+            logger.info(f"设置ffmpeg(透明): 输入={ffmpeg_pix_fmt}, 输出={output_path}, 参数={' '.join(video_codec_and_output_params)}")
         else:
             ffmpeg_pix_fmt = "rgb24"
             output_path = os.path.splitext(output_path)[0] + ".mp4"
-            
-            # GPU H.264参数 - 速度优先
-            gpu_params = [
-                "-c:v", preferred_codec, 
-                "-preset", "p1", # 使用最快预设 (p1 或 fast)
-                "-rc:v", "vbr",
-                "-cq:v", "24", # 增加 CQ 值以提高速度 (降低质量)
-                "-b:v", "0",
-                "-pix_fmt", "yuv420p",
+            # GPU 参数: h264_nvenc, preset p3, VBR CQ 21, pix_fmt yuv420p, faststart
+            video_codec_and_output_params = [
+                "-c:v", preferred_codec, # h264_nvenc
+                "-preset", "p3",         # Medium preset
+                "-rc:v", "vbr",          # Variable Bitrate Rate Control
+                "-cq:v", "21",           # Constant Quality level (good quality)
+                "-b:v", "0",              # Let CQ control bitrate
+                "-pix_fmt", "yuv420p",   # << 添加此行以提高兼容性
                 "-movflags", "+faststart"
             ]
-            
-            video_codec_and_output_params = gpu_params
-            
-            # CPU 参数：libx264 - 速度优先
+            # CPU 回退参数: libx264, preset medium(默认), CRF 21, pix_fmt yuv420p, faststart
             cpu_fallback_codec_and_output_params = [
                 "-c:v", "libx264",
-                "-crf", "28",        # 显著增加CRF以提高速度 (质量降低)
-                "-preset", "ultrafast", # 使用最快预设
-                "-tune", "fastdecode,zerolatency", # 针对快速解码和低延迟优化
-                "-pix_fmt", "yuv420p",
+                "-crf", "21",            # Constant Rate Factor (good quality)
+                "-preset", "medium",      # Default preset (good balance)
+                "-pix_fmt", "yuv420p",   # Required by libx264 for mp4
                 "-movflags", "+faststart"
             ]
             logger.info(f"设置ffmpeg(不透明): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
-            logger.info(f"  GPU参数 (速度优先): {' '.join(video_codec_and_output_params)}")
-            logger.info(f"  CPU回退参数: {' '.join(cpu_fallback_codec_and_output_params)}")
-            
+            logger.info(f"  首选GPU参数: {' '.join(video_codec_and_output_params)}")
+            logger.info(f"  回退CPU参数: {' '.join(cpu_fallback_codec_and_output_params)}")
             # 准备背景色 (RGB)
             final_bg_color_rgb = (0, 0, 0)
             if bg_color and len(bg_color) >= 3:
                  final_bg_color_rgb = bg_color[:3]
             background_frame_rgb = np.ones((self.height, self.width, 3), dtype=np.uint8) * np.array(final_bg_color_rgb, dtype=np.uint8)
         
-        # 优化：预计算所有帧的y位置
-        def calculate_position(frame_idx):
-            if frame_idx < padding_frames_start:
-                return 0
-            elif frame_idx < padding_frames_start + scroll_frames:
-                scroll_progress = frame_idx - padding_frames_start
-                pos = scroll_progress * self.scroll_speed
-                return min(pos, scroll_distance)
-            else:
-                return scroll_distance
-        
-        frame_positions = [calculate_position(i) for i in range(total_frames)]
-        
-        # --- 使用生产者-消费者模式处理帧生成和编码 ---
+        # --- 重构 run_ffmpeg_with_pipe 使用线程 --- 
         def run_ffmpeg_with_pipe(current_codec_params: List[str], is_gpu_attempt: bool) -> bool:
             ffmpeg_cmd = self._get_ffmpeg_command(output_path, ffmpeg_pix_fmt, current_codec_params, audio_path)
-            
             logger.info(f"执行ffmpeg命令: {' '.join(ffmpeg_cmd)}")
-            
-            # 获取编码器名称
-            try: 
-                codec_idx = current_codec_params.index("-c:v") + 1
-                codec_name = current_codec_params[codec_idx] if codec_idx < len(current_codec_params) else "unknown"
-            except (ValueError, IndexError): 
-                codec_name = "unknown"
-            
-            # 创建队列和事件标志
-            frame_queue = queue.Queue(maxsize=self.frame_buffer_size)
-            error_event = threading.Event()
-            finish_event = threading.Event()
+            process = None
             stdout_q = queue.Queue()
             stderr_q = queue.Queue()
-            
-            # ffmpeg进程
-            process = None
+            stdout_thread = None
+            stderr_thread = None
             
             try:
                 process = subprocess.Popen(
                     ffmpeg_cmd, stdin=subprocess.PIPE, 
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-                    bufsize=-1
+                    # bufsize=0 might help with pipe buffering, but default is usually fine
                 )
                 
-                # 启动输出读取线程
+                # --- 启动 stdout 和 stderr 读取线程 ---
                 stdout_thread = threading.Thread(target=self._reader_thread, args=(process.stdout, stdout_q), daemon=True)
                 stderr_thread = threading.Thread(target=self._reader_thread, args=(process.stderr, stderr_q), daemon=True)
                 stdout_thread.start()
                 stderr_thread.start()
+                # --- 结束线程启动 ---
                 
-                # 帧生成线程 - 生产者
-                def frame_producer():
-                    try:
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=self.worker_threads) as executor:
-                            # 提交所有帧生成任务
-                            futures = []
-                            for frame_idx in range(total_frames):
-                                if error_event.is_set():
-                                    break
-                                
-                                img_start_y = int(frame_positions[frame_idx])
-                                frame_data = (frame_idx, img_array, img_height, img_width, 
-                                             img_start_y, transparency_required, background_frame_rgb)
-                                futures.append(executor.submit(self._generate_frame, frame_data))
-                            
-                            # 维护有序的结果队列
-                            ordered_results = {}
-                            next_frame_idx = 0
-                            
-                            # 处理完成的任务
-                            for future in concurrent.futures.as_completed(futures):
-                                if error_event.is_set():
-                                    break
-                                    
-                                try:
-                                    frame_idx, frame_bytes = future.result()
-                                    ordered_results[frame_idx] = frame_bytes
-                                    
-                                    # 按顺序将帧放入队列
-                                    while next_frame_idx in ordered_results and not error_event.is_set():
-                                        frame_queue.put(ordered_results.pop(next_frame_idx))
-                                        next_frame_idx += 1
-                                except Exception as e:
-                                    logger.error(f"帧生成错误: {e}")
-                                    error_event.set()
-                    except Exception as e:
-                        logger.error(f"帧生成主线程错误: {e}")
-                        error_event.set()
-                    finally:
-                        finish_event.set()  # 设置帧生成完成标志
+                # --- 逐帧生成并通过管道写入 --- 
+                codec_name = "unknown"
+                try: codec_name = current_codec_params[current_codec_params.index("-c:v") + 1]
+                except (ValueError, IndexError): pass
+                frame_iterator = tqdm.tqdm(range(total_frames), desc=f"编码 ({codec_name}) ")
+                for frame_idx in frame_iterator:
+                    if frame_idx < padding_frames_start: current_position = 0
+                    elif frame_idx < padding_frames_start + scroll_frames:
+                        scroll_progress = frame_idx - padding_frames_start
+                        current_position = scroll_progress * self.scroll_speed
+                        current_position = min(current_position, scroll_distance)
+                    else: current_position = scroll_distance
+                    img_start_y = int(current_position)
+                    img_end_y = min(img_height, img_start_y + self.height)
+                    frame_start_y = 0
+                    frame_end_y = img_end_y - img_start_y
+                    output_frame_data = None
+                    if img_start_y < img_end_y and frame_start_y < frame_end_y and frame_end_y <= self.height:
+                        img_h_slice = slice(img_start_y, img_end_y)
+                        img_w_slice = slice(0, min(self.width, img_width))
+                        frame_h_slice = slice(frame_start_y, frame_end_y)
+                        frame_w_slice = slice(0, min(self.width, img_width))
+                        source_section = img_array[img_h_slice, img_w_slice]
+                        if transparency_required:
+                            frame_rgba = np.zeros((self.height, self.width, 4), dtype=np.uint8)
+                            target_area = frame_rgba[frame_h_slice, frame_w_slice]
+                            if target_area.shape[:2] == source_section.shape[:2]: np.copyto(target_area, source_section)
+                            else: copy_width = min(target_area.shape[1], source_section.shape[1]); target_area[:target_area.shape[0], :copy_width] = source_section[:target_area.shape[0], :copy_width]
+                            output_frame_data = frame_rgba.tobytes()
+                        else:
+                            frame_rgb = background_frame_rgb.copy()
+                            target_area = frame_rgb[frame_h_slice, frame_w_slice]
+                            if target_area.shape[:2] == source_section.shape[:2]:
+                                alpha = source_section[:, :, 3:4].astype(np.float32) / 255.0
+                                blended = (source_section[:, :, :3].astype(np.float32) * alpha + target_area.astype(np.float32) * (1.0 - alpha))
+                                np.copyto(target_area, blended.astype(np.uint8))
+                            else:
+                                copy_width = min(target_area.shape[1], source_section.shape[1])
+                                source_section_crop = source_section[:target_area.shape[0], :copy_width]
+                                target_area_crop = target_area[:target_area.shape[0], :copy_width]
+                                alpha = source_section_crop[:, :, 3:4].astype(np.float32) / 255.0
+                                blended = (source_section_crop[:, :, :3].astype(np.float32) * alpha + target_area_crop.astype(np.float32) * (1.0 - alpha))
+                                target_area[:target_area.shape[0], :copy_width] = blended.astype(np.uint8)
+                            output_frame_data = frame_rgb.tobytes()
+                    else:
+                        if transparency_required: output_frame_data = np.zeros((self.height, self.width, 4), dtype=np.uint8).tobytes()
+                        else: output_frame_data = background_frame_rgb.tobytes()
+                    if output_frame_data:
+                        try: process.stdin.write(output_frame_data)
+                        except (IOError, BrokenPipeError) as e:
+                            logger.error(f"写入ffmpeg管道时出错: {e}")
+                            # 写入失败时，尝试获取stderr, 可能需要等待线程
+                            stderr_lines_on_error = []
+                            while True:
+                                try: line = stderr_q.get(timeout=0.1)
+                                except queue.Empty: break
+                                if line is None: break
+                                stderr_lines_on_error.append(line.decode(errors='ignore').strip())
+                            # 修正：先 join 再放入 f-string
+                            stderr_content_on_error = "\n".join(stderr_lines_on_error)
+                            logger.error(f"ffmpeg stderr (写入时):\n{stderr_content_on_error}")
+                            raise Exception(f"ffmpeg进程意外终止: {e}") from e
                 
-                # 帧写入线程 - 消费者
-                def frame_consumer():
-                    progress_bar = tqdm.tqdm(total=total_frames, desc=f"编码 ({codec_name}) ")
-                    
-                    try:
-                        frames_written = 0
-                        while frames_written < total_frames:
-                            if error_event.is_set():
-                                break
-                            
-                            # 等待帧或结束信号
-                            try:
-                                frame_data = frame_queue.get(timeout=0.5)
-                                process.stdin.write(frame_data)
-                                frames_written += 1
-                                progress_bar.update(1)
-                                frame_queue.task_done()
-                            except queue.Empty:
-                                # 检查是否所有帧都已生成
-                                if finish_event.is_set() and frames_written >= total_frames:
-                                    break
-                            except (BrokenPipeError, IOError) as e:
-                                logger.error(f"写入ffmpeg管道错误: {e}")
-                                error_event.set()
-                                break
-                    except Exception as e:
-                        logger.error(f"帧写入线程错误: {e}")
-                        error_event.set()
-                    finally:
-                        progress_bar.close()
-                        # 确保stdin关闭
-                        if process and process.stdin and not process.stdin.closed:
-                            try:
-                                process.stdin.close()
-                            except Exception as e:
-                                logger.error(f"关闭stdin错误: {e}")
+                logger.info("所有帧已写入管道，关闭stdin...")
+                process.stdin.close()
                 
-                # 启动生产者和消费者线程
-                producer_thread = threading.Thread(target=frame_producer, daemon=True)
-                consumer_thread = threading.Thread(target=frame_consumer, daemon=True)
-                producer_thread.start()
-                consumer_thread.start()
-                
-                # 等待线程完成
-                producer_thread.join()
-                consumer_thread.join()
-                
-                # 检查是否发生错误
-                if error_event.is_set():
-                    logger.error("编码过程中发生错误")
-                    return False
-                
-                # 等待ffmpeg进程完成
+                # --- 等待 ffmpeg 进程结束 --- 
                 logger.info("等待ffmpeg进程结束...")
                 process.wait() 
                 return_code = process.returncode
+                # --- 结束等待 --- 
                 
-                # 收集输出
+                # --- 等待读取线程结束并收集输出 --- 
+                logger.info("等待输出读取线程结束...")
                 stdout_thread.join()
                 stderr_thread.join()
                 
@@ -652,6 +421,7 @@ class VideoRenderer:
                 if stderr_lines: 
                     stderr_content = "\n".join(stderr_lines)
                     logger.info(f"ffmpeg stderr:\n{stderr_content}")
+                # --- 结束收集输出 --- 
                 
                 if return_code == 0:
                     logger.info(f"使用 {codec_name} 编码成功完成。")
@@ -661,11 +431,9 @@ class VideoRenderer:
                     if is_gpu_attempt: logger.warning("GPU编码失败提示：检查ffmpeg版本/驱动/显存。")
                     return False
             
-            except FileNotFoundError: 
-                logger.error("ffmpeg 未找到。请确保已安装并加入PATH。")
-                raise
+            except FileNotFoundError: logger.error("ffmpeg 未找到。请确保已安装并加入PATH。"); raise
             except Exception as e: 
-                logger.error(f"执行 ffmpeg 时出错: {e}", exc_info=True)
+                logger.error(f"执行 ffmpeg ({codec_name}) 时出错: {e}", exc_info=True)
                 logger.error(f"命令: {' '.join(ffmpeg_cmd)}")
                 # 尝试收集最后的 stderr
                 stderr_lines_on_except = []
@@ -674,57 +442,44 @@ class VideoRenderer:
                     except queue.Empty: break
                     if line is None: break
                     stderr_lines_on_except.append(line.decode(errors='ignore').strip())
-                
+                # 修正：先 join 再放入 f-string
                 if stderr_lines_on_except: 
                     stderr_content_on_except = "\n".join(stderr_lines_on_except)
                     logger.error(f"ffmpeg stderr (异常时):\n{stderr_content_on_except}")
-                return False
+                # 不返回 False，让异常传播
             finally: 
-                # 确保线程和进程清理
-                error_event.set()  # 通知所有线程退出
-                
-                # 清理进程
+                # 清理：确保进程终止和管道关闭
                 if process and process.poll() is None: 
-                    logger.warning("尝试终止 ffmpeg 进程...")
+                    logger.warning("尝试终止 ffmpeg 进程 (finally)...")
                     try: process.terminate() 
-                    except ProcessLookupError: pass
+                    except ProcessLookupError: pass # 进程可能已经结束
                     try: process.wait(timeout=1) 
                     except subprocess.TimeoutExpired: 
-                        logger.warning("ffmpeg 进程超时，强制终止")
+                        logger.warning("ffmpeg 进程超时，强制终止 (kill)")
                         try: process.kill() 
                         except ProcessLookupError: pass
-                    except Exception as e_wait: 
-                        logger.error(f"等待终止时出错: {e_wait}")
-                
-                # 关闭管道
+                    except Exception as e_wait: logger.error(f"等待终止时出错: {e_wait}")
+                    logger.warning("已终止 ffmpeg 进程")
+                # 关闭管道句柄（如果它们还打开着）
                 for pipe in [process.stdin, process.stdout, process.stderr] if process else []:
                     if pipe and not pipe.closed:
                         try: pipe.close()
                         except: pass
+                # 确保线程已结束 (即使之前出错)
+                if stdout_thread and stdout_thread.is_alive(): stdout_thread.join(timeout=0.5)
+                if stderr_thread and stderr_thread.is_alive(): stderr_thread.join(timeout=0.5)
+        # --- 结束 run_ffmpeg_with_pipe 函数定义 ---
 
         # --- 执行编码 --- 
         success = run_ffmpeg_with_pipe(video_codec_and_output_params, is_gpu_attempt=(not transparency_required))
-        
-        # 如果透明视频使用VP9失败，尝试使用ProRes
-        if not success and transparency_required and transparent_codec == "vp9":
-            logger.info(f"VP9编码失败，尝试回退到ProRes 422HQ...")
-            # 更新透明编码器为ProRes 422HQ
-            output_path = os.path.splitext(output_path)[0] + ".mov"
-            backup_params = [
-                "-c:v", "prores_ks", "-profile:v", "3", 
-                "-pix_fmt", "yuva422p10le", "-alpha_bits", "8", "-vendor", "ap10"
-            ]
-            success = run_ffmpeg_with_pipe(backup_params, is_gpu_attempt=False)
-        
-        # 如果 GPU 失败，尝试 CPU 编码
         if not success and not transparency_required and cpu_fallback_codec_and_output_params:
-            logger.info(f"GPU编码失败，尝试回退到CPU编码...")
+            logger.info(f"GPU ({preferred_codec}) 编码失败，尝试回退到 CPU ({cpu_fallback_codec_and_output_params[1]})...")
             success = run_ffmpeg_with_pipe(cpu_fallback_codec_and_output_params, is_gpu_attempt=False)
             if not success:
-                 logger.error("CPU回退编码也失败了。")
+                 logger.error("CPU 回退编码也失败了。")
                  raise Exception("视频编码失败（GPU和CPU均失败）")
         elif not success and transparency_required:
-             logger.error(f"透明视频编码失败 ({transparent_codec})。")
+             logger.error("透明视频 (CPU prores_ks) 编码失败。")
              raise Exception("透明视频编码失败")
              
         logger.info(f"视频渲染流程完成。输出文件: {output_path}")

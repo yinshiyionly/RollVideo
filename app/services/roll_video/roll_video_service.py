@@ -5,7 +5,6 @@ from typing import Dict, Tuple, List, Optional, Union
 from PIL import Image
 
 from renderer import TextRenderer, VideoRenderer
-from config import DEFAULT_OPTIMIZATION_CONFIG
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -34,10 +33,6 @@ class RollVideoService:
             logger.warning(
                 f"未找到自定义字体，将使用系统默认字体: {self.default_font_path}"
             )
-        
-        # 检测系统的CPU核心数，用于决定默认线程数
-        self.cpu_count = os.cpu_count() or 4
-        logger.info(f"检测到系统CPU核心数: {self.cpu_count}")
 
     def _get_available_fonts(self, font_name: Optional[str] = None) -> List[str]:
         """
@@ -163,62 +158,46 @@ class RollVideoService:
             0,
             255,
         ),
-        line_spacing: int = 20,
+        line_spacing: float = 0.5, # 行间距比例因子，相对于字体大小
         char_spacing: int = 0,
         fps: int = 30,
         scroll_speed: int = 2,
         audio_path: Optional[str] = None,
-        worker_threads: Optional[int] = None,
-        transparent_codec: Optional[str] = None,
     ) -> Dict[str, Union[str, bool]]:
         """
-        创建滚动视频，自动根据透明度选择编码策略和输出格式。
-        
-        编码策略:
-          - 透明背景: 使用指定的透明编码器输出为 .mov 或 .webm 格式
-          - 不透明背景: 优先尝试 GPU 加速 (h264_nvenc)，失败后回退到 CPU 编码 (libx264)，输出为 .mp4 格式
-        
-        编码器和输出格式选择:
-          - 当 bg_color 的 alpha 通道小于 255 时，启用透明编码
-          - 透明视频将根据 transparent_codec 参数选择合适的编码器和输出格式
-        
-        性能优化:
-          - 可以通过 worker_threads 指定帧处理的线程数
+        创建滚动视频，自动根据透明度选择CPU/GPU和格式。
+        透明: CPU + prores_ks + mov
+        不透明: 尝试 GPU (h264_nvenc) 回退 CPU (libx264) + mp4
         
         Args:
             text: 要展示的文本内容
-            output_path: 期望的输出视频路径（扩展名会被自动调整，根据透明度和编码器选项）
-            width: 视频宽度（像素）
-            height: 视频高度（像素）
+            output_path: 期望的输出视频路径（扩展名会被自动调整）
+            width: 视频宽度
+            height: 视频高度
             font_path: 字体文件路径，不指定则使用默认字体
-            font_size: 字体大小（像素）
-            font_color: 字体颜色，RGB元组 (R,G,B)
-            bg_color: 背景颜色，可以是RGB元组 (r,g,b) 或RGBA元组 (r,g,b,a)
-                     a为透明度，0表示完全透明，255表示完全不透明
-                     也支持浮点数alpha值（0.0-1.0）
-            line_spacing: 行间距（像素）
-            char_spacing: 字符间距（像素）
-            fps: 视频帧率（帧/秒）
-            scroll_speed: 滚动速度（像素/帧）
-            audio_path: 可选的音频文件路径，将被合并到视频中
-            worker_threads: 用于帧处理的工作线程数
-                           默认值为系统CPU核心数（最大为8）
-                           增加可提高渲染速度，但也会增加内存占用
-            transparent_codec: 透明视频编码器选择，可选值:
-                             "prores_4444" - 高质量，较大文件（默认），输出为.mov
-                             "prores_422" - 中等质量，中等文件大小，输出为.mov
-                             "vp9" - 较低质量，最小文件大小，输出为.webm
+            font_size: 字体大小
+            font_color: 字体颜色 (R,G,B)，可以是列表或元组
+            bg_color: 背景颜色，可以是RGB(A)元组或列表(r,g,b)或(r,g,b,a)，a为透明度(0-255或0.0-1.0)
+            line_spacing: 行间距比例因子 (例如 0.5 表示行间距为字体大小的一半)
+            char_spacing: 字符间距
+            fps: 视频帧率
+            scroll_speed: 滚动速度(像素/帧)
+            audio_path: 可选的音频文件路径
+            
         Returns:
-            包含处理结果的字典: 
-            {
-                "status": "success" 或 "error",
-                "message": 处理结果消息,
-                "output_path": 实际输出的视频文件路径
-            }
+            包含处理结果的字典
         """
         try:
+            # --- 参数类型转换和预处理 ---
+            # 确保颜色是元组
+            font_color_tuple = tuple(font_color) if isinstance(font_color, list) else font_color
+            bg_color_tuple = tuple(bg_color) if isinstance(bg_color, list) else bg_color
+            
+            # 计算实际行间距（像素）
+            actual_line_spacing_pixels = int(font_size * line_spacing)
+
             # --- 决定透明度需求和编码策略 --- 
-            normalized_bg_color = list(bg_color)
+            normalized_bg_color = list(bg_color_tuple)
             if len(normalized_bg_color) == 3:
                 normalized_bg_color.append(255) # RGB 转 RGBA，默认不透明
             elif len(normalized_bg_color) == 4 and isinstance(normalized_bg_color[3], float):
@@ -238,24 +217,9 @@ class RollVideoService:
             base_name = os.path.splitext(os.path.basename(output_path))[0]
             
             if transparency_required:
-                # 根据选择的透明视频编码器设置参数
-                if transparent_codec == "prores_4444":
-                    preferred_codec = "prores_ks" 
-                    actual_output_path = os.path.join(output_dir, f"{base_name}.mov")
-                    logger.info("检测到透明背景需求，将使用 ProRes 4444 编码器输出 .mov 文件。")
-                elif transparent_codec == "prores_422":
-                    preferred_codec = "prores_ks_422"
-                    actual_output_path = os.path.join(output_dir, f"{base_name}.mov")
-                    logger.info("检测到透明背景需求，将使用 ProRes 422HQ 编码器输出 .mov 文件。")
-                elif transparent_codec == "vp9":
-                    preferred_codec = "libvpx-vp9"
-                    actual_output_path = os.path.join(output_dir, f"{base_name}.webm")
-                    logger.info("检测到透明背景需求，将使用 VP9 编码器输出 .webm 文件。")
-                else:
-                    # 默认使用 ProRes 4444
-                    preferred_codec = "prores_ks"
-                    actual_output_path = os.path.join(output_dir, f"{base_name}.mov")
-                    logger.info(f"未知的透明编码器选项: {transparent_codec}，将使用默认的 ProRes 4444 编码器。")
+                preferred_codec = "prores_ks" # 高质量透明编码（CPU）
+                actual_output_path = os.path.join(output_dir, f"{base_name}.mov")
+                logger.info("检测到透明背景需求，将使用 CPU (prores_ks) 输出 .mov 文件。")
             else:
                 preferred_codec = "h264_nvenc" # 优先尝试 GPU H.264 编码
                 actual_output_path = os.path.join(output_dir, f"{base_name}.mp4")
@@ -270,14 +234,14 @@ class RollVideoService:
             # 获取有效的字体路径
             font_path = self.get_font_path(font_path)
             
-            # 创建文字渲染器 (使用最终确定的bg_color)
+            # 创建文字渲染器 (使用最终确定的bg_color和计算后的行距)
             text_renderer = TextRenderer(
                 width=width,
                 font_path=font_path,
                 font_size=font_size,
-                font_color=tuple(font_color),
-                bg_color=bg_color_final,
-                line_spacing=int(font_size * line_spacing), # 使用 font_size * line_spacing
+                font_color=font_color_tuple, # 使用转换后的元组
+                bg_color=bg_color_final, 
+                line_spacing=actual_line_spacing_pixels, # 使用计算后的像素值
                 char_spacing=char_spacing,
             )
 
@@ -286,29 +250,9 @@ class RollVideoService:
             text_image, text_actual_height = text_renderer.render_text_to_image(text, min_height=height)
             logger.info(f"文本实际高度: {text_actual_height}px, 渲染图像总高度: {text_image.height}px")
 
-            # 设置线程数和缓冲区大小
-            worker_threads = worker_threads if worker_threads is not None else DEFAULT_OPTIMIZATION_CONFIG.get("worker_threads", min(self.cpu_count, 8))
-            transparent_codec = transparent_codec if transparent_codec is not None else DEFAULT_OPTIMIZATION_CONFIG.get("transparent_codec", "prores_4444")
-            frame_buffer_size = min(int(fps * 0.8), 24)
-
-            # 设置资源参数
-            resources = {
-                "worker_threads": worker_threads,
-                "frame_buffer_size": frame_buffer_size,
-                "transparent_codec": transparent_codec
-            }
-            
-            resource_info = ", ".join([f"{k}: {v}" for k, v in resources.items() if v is not None])
-            logger.info(f"资源配置: {resource_info}")
-
-            # 创建视频渲染器，传递优化参数
+            # 创建视频渲染器
             video_renderer = VideoRenderer(
-                width=width, 
-                height=height, 
-                fps=fps, 
-                scroll_speed=scroll_speed,
-                worker_threads=worker_threads,
-                frame_buffer_size=frame_buffer_size,
+                width=width, height=height, fps=fps, scroll_speed=scroll_speed
             )
 
             # 创建滚动视频，传递决策结果
@@ -320,8 +264,7 @@ class RollVideoService:
                 transparency_required=transparency_required, # 传递透明度需求
                 preferred_codec=preferred_codec, # 传递首选编码器
                 audio_path=audio_path,
-                bg_color=bg_color_final, # 传递最终的bg_color供非透明路径使用
-                transparent_codec=transparent_codec # 传递透明编码器选择
+                bg_color=bg_color_final # 传递最终的bg_color供非透明路径使用
             )
 
             logger.info(f"滚动视频创建完成: {final_output_path}")

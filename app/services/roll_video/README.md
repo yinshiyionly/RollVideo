@@ -6,46 +6,18 @@
 - **Pillow (PIL)**: 用于文字渲染和图片处理。
 - **NumPy**: **用于高效处理图像帧数据**。
 - **FFmpeg**: 作为核心的视频编码引擎，通过`subprocess`直接调用。
-- **concurrent.futures**: 支持多线程并行处理帧生成。
 
-服务通过 Pillow 将文本渲染成包含透明通道（RGBA）的长图片，然后在内存中**并行生成视频帧**，通过**生产者-消费者模式和管道 (Pipe)** 直接将原始像素数据流式传输给 FFmpeg 进程进行编码，避免了磁盘I/O瓶颈。
+服务通过 Pillow 将文本渲染成包含透明通道（RGBA）的长图片，然后在内存中逐帧生成视频画面，通过**管道 (Pipe)** 直接将原始像素数据流式传输给 FFmpeg 进程进行编码，避免了磁盘I/O瓶颈。
 
 ## 功能特点
 
 - 支持自定义视频尺寸、字体、颜色（包括透明度）等参数。
 - **自动处理文本换行**和排版。
 - **平滑的滚动**效果。
-- **自动优化编码策略**：根据背景是否透明，自动选择最优的编码器和输出格式（透明使用CPU+ProRes+MOV，不透明使用GPU加速的H.264+MP4）。
-- **双级编码策略**：对于不透明视频，优先尝试使用Nvidia GPU的H.264编码器(NVENC)，失败则回退到CPU编码。
-- **并行处理优化**：使用多线程并行生成视频帧，大幅提升处理速度。
-- **生产者-消费者模式**：一边生成帧，一边发送给ffmpeg，充分利用CPU多核心。
+- **自动优化编码策略**：根据背景是否透明，自动选择最优的编码器和输出格式（透明使用CPU+ProRes+MOV，不透明优先尝试GPU+H.264+MP4）。
+- **GPU加速（可选）**：对于不透明视频，优先尝试使用Nvidia GPU (NVENC) 加速H.264编码，若失败则自动回退到CPU编码。
 - 支持添加背景音乐。
 - 支持从文件读取文本内容。
-
-## 技术细节：多重优化机制
-
-服务采用了多重优化机制来提高编码速度：
-
-1. **并行帧生成**：
-   - 使用`ThreadPoolExecutor`并行生成视频帧
-   - 可配置的工作线程数（默认根据CPU核心数自动调整）
-   - 线程数上限为8以避免过度竞争资源
-
-2. **生产者-消费者架构**：
-   - 主线程（生产者）负责生成帧并放入缓冲区
-   - 消费者线程负责从缓冲区取出帧并写入ffmpeg管道
-   - 可配置的帧缓冲区大小（默认为帧率的80%）
-
-3. **优化的编码器选择**：
-   - 透明视频：`prores_ks` Profile 4444（保持高质量透明通道）
-   - 不透明视频分两级：
-     1. 优先尝试：`h264_nvenc`（H.264 GPU加速）
-     2. 回退选择：`libx264`（CPU编码，使用"fast"预设提升速度）
-
-4. **内存优化**：
-   - 预计算所有帧的滚动位置
-   - 优化Alpha通道混合计算，使用矢量化操作
-   - 减少不必要的数据复制操作
 
 ## 技术细节：编码策略
 
@@ -71,32 +43,37 @@
 
 2.  **不需要透明背景** (Alpha = 1.0 或 255):
     *   **目标**: 优先考虑编码速度，生成适合网络播放的格式。
-    *   **编码器 (优先选择)**: `h264_nvenc`。使用 **Nvidia GPU** 进行H.264硬件加速编码，速度较快。
-    *   **编码器 (回退选择)**: `libx264`。如果 GPU 尝试失败，则自动回退到使用 **CPU** 进行编码，使用"fast"预设提高速度。
+    *   **编码器 (首选)**: `h264_nvenc`。尝试使用 **Nvidia GPU** 进行硬件加速编码，速度快。
+    *   **编码器 (备选)**: `libx264`。如果 GPU 尝试失败（例如系统无兼容GPU、驱动问题、ffmpeg未启用NVENC），则自动回退到使用 **CPU** 进行编码。
     *   **输出格式**: `.mp4`。使用 `-movflags +faststart` 参数优化，适合网络流式播放。
-    *   **性能**: 双级回退保证在各种环境下都能获得最佳性能。
-    *   **FFmpeg 命令示例 (H.264 GPU)** (假设无音频, 宽450, 高700, 帧率30):
+    *   **性能**: GPU可用时速度最快；若回退到CPU，速度依然受益于直接管道传输，优于旧方案。
+    *   **FFmpeg 命令示例 (GPU 优先)** (假设无音频, 宽450, 高700, 帧率30):
         ```bash
-        # 尝试 H.264 GPU
+        # 尝试 GPU
         ffmpeg -y \
           -f rawvideo -vcodec rawvideo -s 450x700 -pix_fmt rgb24 -r 30 -i - \
           -c:v h264_nvenc -preset p3 -rc:v vbr -cq:v 21 -b:v 0 -pix_fmt yuv420p -movflags +faststart \
           -map 0:v:0 \
           output.mp4
         ```
+        *   `-f rawvideo ... -i -`: 从标准输入读取原始 RGB24 像素数据。
+        *   `-c:v h264_nvenc ...`: 尝试使用 Nvidia H.264 GPU 编码器，`p3` 预设，VBR 质量 21。
+        *   `-pix_fmt yuv420p`: **设置兼容性最佳的像素格式**。
+        *   `-movflags +faststart`: 优化 MP4 文件结构以利于流式播放。
+        *   `-map 0:v:0`: 仅映射视频流。
     *   **FFmpeg 命令示例 (CPU 回退)** (GPU失败后自动执行):
         ```bash
         # CPU 回退
         ffmpeg -y \
           -f rawvideo -vcodec rawvideo -s 450x700 -pix_fmt rgb24 -r 30 -i - \
-          -c:v libx264 -crf 23 -preset fast -tune fastdecode -pix_fmt yuv420p -movflags +faststart \
+          -c:v libx264 -crf 21 -preset medium -pix_fmt yuv420p -movflags +faststart \
           -map 0:v:0 \
           output.mp4
         ```
-        *   `-preset fast`: 使用更快的预设而不是默认的`medium`。
-        *   `-tune fastdecode`: 优化解码速度，减少解码资源需求。
+        *   `-c:v libx264 ...`: 使用 H.264 CPU 编码器，CRF 质量 21，`medium` 预设。
+        *   `-pix_fmt yuv420p`: 设置与 MP4 兼容的像素格式。
 
-**核心优化**: 通过并行帧生成和生产者-消费者模式，结合管道直接传输，实现了最大化的渲染和编码效率。
+**核心优化**: 无论是哪种路径，视频帧数据都是在内存中生成后，通过**管道直接传输给 FFmpeg**，避免了因读写大量临时文件而造成的严重性能瓶颈。
 
 ## 参数说明
 
@@ -115,14 +92,12 @@
 | fps | int | 30 | 视频帧率 |
 | scroll_speed | int | 2 | 滚动速度(像素/帧) |
 | audio_path | str | None | 背景音乐路径 |
-| worker_threads | int | None | 用于帧处理的工作线程数 (默认为CPU核心数，最大8) |
-| frame_buffer_size | int | None | 帧缓冲区大小 (默认为fps的80%，最大24) |
 
 ## 依赖安装
 
 ```bash
 # Python 库 (参考 requirements.txt)
-pip install pillow numpy tqdm concurrent-futures-extra
+pip install pillow numpy tqdm
 
 # 核心依赖：FFmpeg
 # 需要安装 FFmpeg。为了使用GPU加速(可选)，
@@ -133,7 +108,7 @@ pip install pillow numpy tqdm concurrent-futures-extra
 ## 注意事项
 
 - 滚动速度越大，视频时长越短。
-- 文本内容较多时处理速度已经过优化，但仍需考虑内容量。
+- 文本内容较多时，即使有优化，处理时间依然较长，尤其使用CPU编码时。
 - 如果使用中文字体，请确保指定了正确的字体文件路径。
 - **GPU 加速依赖**: 若需使用GPU加速（仅限不透明视频），请确保：
     - 安装了兼容的 Nvidia 显卡及最新驱动。
@@ -150,7 +125,3 @@ pip install pillow numpy tqdm concurrent-futures-extra
     字间距：1
     行间距：1.2
     视频背景颜色：#FFFFFF
-
-
-
-
