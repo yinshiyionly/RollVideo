@@ -4,8 +4,8 @@ import platform
 from typing import Dict, Tuple, List, Optional, Union
 from PIL import Image
 
-from app.services.roll_video.renderer import TextRenderer, VideoRenderer
-from .config import DEFAULT_OPTIMIZATION_CONFIG
+from renderer import TextRenderer, VideoRenderer
+from config import DEFAULT_OPTIMIZATION_CONFIG
 
 # 配置日志
 logger = logging.getLogger(__name__)
