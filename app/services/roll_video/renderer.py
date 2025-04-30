@@ -13,7 +13,7 @@ import tqdm
 import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor
-import mmap  # 导入mmap模块用于共享内存
+import mmap
 from numba import jit, prange
 import re
 import time
