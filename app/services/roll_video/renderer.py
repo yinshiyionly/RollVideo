@@ -14,7 +14,7 @@ import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor
 import mmap  # 导入mmap模块用于共享内存
-from numba import jit, pr
+from numba import jit, prange
 
 logger = logging.getLogger(__name__)
 
