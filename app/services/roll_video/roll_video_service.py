@@ -160,8 +160,8 @@ class RollVideoService:
         ),
         line_spacing: float = 0.5, # 行间距比例因子，相对于字体大小
         char_spacing: int = 0,
-        fps: int = 30,
-        scroll_speed: int = 2,
+        fps: int = 24,  # 默认帧率降低到24
+        scroll_speed: int = 3,  # 提高到3像素/帧，配合降低的帧率保持视觉效果
         audio_path: Optional[str] = None,
         scale_factor: float = 0.75,   # 默认缩放因子0.75以获得更好性能
         frame_skip: int = 1          # 不使用跳帧以保证平滑滚动
@@ -196,6 +196,16 @@ class RollVideoService:
             # 确保颜色是元组
             font_color_tuple = tuple(font_color) if isinstance(font_color, list) else font_color
             bg_color_tuple = tuple(bg_color) if isinstance(bg_color, list) else bg_color
+            
+            # 自适应帧率 - 根据滚动速度调整
+            adjusted_fps = fps
+            if scroll_speed > 4:
+                # 对于快速滚动，自动提高帧率以保持视觉流畅度
+                recommended_fps = min(30, int(scroll_speed * 6))  # 基于滚动速度计算推荐帧率
+                adjusted_fps = max(fps, recommended_fps)
+                if adjusted_fps != fps:
+                    logger.info(f"滚动速度较快({scroll_speed}像素/帧)，自动调整帧率: {fps} → {adjusted_fps}fps，以保持视觉流畅")
+                    fps = adjusted_fps
             
             # 计算实际行间距（像素）
             actual_line_spacing_pixels = int(font_size * line_spacing)

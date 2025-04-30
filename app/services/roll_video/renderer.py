@@ -14,13 +14,11 @@ import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor
 import mmap  # 导入mmap模块用于共享内存
+from numba import jit, pr
 
 logger = logging.getLogger(__name__)
 
-# 优化5: 添加Numba JIT编译支持
 try:
-    from numba import jit, prange
-    
     # 使用Numba JIT编译优化alpha混合计算
     @jit(nopython=True, parallel=True, fastmath=True, cache=True)
     def blend_alpha_fast(source, target, alpha):
@@ -256,7 +254,17 @@ class VideoRenderer:
         # 增加CPU线程使用数量，最大化利用8核CPU
         self.num_threads = min(7, os.cpu_count() or 1)  # 使用7个线程用于帧生成，保留1个核心给ffmpeg
         # 优化3: 设置批量处理的大小
-        self.batch_size = 4  # 每次处理4帧
+        self.batch_size = 8  # 增加到8帧一批(原来是4帧)
+        # 获取系统内存大小(GB)
+        try:
+            import psutil
+            total_memory_gb = psutil.virtual_memory().total / (1024**3)
+            # 如果内存超过28GB，则使用更大的批量
+            if total_memory_gb > 28:
+                self.batch_size = 16  # 更大内存时使用更大批量
+        except ImportError:
+            pass  # 如果无法获取内存大小，保持默认值
+            
         logger.info(f"视频渲染器初始化: 宽={width}, 高={height}, 帧率={fps}, 滚动速度={scroll_speed}, 线程数={self.num_threads}, 批量={self.batch_size}")
     
     def _get_ffmpeg_command(
@@ -312,17 +320,18 @@ class VideoRenderer:
         if position_key in self._position_cache:
             img_start_y, img_end_y, frame_start_y, frame_end_y = self._position_cache[position_key]
         else:
-            # 计算当前帧的滚动位置
+            # 计算当前帧的滚动位置 - 使用浮点数提高精度
             if frame_idx < padding_frames_start: 
-                current_position = 0
+                current_position = 0.0
             elif frame_idx < padding_frames_start + scroll_frames:
+                # 使用浮点数计算，避免舍入误差累积
                 scroll_progress = frame_idx - padding_frames_start
                 current_position = scroll_progress * self.scroll_speed
-                current_position = min(current_position, scroll_distance)
+                current_position = min(current_position, float(scroll_distance))
             else: 
-                current_position = scroll_distance
+                current_position = float(scroll_distance)
                 
-            # 计算图像和帧的切片位置
+            # 精确计算图像和帧的切片位置
             img_start_y = int(current_position)
             img_end_y = min(img_height, img_start_y + self.height)
             frame_start_y = 0
@@ -418,17 +427,23 @@ class VideoRenderer:
              img_array = np.array(image)
              if img_array.shape[2] != 4: raise ValueError("无法转换图像为RGBA")
         
-        # 修改滚动距离计算，确保最后一行能滚动到视频顶部再结束
-        # 原来: scroll_distance = max(0, text_actual_height - self.height)
-        scroll_distance = text_actual_height + self.height
+        # 修改滚动距离计算，减少视频末尾的多余空白
+        # 原来: scroll_distance = text_actual_height + self.height
+        # 现在只需要确保最后一行文字完全滚出屏幕即可
+        # 添加约20%的视频高度作为底部缓冲区
+        bottom_padding = int(self.height * 0.2)  
+        scroll_distance = text_actual_height + bottom_padding
         
-        scroll_frames = int(scroll_distance / self.scroll_speed) if self.scroll_speed > 0 else 0
+        # 使用浮点数精确计算滚动位置，避免累积舍入误差
+        scroll_frames_float = scroll_distance / self.scroll_speed if self.scroll_speed > 0 else 0
+        scroll_frames = int(scroll_frames_float + 0.5)  # 四舍五入到最接近的整数
+        
         padding_frames_start = int(self.fps * 0.5)
         padding_frames_end = int(self.fps * 0.5)
         total_frames = padding_frames_start + scroll_frames + padding_frames_end
         duration = total_frames / self.fps
         logger.info(f"文本高:{text_actual_height}, 图像高:{img_height}, 视频高:{self.height}")
-        logger.info(f"滚动距离:{scroll_distance}, 滚动帧:{scroll_frames}, 总帧:{total_frames}, 时长:{duration:.2f}s")
+        logger.info(f"底部填充:{bottom_padding}, 滚动距离:{scroll_distance}, 滚动帧:{scroll_frames}, 总帧:{total_frames}, 时长:{duration:.2f}s")
         
         # 优先使用不跳帧模式，以保证滚动平滑度
         actual_frame_skip = 1  # 强制设为1，不使用跳帧
@@ -466,13 +481,18 @@ class VideoRenderer:
                 "-profile:v", "0",        # 从4(高质量)改为0(代理质量)
                 "-pix_fmt", "yuva444p",   # 降低位深度
                 "-alpha_bits", "8",       # 降低alpha通道质量
-                "-vendor", "ap10"
+                "-vendor", "ap10",
+                # 增加缓冲区大小，提高流畅度
+                "-bufsize", "20M",
+                # 增强流畅度参数
+                "-g", str(self.fps * 2),  # 每2秒一个关键帧
+                "-bf", "2"                # 最多2个B帧，增强平滑度
             ]
             logger.info(f"设置ffmpeg(透明): 输入={ffmpeg_pix_fmt}, 输出={output_path}, 参数={' '.join(video_codec_and_output_params)}")
         else:
             ffmpeg_pix_fmt = "rgb24"
             output_path = os.path.splitext(output_path)[0] + ".mp4"
-            # GPU 参数优化: 降低质量换取速度
+            # GPU 参数优化: 降低质量换取速度，同时优化平滑度
             video_codec_and_output_params = [
                 "-c:v", preferred_codec,  # h264_nvenc
                 "-preset", "p4",          # 更快速度的preset (p4比p3更快)
@@ -480,24 +500,34 @@ class VideoRenderer:
                 "-cq:v", "28",            # 降低质量 (21→28)，值越大质量越低
                 "-b:v", "0",
                 "-pix_fmt", "yuv420p",
+                # 提高流畅度的参数
+                "-g", str(self.fps * 2),  # GOP大小，每2秒一个关键帧
+                "-bf", "2",               # 最多2个B帧
+                "-bufsize", "50M",        # 增加缓冲区大小
+                "-refs", "3",             # 使用3个参考帧
                 "-movflags", "+faststart"
             ]
             # 添加NVENC特别参数以提高性能
             if preferred_codec == "h264_nvenc":
                 video_codec_and_output_params.extend([
-                    "-gpu", "0",  # 明确指定GPU
-                    "-surfaces", "64",  # 增加表面缓冲数
-                    "-delay", "0",  # 降低延迟
-                    "-no-scenecut", "1"  # 禁用场景切换检测以提高速度
+                    "-gpu", "0",          # 明确指定GPU
+                    "-surfaces", "64",     # 增加表面缓冲数
+                    "-delay", "0",         # 降低延迟
+                    "-no-scenecut", "1"    # 禁用场景切换检测以提高速度
                 ])
             
-            # CPU 回退参数优化: 降低质量换取速度
+            # CPU 回退参数优化: 降低质量换取速度，加强流畅度
             cpu_fallback_codec_and_output_params = [
                 "-c:v", "libx264",
-                "-crf", "28",            # 降低质量 (21→28)
-                "-preset", "ultrafast",  # 速度最快的preset
-                "-tune", "fastdecode",   # 优化解码速度
+                "-crf", "28",              # 降低质量 (21→28)
+                "-preset", "ultrafast",    # 速度最快的preset
+                "-tune", "fastdecode",     # 优化解码速度
                 "-pix_fmt", "yuv420p",
+                # 提高流畅度的参数
+                "-g", str(self.fps * 2),   # GOP大小，每2秒一个关键帧 
+                "-bf", "2",                # 最多2个B帧
+                "-bufsize", "50M",         # 增加缓冲区大小
+                "-refs", "3",              # 使用3个参考帧
                 "-movflags", "+faststart"
             ]
             logger.info(f"设置ffmpeg(不透明): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
@@ -584,9 +614,26 @@ class VideoRenderer:
                 
                 # 创建帧生成线程池和队列 - 增大队列大小以提高性能
                 # 增加队列容量以更好地平衡生产者和消费者
-                queue_size = 36  # 增加队列大小以提高性能
+                queue_size = 96  # 增加到96（之前是36），充分利用内存
                 if transparency_required:
-                    queue_size = 24  # 透明视频使用稍小的队列以减少内存使用
+                    queue_size = 64  # 透明视频也增加到64（之前是24）
+                
+                # 如果系统内存充足，进一步增加队列大小
+                try:
+                    import psutil
+                    total_memory_gb = psutil.virtual_memory().total / (1024**3)
+                    free_memory_gb = psutil.virtual_memory().available / (1024**3)
+                    
+                    # 如果有大量可用内存，则大幅增加队列大小
+                    if free_memory_gb > 15 and total_memory_gb > 28:
+                        if transparency_required:
+                            queue_size = min(128, queue_size * 2)  # 最大增加到128
+                        else:
+                            queue_size = min(256, queue_size * 2)  # 最大增加到256
+                        
+                    logger.info(f"系统总内存:{total_memory_gb:.1f}GB，可用内存:{free_memory_gb:.1f}GB，调整队列大小:{queue_size}")
+                except ImportError:
+                    pass  # 如果无法获取内存信息，保持默认值
                 
                 frame_queue = queue.Queue(maxsize=queue_size)
                 frame_pool = ThreadPoolExecutor(max_workers=actual_threads)
@@ -595,17 +642,28 @@ class VideoRenderer:
                 batch_size = min(self.batch_size, render_frame_count)
                 num_batches = (render_frame_count + batch_size - 1) // batch_size  # 向上取整
                 
-                # 预填充队列（启动初始批处理任务）
-                prefill_batches = min(queue_size//batch_size, num_batches)
+                # 预填充队列（启动初始批处理任务） - 增加预填充比例
+                prefill_factor = 0.8  # 预填充因子，填充队列的80%
+                prefill_batches = min(int(queue_size * prefill_factor / batch_size), num_batches)
                 
-                # 优化4: 为帧数据创建共享内存
+                # 优化4: 为帧数据创建共享内存 - 增加总缓冲区大小
                 frame_byte_size = self.width * self.height * (4 if transparency_required else 3)
-                total_buffer_size = frame_byte_size * batch_size * prefill_batches
+                # 增加预留系数，确保缓冲区足够大
+                memory_reserve_factor = 1.2
+                total_buffer_size = int(frame_byte_size * batch_size * prefill_batches * memory_reserve_factor)
+                
+                # 限制单次分配的最大共享内存（避免过大导致失败）
+                max_buffer_size = 2 * 1024 * 1024 * 1024  # 2GB
+                if total_buffer_size > max_buffer_size:
+                    # 如果太大，分成多个缓冲区
+                    total_buffer_size = max_buffer_size
+                    logger.info(f"共享内存请求过大，限制为{max_buffer_size/1024/1024:.1f}MB")
+                
                 try:
                     # 尝试创建共享内存
                     shared_buffer = mmap.mmap(-1, total_buffer_size)
                     use_shared_memory = True
-                    logger.info(f"创建共享内存缓冲区: {total_buffer_size/1024/1024:.1f}MB")
+                    logger.info(f"创建共享内存缓冲区: {total_buffer_size/1024/1024:.1f}MB，预填充{prefill_batches}批次")
                 except (ImportError, OSError, ValueError) as e:
                     logger.warning(f"无法创建共享内存: {e}，将使用标准队列")
                     use_shared_memory = False
