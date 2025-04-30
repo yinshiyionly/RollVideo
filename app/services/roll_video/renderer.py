@@ -338,8 +338,8 @@ class VideoRenderer:
             actual_frame_skip = frame_skip  # 恢复用户设置的跳帧率以提高速度
             logger.info(f"使用跳帧率{actual_frame_skip}以提高处理速度")
             
-            # 使用更高效的平滑处理
-            vf_filters.append("tblend=all_mode=average,framestep=1:2")  # 轻量级平滑，替代重量级的minterpolate
+            # 使用更高效的平滑处理 - 只使用简单可靠的tblend滤镜
+            vf_filters.append("tblend=all_mode=average")  # 轻量级平滑，不使用复杂参数
             
         # 透明视频的额外处理
         if transparency_required:
