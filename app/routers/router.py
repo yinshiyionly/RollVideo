@@ -39,12 +39,18 @@ async def create_task(request: TaskCreateRequest):
         # 生成任务ID
         task_id = f"{uuid4()}"
 
-         # 构建任务参数
+
+
+        # 构建任务参数
         task_data = {
             "task_id": task_id,
             "uid": request.uid,
             "source": request.source,
-            "payload": request.payload
+            "payload": {
+                **request.payload,  # 保留payload的所有其他字段
+                "text_length": len(request.payload.text),  # 添加文本长度统计
+                "text": None  # 将原text置为None或直接删除
+            }
         }
 
         # 记录参数

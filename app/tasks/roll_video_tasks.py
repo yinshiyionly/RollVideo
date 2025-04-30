@@ -85,7 +85,7 @@ def push_event_to_client(self, task_id: str, video_url: str, retry_count: int = 
             )
         else:
             log.error(f"推送事件失败，已达到最大重试次数: task_id={task_id}")
-            
+
     except Exception as e:
         log.error(f"推送事件过程中发生异常: {str(e)}")
         
@@ -171,9 +171,13 @@ def generate_roll_video_task(self, task_id: str):
             cleanup_temp_file(result.get("output_path"))
         
     except Exception as e:
-        log.error(f"处理视频任务失败: {str(e)}")
+        error_msg = f"处理视频任务失败: {str(e)}"
+        log.error(error_msg)
         # 更新任务状态为失败
-        update_task_status(task_id, TaskState.FAILED, {"error": str(e)})
+        update_task_status(task_id, TaskState.FAILED, {"error": error_msg})
+        # 5.1 向客户端推送失败事件
+        if hasattr(settings, 'CLIENT_NOTIFY_URL') and settings.CLIENT_NOTIFY_URL:
+            push_event_to_client.delay(task_id, "", 0, "video_failed", {"error": error_msg})
 
 def update_task_status(task_id: str, state: TaskState, result: dict = None):
     """更新任务状态
