@@ -1,6 +1,6 @@
 from typing import Optional, Dict, Any, List
 from fastapi import HTTPException
-from sqlalchemy import create_engine, text, exc
+from sqlalchemy import exc
 from sqlalchemy.exc import SQLAlchemyError
 from app.utils.logger import Logger
 from app.models.roll_video_task import TaskState, TaskStatus, RollVideoTaskCreate, RollVideoTaskResponse, RollVideoTaskUpdate
@@ -9,7 +9,7 @@ from functools import wraps
 import time
 from datetime import datetime
 
-from sqlalchemy import Column, String, Integer, Text, DateTime, JSON
+from sqlalchemy import Column, String, Integer, DateTime, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import Session
 
@@ -123,7 +123,6 @@ class RollVideoTaskDB:
         try:
             with self.mysql_pool.session_scope() as session:
                 query = session.query(RollVideoTaskModel).filter(RollVideoTaskModel.task_id == task_id).first()
-                logger.info(f"获取任务: {query}")
                 
                 if not query:
                     return None
@@ -132,11 +131,9 @@ class RollVideoTaskDB:
                 payload = None
                 if query.payload is not None:
                     if isinstance(query.payload, dict):
-                        logger.info(f"payload是字典: {query.payload}")
                         # 已经是字典，直接使用
                         payload = query.payload
                     elif isinstance(query.payload, str):
-                        logger.info(f"payload是字符串: {query.payload}")
                         # 是字符串，需要解析
                         try:
                             payload = json.loads(query.payload)
