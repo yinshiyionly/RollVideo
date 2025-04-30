@@ -5,7 +5,7 @@ from typing import Dict, Tuple, List, Optional, Union
 from PIL import Image
 
 from renderer import TextRenderer, VideoRenderer
-from .config import DEFAULT_OPTIMIZATION_CONFIG # 导入配置
+from config import DEFAULT_OPTIMIZATION_CONFIG
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -169,10 +169,7 @@ class RollVideoService:
         scroll_speed: int = 2,
         audio_path: Optional[str] = None,
         worker_threads: Optional[int] = None,
-        frame_buffer_size: Optional[int] = None,
         transparent_codec: Optional[str] = None,
-        memory_buffer_mb: Optional[int] = None,
-        cpu_usage_limit: Optional[int] = None,
     ) -> Dict[str, Union[str, bool]]:
         """
         创建滚动视频，自动根据透明度选择编码策略和输出格式。
@@ -187,9 +184,6 @@ class RollVideoService:
         
         性能优化:
           - 可以通过 worker_threads 指定帧处理的线程数
-          - 可以通过 frame_buffer_size 控制帧缓冲区大小，影响内存占用和编码效率
-          - 可以通过 memory_buffer_mb 设置内存缓冲区大小，优化大视频处理
-          - 可以通过 cpu_usage_limit 限制 CPU 使用率，防止系统过载（仅在 Linux 上生效）
         
         Args:
             text: 要展示的文本内容
@@ -210,20 +204,10 @@ class RollVideoService:
             worker_threads: 用于帧处理的工作线程数
                            默认值为系统CPU核心数（最大为8）
                            增加可提高渲染速度，但也会增加内存占用
-            frame_buffer_size: 帧缓冲区大小（帧数）
-                             默认为fps的80%（最大为24帧）
-                             增加可提高编码效率，但也会增加内存占用
             transparent_codec: 透明视频编码器选择，可选值:
                              "prores_4444" - 高质量，较大文件（默认），输出为.mov
                              "prores_422" - 中等质量，中等文件大小，输出为.mov
                              "vp9" - 较低质量，最小文件大小，输出为.webm
-            memory_buffer_mb: 内存缓冲区大小(MB)
-                            影响编码过程中的内存使用量和读写效率
-                            默认为10MB，大视频可考虑增加
-            cpu_usage_limit: CPU使用限制，百分比值(1-100)
-                           限制编码过程中的CPU使用率，防止系统过载
-                           仅在Linux系统上生效，需要安装cpulimit工具
-            
         Returns:
             包含处理结果的字典: 
             {
@@ -305,7 +289,6 @@ class RollVideoService:
             # 设置线程数和缓冲区大小
             worker_threads = worker_threads if worker_threads is not None else DEFAULT_OPTIMIZATION_CONFIG.get("worker_threads", min(self.cpu_count, 8))
             transparent_codec = transparent_codec if transparent_codec is not None else DEFAULT_OPTIMIZATION_CONFIG.get("transparent_codec", "prores_4444")
-            memory_buffer_mb = memory_buffer_mb if memory_buffer_mb is not None else DEFAULT_OPTIMIZATION_CONFIG.get("memory_buffer_mb", 10)
             frame_buffer_size = min(int(fps * 0.8), 24)
             cpu_usage_limit = 80
 
@@ -313,7 +296,6 @@ class RollVideoService:
             resources = {
                 "worker_threads": worker_threads,
                 "frame_buffer_size": frame_buffer_size,
-                "memory_buffer_mb": memory_buffer_mb,
                 "cpu_usage_limit": cpu_usage_limit,
                 "transparent_codec": transparent_codec
             }
@@ -329,7 +311,6 @@ class RollVideoService:
                 scroll_speed=scroll_speed,
                 worker_threads=worker_threads,
                 frame_buffer_size=frame_buffer_size,
-                memory_buffer_mb=memory_buffer_mb,
                 cpu_usage_limit=cpu_usage_limit
             )
 

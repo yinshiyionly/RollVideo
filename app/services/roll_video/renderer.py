@@ -200,7 +200,6 @@ class VideoRenderer:
         scroll_speed: int = 2,  # 每帧滚动的像素数
         frame_buffer_size: int = 24, # 帧缓冲区大小，默认为fps的80%
         worker_threads: int = 4,  # 工作线程数
-        memory_buffer_mb: Optional[int] = None,  # 内存缓冲区大小(MB)
         cpu_usage_limit: Optional[int] = None   # CPU使用限制(百分比)
     ):
         """
@@ -217,9 +216,6 @@ class VideoRenderer:
             worker_threads: 用于帧处理的工作线程数
                            增加可提高渲染速度，但也会增加内存占用
                            建议不超过CPU核心数
-            memory_buffer_mb: 内存缓冲区大小(MB)
-                            影响编码过程中的内存使用量和读写效率
-                            默认为10MB，大视频可考虑增加
             cpu_usage_limit: CPU使用限制，百分比值(1-100)
                            限制编码过程中的CPU使用率，防止系统过载
                            仅在Linux系统上生效，需要安装cpulimit工具
@@ -230,7 +226,6 @@ class VideoRenderer:
         self.scroll_speed = scroll_speed
         self.frame_buffer_size = min(frame_buffer_size, int(fps * 0.8)) # 限制缓冲区大小
         self.worker_threads = max(1, min(worker_threads, os.cpu_count() or 4)) # 限制线程数
-        self.memory_buffer_mb = memory_buffer_mb
         self.cpu_usage_limit = cpu_usage_limit
     
     def _get_ffmpeg_command(
@@ -503,11 +498,6 @@ class VideoRenderer:
                     ffmpeg_cmd = cpu_limit_cmd + ffmpeg_cmd
                 else:
                     logger.warning(f"CPU使用限制（{self.cpu_usage_limit}%）仅在Linux上支持")
-            
-            # 计算内存缓冲区大小
-            buffer_size = 10 * 1024 * 1024  # 默认10MB
-            if self.memory_buffer_mb is not None and self.memory_buffer_mb > 0:
-                buffer_size = int(self.memory_buffer_mb * 1024 * 1024)
                 
             logger.info(f"执行ffmpeg命令: {' '.join(ffmpeg_cmd)}")
             
@@ -532,7 +522,7 @@ class VideoRenderer:
                 process = subprocess.Popen(
                     ffmpeg_cmd, stdin=subprocess.PIPE, 
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-                    bufsize=buffer_size  # 使用指定或默认的缓冲区大小
+                    bufsize=-1
                 )
                 
                 # 启动输出读取线程
