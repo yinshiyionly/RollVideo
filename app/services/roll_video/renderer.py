@@ -591,9 +591,16 @@ class VideoRenderer:
                 frame_queue = queue.Queue(maxsize=queue_size)
                 frame_pool = ThreadPoolExecutor(max_workers=actual_threads)
                 
+                # 计算批处理任务数量
+                batch_size = min(self.batch_size, render_frame_count)
+                num_batches = (render_frame_count + batch_size - 1) // batch_size  # 向上取整
+                
+                # 预填充队列（启动初始批处理任务）
+                prefill_batches = min(queue_size//batch_size, num_batches)
+                
                 # 优化4: 为帧数据创建共享内存
                 frame_byte_size = self.width * self.height * (4 if transparency_required else 3)
-                total_buffer_size = frame_byte_size * self.batch_size * prefill_batches
+                total_buffer_size = frame_byte_size * batch_size * prefill_batches
                 try:
                     # 尝试创建共享内存
                     shared_buffer = mmap.mmap(-1, total_buffer_size)
@@ -651,12 +658,6 @@ class VideoRenderer:
                         
                         frame_queue.put(frames_batch)
                 
-                # 计算批处理任务数量
-                batch_size = min(self.batch_size, render_frame_count)
-                num_batches = (render_frame_count + batch_size - 1) // batch_size  # 向上取整
-                
-                # 预填充队列（启动初始批处理任务）
-                prefill_batches = min(queue_size//batch_size, num_batches)
                 logger.info(f"启动{prefill_batches}个批处理任务(每批{batch_size}帧)，使用{actual_threads}个线程")
                 
                 if use_shared_memory:
