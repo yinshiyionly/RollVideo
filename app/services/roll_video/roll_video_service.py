@@ -1,10 +1,11 @@
 import os
 import logging
 import platform
-from typing import Dict, Tuple, List, Optional, Union
+from typing import Dict, Tuple, List, Optional, Union, Callable
 from PIL import Image
+import io
 
-from renderer import TextRenderer, VideoRenderer
+from app.services.roll_video.renderer import TextRenderer, VideoRenderer
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -147,46 +148,48 @@ class RollVideoService:
         self,
         text: str,
         output_path: str,
-        width: int = 1080,
-        height: int = 1920,
-        font_path: Optional[str] = None,
+        bg_color: Tuple[int, int, int, int] = (0, 0, 0, 255),
+        fps: int = 30,
+        scale_factor: float = 0.75,
+        frame_skip: int = 1,  # 默认不跳帧
+        scroll_speed: int = 2,
+        with_audio: bool = False,
+        width: int = 720,
+        height: int = 1280,
         font_size: int = 40,
         font_color: Tuple[int, int, int] = (255, 255, 255),
-        bg_color: Union[Tuple[int, int, int], Tuple[int, int, int, Union[int, float]]] = (
-            0, # 默认黑色背景，不透明
-            0,
-            0,
-            255,
-        ),
-        line_spacing: float = 0.5, # 行间距比例因子，相对于字体大小
+        transparent: bool = False,
+        font_path: Optional[str] = None,
+        line_spacing: int = 10,
         char_spacing: int = 0,
-        fps: int = 24,  # 默认帧率降低到24
-        scroll_speed: int = 3,  # 提高到3像素/帧，配合降低的帧率保持视觉效果
         audio_path: Optional[str] = None,
-        scale_factor: float = 0.75,   # 默认缩放因子0.75以获得更好性能
-        frame_skip: int = 1          # 不使用跳帧以保证平滑滚动
+        override_temp_working_dir: Optional[str] = None,
+        error_callback: Optional[Callable[[str], None]] = None
     ) -> Dict[str, Union[str, bool]]:
         """
-        创建滚动视频，自动根据透明度选择CPU/GPU和格式。
-        透明: CPU + prores_ks + mov
-        不透明: 尝试 GPU (h264_nvenc) 回退 CPU (libx264) + mp4
+        创建滚动视频，自动根据透明度选择适合的格式。
+        使用优化后的多线程渲染引擎以获得最佳性能和流畅度。
         
         Args:
             text: 要展示的文本内容
             output_path: 期望的输出视频路径（扩展名会被自动调整）
+            bg_color: 背景颜色，可以是RGB(A)元组或列表(r,g,b)或(r,g,b,a)，a为透明度(0-255或0.0-1.0)
+            fps: 视频帧率
+            scale_factor: 缩放因子(0.5-1.0)，降低处理分辨率以提高速度
+            frame_skip: 跳帧率，默认为1不跳帧，提高值会减少平滑度但提高渲染速度
+            scroll_speed: 滚动速度(像素/帧)
+            with_audio: 是否需要音频
             width: 视频宽度
             height: 视频高度
-            font_path: 字体文件路径，不指定则使用默认字体
             font_size: 字体大小
             font_color: 字体颜色 (R,G,B)，可以是列表或元组
-            bg_color: 背景颜色，可以是RGB(A)元组或列表(r,g,b)或(r,g,b,a)，a为透明度(0-255或0.0-1.0)
-            line_spacing: 行间距比例因子 (例如 0.5 表示行间距为字体大小的一半)
+            transparent: 是否需要透明背景
+            font_path: 字体文件路径，不指定则使用默认字体
+            line_spacing: 行间距
             char_spacing: 字符间距
-            fps: 视频帧率
-            scroll_speed: 滚动速度(像素/帧)
             audio_path: 可选的音频文件路径
-            scale_factor: 缩放因子(0.5-1.0)，小于1时降低处理分辨率以提高速度
-            frame_skip: 跳帧率，大于1时减少渲染帧以提高速度
+            override_temp_working_dir: 可选的临时工作目录
+            error_callback: 错误回调函数
             
         Returns:
             包含处理结果的字典
@@ -208,7 +211,7 @@ class RollVideoService:
                     fps = adjusted_fps
             
             # 计算实际行间距（像素）
-            actual_line_spacing_pixels = int(font_size * line_spacing)
+            actual_line_spacing_pixels = int(font_size * (line_spacing / 100)) if line_spacing > 0 else line_spacing
 
             # --- 决定透明度需求和编码策略 --- 
             normalized_bg_color = list(bg_color_tuple)
@@ -224,7 +227,8 @@ class RollVideoService:
             normalized_bg_color[3] = max(0, min(255, normalized_bg_color[3])) 
             bg_color_final = tuple(normalized_bg_color)
 
-            transparency_required = bg_color_final[3] < 255
+            # 检测是否需要透明
+            should_be_transparent = transparent or bg_color_final[3] < 255
             
             # 限制缩放因子范围
             if scale_factor < 0.5:
@@ -246,7 +250,7 @@ class RollVideoService:
             render_line_spacing = actual_line_spacing_pixels
             render_scroll_speed = scroll_speed
             
-            if scale_factor < 1.0 and not transparency_required:
+            if scale_factor < 1.0 and not should_be_transparent:
                 logger.info(f"使用缩放因子: {scale_factor}，降低处理分辨率以提高速度")
                 render_width = int(width * scale_factor)
                 render_height = int(height * scale_factor)
@@ -256,70 +260,97 @@ class RollVideoService:
                 logger.info(f"原始分辨率: {width}x{height}, 渲染分辨率: {render_width}x{render_height}")
                 logger.info(f"原始字体大小: {font_size}, 渲染字体大小: {render_font_size}")
                 logger.info(f"原始滚动速度: {scroll_speed}, 渲染滚动速度: {render_scroll_speed}")
-            
-            # 根据透明度需求确定输出格式和编码器
-            output_dir = os.path.dirname(os.path.abspath(output_path))
-            base_name = os.path.splitext(os.path.basename(output_path))[0]
-            
-            if transparency_required:
-                preferred_codec = "prores_ks" # 高质量透明编码（CPU）
-                actual_output_path = os.path.join(output_dir, f"{base_name}.mov")
-                logger.info("检测到透明背景需求，将使用 CPU (prores_ks) 输出 .mov 文件。")
-            else:
-                preferred_codec = "h264_nvenc" # 优先尝试 GPU H.264 编码
-                actual_output_path = os.path.join(output_dir, f"{base_name}.mp4")
-                logger.info("无透明背景需求，将优先尝试 GPU (h264_nvenc) 输出 .mp4 文件。")
-            # --- 结束决策 --- 
 
-            logger.info(f"开始创建滚动视频，实际输出路径: {actual_output_path}")
-            
             # 确保输出目录存在
+            output_dir = os.path.dirname(os.path.abspath(output_path))
             os.makedirs(output_dir, exist_ok=True)
             
             # 获取有效的字体路径
-            font_path = self.get_font_path(font_path)
+            actual_font_path = self.get_font_path(font_path)
             
             # 创建文字渲染器 (使用最终确定的bg_color和计算后的行距)
             text_renderer = TextRenderer(
                 width=render_width,
-                font_path=font_path,
+                font_path=actual_font_path,
                 font_size=render_font_size,
-                font_color=font_color_tuple, # 使用转换后的元组
+                font_color=font_color_tuple, 
                 bg_color=bg_color_final, 
-                line_spacing=render_line_spacing, # 使用计算后的像素值
+                line_spacing=render_line_spacing, 
                 char_spacing=char_spacing,
             )
 
             # 将文本渲染为图片，并获取文本实际高度
             logger.info("将文本渲染为图片...")
-            text_image, text_actual_height = text_renderer.render_text_to_image(text, min_height=render_height)
-            logger.info(f"文本实际高度: {text_actual_height}px, 渲染图像总高度: {text_image.height}px")
+            text_image, text_height = text_renderer.render_text_to_image(text, min_height=render_height)
+            logger.info(f"文本实际高度: {text_height}px, 渲染图像总高度: {text_image.height}px")
 
-            # 创建视频渲染器
+            # 创建视频渲染器 (直接使用新的优化版VideoRenderer)
             video_renderer = VideoRenderer(
-                width=render_width, height=render_height, fps=fps, scroll_speed=render_scroll_speed
-            )
-
-            # 创建滚动视频，传递决策结果
-            logger.info("开始创建滚动视频...")
-            final_output_path = video_renderer.create_scrolling_video(
-                image=text_image,
-                output_path=actual_output_path, # 使用自动调整后的路径
-                text_actual_height=text_actual_height,
-                transparency_required=transparency_required, # 传递透明度需求
-                preferred_codec=preferred_codec, # 传递首选编码器
+                width=render_width, 
+                height=render_height, 
+                fps=fps, 
+                output_path=output_path,
+                frame_skip=frame_skip,
+                scale_factor=1.0,  # 已经在输入尺寸上应用过缩放，这里不需要再缩放
+                with_audio=with_audio,
                 audio_path=audio_path,
-                bg_color=bg_color_final, # 传递最终的bg_color供非透明路径使用
-                frame_skip=frame_skip # 传递跳帧率
+                transparent=should_be_transparent,
+                override_temp_working_dir=override_temp_working_dir,
+                error_callback=error_callback
             )
-
-            logger.info(f"滚动视频创建完成: {final_output_path}")
-
-            return {
-                "status": "success",
-                "message": "滚动视频创建成功",
-                "output_path": final_output_path,
-            }
+            
+            # 计算总帧数
+            total_frames = video_renderer.calculate_total_frames(text_height, render_scroll_speed)
+            
+            # 创建帧生成函数
+            def frame_generator(frame_index):
+                # 计算当前滚动位置
+                scroll_pos = frame_index * render_scroll_speed
+                
+                # 创建视频帧
+                if should_be_transparent:
+                    # 透明背景
+                    frame = Image.new("RGBA", (render_width, render_height), (0, 0, 0, 0))
+                else:
+                    # 使用指定背景色
+                    frame = Image.new("RGB", (render_width, render_height), bg_color_final[:3])
+                
+                # 计算文本位置 (从底部向上滚动)
+                text_y = render_height - scroll_pos
+                
+                # 将文本图像粘贴到当前帧
+                frame.paste(text_image, (0, text_y), text_image if text_image.mode == "RGBA" else None)
+                
+                # 转换为字节流
+                buffer = io.BytesIO()
+                frame_format = "raw"
+                if should_be_transparent:
+                    frame.save(buffer, format="PNG")
+                    frame_bytes = buffer.getvalue()
+                else:
+                    frame_bytes = frame.tobytes()
+                
+                return frame_bytes
+            
+            # 开始渲染视频
+            logger.info(f"开始渲染滚动视频，总帧数: {total_frames}...")
+            success = video_renderer.render_frames(total_frames, frame_generator)
+            
+            if success:
+                logger.info(f"滚动视频创建成功: {output_path}")
+                return {
+                    "status": "success",
+                    "message": "滚动视频创建成功",
+                    "output_path": output_path,
+                }
+            else:
+                error_msg = "视频渲染失败，请检查日志获取详细信息"
+                logger.error(error_msg)
+                return {
+                    "status": "error",
+                    "message": error_msg,
+                    "output_path": None,
+                }
 
         except Exception as e:
             logger.error(f"创建滚动视频失败: {str(e)}", exc_info=True)

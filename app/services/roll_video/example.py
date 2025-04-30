@@ -48,58 +48,58 @@ def main():
                 "fps": 30,
                 "scroll_speed": 1,
             }
-        },
-        {
-            # 透明背景 -> 使用 ProRes 4444 -> 输出 .mov (高质量，大文件)
-            "description": "透明背景黑字（ProRes 4444 -> MOV）",
-            "params": {
-                "text": sample_text[:2000],  # 使用较少文字以加快测试
-                "width": 720,
-                "height": 1280,
-                "font_path": "方正黑体简体.ttf",
-                "font_size": 24,
-                "font_color": [0,0,0],
-                "bg_color": [255,255,255,0.5],  # 半透明背景
-                "line_spacing": 1.5,
-                "char_spacing": 5,
-                "fps": 30,
-                "scroll_speed": 1,  # 较快的滚动速度
-            }
-        },
-        {
-            # 透明背景 -> 使用 ProRes 422HQ -> 输出 .mov (中等质量，中等文件大小)
-            "description": "透明背景黑字（ProRes 422HQ -> MOV）",
-            "params": {
-                "text": sample_text[:2000],  # 使用较少文字以加快测试
-                "width": 720,
-                "height": 1280,
-                "font_path": "方正黑体简体.ttf",
-                "font_size": 24,
-                "font_color": [0,0,0],
-                "bg_color": [255,255,255,0.5],  # 半透明背景
-                "line_spacing": 1.5,
-                "char_spacing": 5,
-                "fps": 30,
-                "scroll_speed": 1, 
-            }
-        },
-        {
-            # 透明背景 -> 使用 VP9 -> 输出 .webm (较低质量，小文件)
-            "description": "透明背景黑字（VP9 -> WEBM）",
-            "params": {
-                "text": sample_text[:2000],  # 使用较少文字以加快测试
-                "width": 720,
-                "height": 1280,
-                "font_path": "方正黑体简体.ttf",
-                "font_size": 24,
-                "font_color": [0,0,0],
-                "bg_color": [255,255,255,0.5],  # 半透明背景
-                "line_spacing": 1.5,
-                "char_spacing": 5,
-                "fps": 30,
-                "scroll_speed": 1,  # 更快的滚动速度
-            }
         }
+        # ,{
+        #     # 透明背景 -> 使用 ProRes 4444 -> 输出 .mov (高质量，大文件)
+        #     "description": "透明背景黑字（ProRes 4444 -> MOV）",
+        #     "params": {
+        #         "text": sample_text[:2000],  # 使用较少文字以加快测试
+        #         "width": 720,
+        #         "height": 1280,
+        #         "font_path": "方正黑体简体.ttf",
+        #         "font_size": 24,
+        #         "font_color": [0,0,0],
+        #         "bg_color": [255,255,255,0.5],  # 半透明背景
+        #         "line_spacing": 1.5,
+        #         "char_spacing": 5,
+        #         "fps": 30,
+        #         "scroll_speed": 1,  # 较快的滚动速度
+        #     }
+        # },
+        # {
+        #     # 透明背景 -> 使用 ProRes 422HQ -> 输出 .mov (中等质量，中等文件大小)
+        #     "description": "透明背景黑字（ProRes 422HQ -> MOV）",
+        #     "params": {
+        #         "text": sample_text[:2000],  # 使用较少文字以加快测试
+        #         "width": 720,
+        #         "height": 1280,
+        #         "font_path": "方正黑体简体.ttf",
+        #         "font_size": 24,
+        #         "font_color": [0,0,0],
+        #         "bg_color": [255,255,255,0.5],  # 半透明背景
+        #         "line_spacing": 1.5,
+        #         "char_spacing": 5,
+        #         "fps": 30,
+        #         "scroll_speed": 1, 
+        #     }
+        # },
+        # {
+        #     # 透明背景 -> 使用 VP9 -> 输出 .webm (较低质量，小文件)
+        #     "description": "透明背景黑字（VP9 -> WEBM）",
+        #     "params": {
+        #         "text": sample_text[:2000],  # 使用较少文字以加快测试
+        #         "width": 720,
+        #         "height": 1280,
+        #         "font_path": "方正黑体简体.ttf",
+        #         "font_size": 24,
+        #         "font_color": [0,0,0],
+        #         "bg_color": [255,255,255,0.5],  # 半透明背景
+        #         "line_spacing": 1.5,
+        #         "char_spacing": 5,
+        #         "fps": 30,
+        #         "scroll_speed": 1,  # 更快的滚动速度
+        #     }
+        # }
     ]
 
     # 循环生成不同场景的视频
