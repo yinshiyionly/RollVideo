@@ -16,10 +16,10 @@ class Settings(BaseSettings):
     API_V1_STR: str  # API版本前缀
     DEBUG: bool  # 调试模式开关
     X_TOKEN: str # 接口鉴权
+    CLIENT_NOTIFY_URL:str  # 客户端接收推送事件地址
 
     # 视频处理配置
     VIDEO_TMP_DIR: str # 视频临时保存目录
-    VIDEO_DEFAULT_EXTENSION: str # 视频默认后缀
 
     # MySQL配置
     MYSQL_HOST: str  # MySQL主机地址
@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     TOS_BUCKET_HOST_PUB: str  # TOS公网访问域名
     TOS_BUCKET_HOST_PRI: str  # TOS内网访问域名
     TOS_SCHEME: str  # TOS访问协议
+    TOS_CDN: str # TOS CDN或公网访问域名
 
     # 日志配置
     LOG_LEVEL: str  # 日志级别
