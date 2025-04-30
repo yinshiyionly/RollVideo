@@ -8,7 +8,7 @@
 import os
 import logging
 import time
-from roll_video_service import RollVideoService
+from app.services.roll_video.roll_video_service import RollVideoService
 
 # 配置日志
 logging.basicConfig(

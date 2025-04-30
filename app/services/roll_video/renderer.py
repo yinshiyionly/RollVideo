@@ -20,9 +20,6 @@ import time
 import uuid
 import ctypes
 
-from app.services.roll_video.image_utils import ImageUtils
-from app.services.roll_video.font_utils import FontUtils
-
 logger = logging.getLogger(__name__)
 
 try:
