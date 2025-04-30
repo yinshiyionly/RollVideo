@@ -34,14 +34,22 @@ class TextRenderer:
         """
         初始化文字渲染器
         
+        文字渲染器负责将文本内容渲染为包含透明度信息的RGBA图像，
+        支持自定义字体、颜色、行间距和字符间距，适用于生成透明或不透明背景的文本图像。
+        
+        颜色处理：
+        - 字体颜色：支持RGB格式，内部会转换为RGBA格式用于绘制
+        - 背景颜色：支持RGBA格式，A通道值决定背景透明度（0完全透明，255完全不透明）
+        
         Args:
-            width: 图片宽度
-            font_path: 字体文件路径
-            font_size: 字体大小
-            font_color: 字体颜色 (R,G,B)
-            bg_color: 背景颜色 (R,G,B,A)，A为透明度，0表示完全透明，255表示完全不透明
-            line_spacing: 行间距
-            char_spacing: 字符间距
+            width: 图片宽度（像素）
+            font_path: 字体文件路径（TTF、OTF、TTC格式）
+            font_size: 字体大小（像素）
+            font_color: 字体颜色，RGB元组 (R,G,B)
+            bg_color: 背景颜色，RGBA元组 (R,G,B,A)
+                    A为透明度，0表示完全透明，255表示完全不透明
+            line_spacing: 行间距（像素），控制文本行之间的垂直距离
+            char_spacing: 字符间距（像素），控制同一行文本字符之间的水平距离
         """
         self.width = width
         self.font = ImageFont.truetype(font_path, font_size)
@@ -110,14 +118,28 @@ class TextRenderer:
     
     def render_text_to_image(self, text: str, min_height: Optional[int] = None) -> Tuple[Image.Image, int]:
         """
-        将文本渲染到图片，并在末尾添加一个屏幕高度的空白
+        将文本渲染到图片，并在末尾添加一个屏幕高度的空白区域
+        
+        渲染过程：
+        1. 根据图像宽度和字体大小计算文本布局，处理自动换行
+        2. 创建一个RGBA格式的图像，使用指定的背景颜色（支持透明度）
+        3. 将文本内容绘制到图像上，应用指定的字体颜色
+        4. 在图像末尾添加一个屏幕高度的空白区域，用于滚动过渡
+        
+        文本布局：
+        - 支持自动换行，根据图像宽度和字体大小计算每行可容纳的字符数
+        - 支持 \n 转义字符作为手动换行标记
+        - 空行将被保留，用于控制段落间距
         
         Args:
-            text: 要渲染的文本内容
-            min_height: 最小图片高度，通常设置为视频高度
+            text: 要渲染的文本内容，支持\n换行
+            min_height: 最小图片高度（像素），通常设置为视频高度
+                      用于计算底部空白区域的大小
             
         Returns:
             元组: (包含渲染文本的PIL Image对象, 实际文本内容的高度)
+            - 第一个元素为RGBA格式的PIL图像对象
+            - 第二个元素为实际文本内容的高度（不包括底部空白区域）
         """
         lines = self._calculate_text_layout(text)
         
@@ -177,18 +199,30 @@ class VideoRenderer:
         fps: int = 30,
         scroll_speed: int = 2,  # 每帧滚动的像素数
         frame_buffer_size: int = 24, # 帧缓冲区大小，默认为fps的80%
-        worker_threads: int = 4  # 工作线程数
+        worker_threads: int = 4,  # 工作线程数
+        memory_buffer_mb: Optional[int] = None,  # 内存缓冲区大小(MB)
+        cpu_usage_limit: Optional[int] = None   # CPU使用限制(百分比)
     ):
         """
         初始化视频渲染器
         
         Args:
-            width: 视频宽度
-            height: 视频高度
-            fps: 视频帧率
-            scroll_speed: 滚动速度(像素/帧)
-            frame_buffer_size: 帧缓冲区大小
+            width: 视频宽度（像素）
+            height: 视频高度（像素）
+            fps: 视频帧率（帧/秒）
+            scroll_speed: 滚动速度（像素/帧），值越大滚动越快
+            frame_buffer_size: 帧缓冲区大小（帧数）
+                             控制生产者-消费者模式中的队列大小
+                             增加可提高编码效率，但也会增加内存占用
             worker_threads: 用于帧处理的工作线程数
+                           增加可提高渲染速度，但也会增加内存占用
+                           建议不超过CPU核心数
+            memory_buffer_mb: 内存缓冲区大小(MB)
+                            影响编码过程中的内存使用量和读写效率
+                            默认为10MB，大视频可考虑增加
+            cpu_usage_limit: CPU使用限制，百分比值(1-100)
+                           限制编码过程中的CPU使用率，防止系统过载
+                           仅在Linux系统上生效，需要安装cpulimit工具
         """
         self.width = width
         self.height = height
@@ -196,6 +230,8 @@ class VideoRenderer:
         self.scroll_speed = scroll_speed
         self.frame_buffer_size = min(frame_buffer_size, int(fps * 0.8)) # 限制缓冲区大小
         self.worker_threads = max(1, min(worker_threads, os.cpu_count() or 4)) # 限制线程数
+        self.memory_buffer_mb = memory_buffer_mb
+        self.cpu_usage_limit = cpu_usage_limit
     
     def _get_ffmpeg_command(
         self,
@@ -297,9 +333,38 @@ class VideoRenderer:
         transparency_required: bool,
         preferred_codec: str, # 仍然接收 h264_nvenc 作为首选
         audio_path: Optional[str] = None,
-        bg_color: Optional[Tuple[int, int, int, int]] = None
+        bg_color: Optional[Tuple[int, int, int, int]] = None,
+        transparent_codec: str = "prores_4444"  # 新增：透明视频编码器选择
     ) -> str:
-        """创建滚动视频，使用ffmpeg管道优化，并应用推荐的编码参数"""
+        """
+        创建滚动视频，使用ffmpeg管道流式处理，并应用多线程优化
+        
+        根据透明度需求自动选择不同的编码策略：
+        - 透明背景：使用指定的透明编码器，生成.mov或.webm文件
+        - 不透明背景：优先尝试GPU加速(h264_nvenc)，失败后回退到CPU(libx264)，生成.mp4文件
+        
+        支持的透明编码选项：
+        - "prores_4444"：高质量，较大文件，输出为.mov
+        - "prores_422"：中等质量，中等文件大小，输出为.mov
+        - "vp9"：较低质量，最小文件大小，输出为.webm
+        
+        使用多线程生产者-消费者模式优化性能：
+        - 生产者线程池负责生成视频帧
+        - 消费者线程负责将帧传递给ffmpeg进行编码
+        
+        Args:
+            image: 包含渲染文本的PIL图像对象
+            output_path: 输出视频路径（扩展名会根据编码器自动调整）
+            text_actual_height: 实际文本内容的高度（像素）
+            transparency_required: 是否需要透明背景
+            preferred_codec: 首选视频编码器，如"h264_nvenc"
+            audio_path: 可选的音频文件路径，将被合并到视频中
+            bg_color: 背景颜色(RGBA)，用于非透明视频的背景
+            transparent_codec: 透明视频编码器选择："prores_4444", "prores_422", "vp9"
+            
+        Returns:
+            实际输出的视频文件路径（可能与输入的output_path不同，取决于所选编码器）
+        """
         
         img_array = np.array(image)
         img_height, img_width = img_array.shape[:2]
@@ -327,13 +392,56 @@ class VideoRenderer:
         
         if transparency_required:
             ffmpeg_pix_fmt = "rgba"
-            output_path = os.path.splitext(output_path)[0] + ".mov"
-            # 透明视频保持 ProRes 参数不变
-            video_codec_and_output_params = [
-                "-c:v", "prores_ks", "-profile:v", "4", 
-                "-pix_fmt", "yuva444p10le", "-alpha_bits", "16", "-vendor", "ap10"
-            ]
-            logger.info(f"设置ffmpeg(透明): 输入={ffmpeg_pix_fmt}, 输出={output_path}, 参数={' '.join(video_codec_and_output_params)}")
+            
+            # 根据透明编码器选择设置不同的参数
+            if transparent_codec == "prores_4444" or preferred_codec == "prores_ks":
+                output_path = os.path.splitext(output_path)[0] + ".mov"
+                # 高质量 ProRes 4444 编码参数
+                video_codec_and_output_params = [
+                    "-c:v", "prores_ks", "-profile:v", "4", 
+                    "-pix_fmt", "yuva444p10le", "-alpha_bits", "16", "-vendor", "ap10"
+                ]
+                logger.info(f"设置ffmpeg(透明ProRes 4444): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
+                logger.info(f"  参数: {' '.join(video_codec_and_output_params)}")
+                
+            elif transparent_codec == "prores_422" or preferred_codec == "prores_ks_422":
+                output_path = os.path.splitext(output_path)[0] + ".mov"
+                # 中等质量 ProRes 422HQ 编码参数 (较小文件)
+                video_codec_and_output_params = [
+                    "-c:v", "prores_ks", "-profile:v", "3", 
+                    "-pix_fmt", "yuva422p10le", "-alpha_bits", "8", "-vendor", "ap10"
+                ]
+                logger.info(f"设置ffmpeg(透明ProRes 422HQ): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
+                logger.info(f"  参数: {' '.join(video_codec_and_output_params)}")
+                
+            elif transparent_codec == "vp9" or preferred_codec == "libvpx-vp9":
+                output_path = os.path.splitext(output_path)[0] + ".webm"
+                # VP9 编码参数 (最小文件)
+                video_codec_and_output_params = [
+                    "-c:v", "libvpx-vp9",
+                    "-lossless", "0",
+                    "-crf", "30",
+                    "-b:v", "0",
+                    "-deadline", "good",  # 可选: "good", "best", "realtime"
+                    "-cpu-used", "2",     # 0-8，值越大速度越快，质量越低
+                    "-pix_fmt", "yuva420p",
+                    "-auto-alt-ref", "1",
+                    "-lag-in-frames", "25"
+                ]
+                logger.info(f"设置ffmpeg(透明VP9): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
+                logger.info(f"  参数: {' '.join(video_codec_and_output_params)}")
+            
+            else:
+                # 默认使用 ProRes 4444
+                output_path = os.path.splitext(output_path)[0] + ".mov"
+                video_codec_and_output_params = [
+                    "-c:v", "prores_ks", "-profile:v", "4", 
+                    "-pix_fmt", "yuva444p10le", "-alpha_bits", "16", "-vendor", "ap10"
+                ]
+                logger.info(f"未知的透明编码器选项: {transparent_codec}，使用默认的 ProRes 4444")
+                logger.info(f"设置ffmpeg(透明默认): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
+                logger.info(f"  参数: {' '.join(video_codec_and_output_params)}")
+            
         else:
             ffmpeg_pix_fmt = "rgb24"
             output_path = os.path.splitext(output_path)[0] + ".mp4"
@@ -386,6 +494,21 @@ class VideoRenderer:
         # --- 使用生产者-消费者模式处理帧生成和编码 ---
         def run_ffmpeg_with_pipe(current_codec_params: List[str], is_gpu_attempt: bool) -> bool:
             ffmpeg_cmd = self._get_ffmpeg_command(output_path, ffmpeg_pix_fmt, current_codec_params, audio_path)
+            
+            # 添加CPU限制和内存缓冲参数(如果指定了)
+            if self.cpu_usage_limit is not None and 1 <= self.cpu_usage_limit <= 100:
+                # 在Linux系统上使用cpulimit工具限制CPU使用率
+                if platform.system() == "Linux":
+                    cpu_limit_cmd = ["cpulimit", "-l", str(self.cpu_usage_limit), "--"]
+                    ffmpeg_cmd = cpu_limit_cmd + ffmpeg_cmd
+                else:
+                    logger.warning(f"CPU使用限制（{self.cpu_usage_limit}%）仅在Linux上支持")
+            
+            # 计算内存缓冲区大小
+            buffer_size = 10 * 1024 * 1024  # 默认10MB
+            if self.memory_buffer_mb is not None and self.memory_buffer_mb > 0:
+                buffer_size = int(self.memory_buffer_mb * 1024 * 1024)
+                
             logger.info(f"执行ffmpeg命令: {' '.join(ffmpeg_cmd)}")
             
             # 获取编码器名称
@@ -408,8 +531,8 @@ class VideoRenderer:
             try:
                 process = subprocess.Popen(
                     ffmpeg_cmd, stdin=subprocess.PIPE, 
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    bufsize=10*1024*1024  # 使用更大的缓冲区
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                    bufsize=buffer_size  # 使用指定或默认的缓冲区大小
                 )
                 
                 # 启动输出读取线程
@@ -513,7 +636,7 @@ class VideoRenderer:
                 
                 # 等待ffmpeg进程完成
                 logger.info("等待ffmpeg进程结束...")
-                process.wait()
+                process.wait() 
                 return_code = process.returncode
                 
                 # 收集输出
@@ -545,7 +668,7 @@ class VideoRenderer:
                     logger.error(f"ffmpeg ({codec_name}) 执行失败，返回码: {return_code}")
                     if is_gpu_attempt: logger.warning("GPU编码失败提示：检查ffmpeg版本/驱动/显存。")
                     return False
-                
+            
             except FileNotFoundError: 
                 logger.error("ffmpeg 未找到。请确保已安装并加入PATH。")
                 raise
@@ -586,9 +709,20 @@ class VideoRenderer:
                     if pipe and not pipe.closed:
                         try: pipe.close()
                         except: pass
-        
+
         # --- 执行编码 --- 
         success = run_ffmpeg_with_pipe(video_codec_and_output_params, is_gpu_attempt=(not transparency_required))
+        
+        # 如果透明视频使用VP9失败，尝试使用ProRes
+        if not success and transparency_required and transparent_codec == "vp9":
+            logger.info(f"VP9编码失败，尝试回退到ProRes 422HQ...")
+            # 更新透明编码器为ProRes 422HQ
+            output_path = os.path.splitext(output_path)[0] + ".mov"
+            backup_params = [
+                "-c:v", "prores_ks", "-profile:v", "3", 
+                "-pix_fmt", "yuva422p10le", "-alpha_bits", "8", "-vendor", "ap10"
+            ]
+            success = run_ffmpeg_with_pipe(backup_params, is_gpu_attempt=False)
         
         # 如果 GPU 失败，尝试 CPU 编码
         if not success and not transparency_required and cpu_fallback_codec_and_output_params:
@@ -598,7 +732,7 @@ class VideoRenderer:
                  logger.error("CPU回退编码也失败了。")
                  raise Exception("视频编码失败（GPU和CPU均失败）")
         elif not success and transparency_required:
-             logger.error("透明视频 (CPU prores_ks) 编码失败。")
+             logger.error(f"透明视频编码失败 ({transparent_codec})。")
              raise Exception("透明视频编码失败")
              
         logger.info(f"视频渲染流程完成。输出文件: {output_path}")
