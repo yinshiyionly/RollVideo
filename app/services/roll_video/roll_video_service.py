@@ -163,8 +163,8 @@ class RollVideoService:
         fps: int = 30,
         scroll_speed: int = 2,
         audio_path: Optional[str] = None,
-        scale_factor: float = 1.0,   # 新增：缩放因子，小于1时降低分辨率
-        frame_skip: int = 1          # 新增：跳帧率，大于1时减少渲染帧
+        scale_factor: float = 0.75,   # 默认缩放因子改为0.75以获得更好性能
+        frame_skip: int = 2          # 默认跳帧率改为2以获得更好性能
     ) -> Dict[str, Union[str, bool]]:
         """
         创建滚动视频，自动根据透明度选择CPU/GPU和格式。
