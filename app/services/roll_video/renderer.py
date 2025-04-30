@@ -334,18 +334,22 @@ class VideoRenderer:
         
         # 优化所有视频类型的滚动平滑度
         if frame_skip > 1:
-            # 无论透明与否，限制跳帧率以平衡性能和平滑度
-            actual_frame_skip = min(2, frame_skip)  # 限制最大跳帧率为2
-            logger.info(f"限制跳帧率为{actual_frame_skip}以提高滚动平滑度")
+            # 无论透明与否，平衡速度和平滑度
+            actual_frame_skip = frame_skip  # 恢复用户设置的跳帧率以提高速度
+            logger.info(f"使用跳帧率{actual_frame_skip}以提高处理速度")
             
-            # 添加更强的平滑处理
-            vf_filters.append("minterpolate=mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1")
+            # 使用更高效的平滑处理 - 只使用简单可靠的tblend滤镜
+            vf_filters.append("tblend=all_mode=average")  # 轻量级平滑，不使用复杂参数
             
         # 透明视频的额外处理
         if transparency_required:
+            if frame_skip > 1:
+                # 提高透明视频的跳帧率以提高速度
+                actual_frame_skip = min(4, frame_skip * 2)  # 允许更高跳帧率
+                logger.info(f"透明视频增加跳帧率至{actual_frame_skip}以提高速度")
             # 减少线程数以优化CPU使用
-            actual_threads = max(2, self.num_threads - 2)
-            logger.info(f"透明视频特殊处理: 减少线程数={actual_threads}")
+            actual_threads = max(2, self.num_threads - 1)  # 减少CPU竞争，只减少1个线程
+            logger.info(f"透明视频特殊处理: 使用{actual_threads}个线程")
         
         logger.info(f"输出:{output_path}, 透明:{transparency_required}, 首选编码器:{preferred_codec}, 跳帧率:{actual_frame_skip}")
         # --- 结束滚动参数计算 --- 
