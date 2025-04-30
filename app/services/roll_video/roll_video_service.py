@@ -290,13 +290,11 @@ class RollVideoService:
             worker_threads = worker_threads if worker_threads is not None else DEFAULT_OPTIMIZATION_CONFIG.get("worker_threads", min(self.cpu_count, 8))
             transparent_codec = transparent_codec if transparent_codec is not None else DEFAULT_OPTIMIZATION_CONFIG.get("transparent_codec", "prores_4444")
             frame_buffer_size = min(int(fps * 0.8), 24)
-            cpu_usage_limit = 80
 
             # 设置资源参数
             resources = {
                 "worker_threads": worker_threads,
                 "frame_buffer_size": frame_buffer_size,
-                "cpu_usage_limit": cpu_usage_limit,
                 "transparent_codec": transparent_codec
             }
             
@@ -311,7 +309,6 @@ class RollVideoService:
                 scroll_speed=scroll_speed,
                 worker_threads=worker_threads,
                 frame_buffer_size=frame_buffer_size,
-                cpu_usage_limit=cpu_usage_limit
             )
 
             # 创建滚动视频，传递决策结果
