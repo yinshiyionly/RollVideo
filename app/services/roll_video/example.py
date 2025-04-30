@@ -63,7 +63,7 @@ def main():
                 "line_spacing": 1.5,
                 "char_spacing": 5,
                 "fps": 30,
-                "scroll_speed": 2,  # 较快的滚动速度
+                "scroll_speed": 1,  # 较快的滚动速度
             }
         },
         {
@@ -80,7 +80,7 @@ def main():
                 "line_spacing": 1.5,
                 "char_spacing": 5,
                 "fps": 30,
-                "scroll_speed": 2, 
+                "scroll_speed": 1, 
             }
         },
         {
@@ -97,7 +97,7 @@ def main():
                 "line_spacing": 1.5,
                 "char_spacing": 5,
                 "fps": 30,
-                "scroll_speed": 3,  # 更快的滚动速度
+                "scroll_speed": 1,  # 更快的滚动速度
             }
         }
     ]

@@ -314,7 +314,11 @@ class VideoRenderer:
              image = image.convert("RGBA")
              img_array = np.array(image)
              if img_array.shape[2] != 4: raise ValueError("无法转换图像为RGBA")
-        scroll_distance = max(0, text_actual_height - self.height)
+        
+        # 修改滚动距离计算，确保最后一行能滚动到视频顶部再结束
+        # 原来: scroll_distance = max(0, text_actual_height - self.height)
+        scroll_distance = text_actual_height + self.height
+        
         scroll_frames = int(scroll_distance / self.scroll_speed) if self.scroll_speed > 0 else 0
         padding_frames_start = int(self.fps * 0.5)
         padding_frames_end = int(self.fps * 0.5)
@@ -322,7 +326,28 @@ class VideoRenderer:
         duration = total_frames / self.fps
         logger.info(f"文本高:{text_actual_height}, 图像高:{img_height}, 视频高:{self.height}")
         logger.info(f"滚动距离:{scroll_distance}, 滚动帧:{scroll_frames}, 总帧:{total_frames}, 时长:{duration:.2f}s")
-        logger.info(f"输出:{output_path}, 透明:{transparency_required}, 首选编码器:{preferred_codec}, 跳帧率:{frame_skip}")
+        
+        # 针对透明视频的特殊处理
+        actual_frame_skip = frame_skip
+        actual_threads = self.num_threads
+        vf_filters = []  # 用于存储视频滤镜
+        
+        # 优化所有视频类型的滚动平滑度
+        if frame_skip > 1:
+            # 无论透明与否，限制跳帧率以平衡性能和平滑度
+            actual_frame_skip = min(2, frame_skip)  # 限制最大跳帧率为2
+            logger.info(f"限制跳帧率为{actual_frame_skip}以提高滚动平滑度")
+            
+            # 添加更强的平滑处理
+            vf_filters.append("minterpolate=mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1")
+            
+        # 透明视频的额外处理
+        if transparency_required:
+            # 减少线程数以优化CPU使用
+            actual_threads = max(2, self.num_threads - 2)
+            logger.info(f"透明视频特殊处理: 减少线程数={actual_threads}")
+        
+        logger.info(f"输出:{output_path}, 透明:{transparency_required}, 首选编码器:{preferred_codec}, 跳帧率:{actual_frame_skip}")
         # --- 结束滚动参数计算 --- 
         
         ffmpeg_pix_fmt = ""
@@ -333,8 +358,8 @@ class VideoRenderer:
         
         # 计算实际渲染帧率
         render_fps = self.fps
-        if frame_skip > 1 and not transparency_required:
-            render_fps = max(1, self.fps // frame_skip)
+        if actual_frame_skip > 1:
+            render_fps = max(1, self.fps // actual_frame_skip)
             logger.info(f"启用跳帧: 输出帧率={self.fps}, 实际渲染帧率={render_fps}")
             
         if transparency_required:
@@ -393,13 +418,30 @@ class VideoRenderer:
         def run_ffmpeg_with_pipe(current_codec_params: List[str], is_gpu_attempt: bool) -> bool:
             ffmpeg_cmd = self._get_ffmpeg_command(output_path, ffmpeg_pix_fmt, current_codec_params, audio_path)
             # 添加帧率转换参数（如果启用跳帧）
-            if frame_skip > 1 and not transparency_required:
+            if actual_frame_skip > 1:
                 # 修改输入帧率（之前的ffmpeg参数中的-r值）
                 r_index = ffmpeg_cmd.index("-r")
                 ffmpeg_cmd[r_index+1] = str(render_fps)
                 # 添加输出帧率参数
                 ffmpeg_cmd.insert(-1, "-r")  # 在输出文件前插入
                 ffmpeg_cmd.insert(-1, str(self.fps))  # 在输出文件前插入
+            
+            # 添加视频滤镜（如果需要）
+            if vf_filters:
+                # 检查是否已有-vf参数
+                has_vf = False
+                for i, param in enumerate(ffmpeg_cmd):
+                    if param == "-vf" and i < len(ffmpeg_cmd) - 1:
+                        ffmpeg_cmd[i+1] = ffmpeg_cmd[i+1] + "," + ",".join(vf_filters)
+                        has_vf = True
+                        break
+                
+                # 如果没有-vf参数，添加新的
+                if not has_vf:
+                    ffmpeg_cmd.insert(-1, "-vf")
+                    ffmpeg_cmd.insert(-1, ",".join(vf_filters))
+                
+                logger.info(f"添加视频滤镜: {','.join(vf_filters)}")
             
             logger.info(f"执行ffmpeg命令: {' '.join(ffmpeg_cmd)}")
             process = None
@@ -429,18 +471,18 @@ class VideoRenderer:
                 
                 # 实际渲染的帧数（考虑跳帧）
                 render_frame_count = total_frames
-                if frame_skip > 1 and not transparency_required:
-                    render_frame_count = total_frames // frame_skip
-                    if total_frames % frame_skip > 0:
+                if actual_frame_skip > 1:
+                    render_frame_count = total_frames // actual_frame_skip
+                    if total_frames % actual_frame_skip > 0:
                         render_frame_count += 1  # 确保渲染所有必要帧
                 
                 # 创建帧生成线程池和队列
                 frame_queue = queue.Queue(maxsize=24)  # 限制队列大小防止内存溢出
-                frame_pool = ThreadPoolExecutor(max_workers=self.num_threads)
+                frame_pool = ThreadPoolExecutor(max_workers=actual_threads)
                 
                 # 帧生成函数
                 def generate_frame(idx):
-                    actual_frame_idx = idx * frame_skip if frame_skip > 1 else idx
+                    actual_frame_idx = idx * actual_frame_skip if actual_frame_skip > 1 else idx
                     actual_frame_idx = min(actual_frame_idx, total_frames - 1)  # 确保不超过总帧数
                     frame_data = self._prepare_frame(
                         actual_frame_idx, img_array, img_height, img_width, 
@@ -451,7 +493,7 @@ class VideoRenderer:
                 
                 # 预填充队列（启动初始帧生成任务）
                 prefill_count = min(12, render_frame_count)
-                logger.info(f"启动{prefill_count}个预填充帧生成任务")
+                logger.info(f"启动{prefill_count}个预填充帧生成任务，使用{actual_threads}个线程")
                 for i in range(prefill_count):
                     frame_pool.submit(generate_frame, i)
                 
