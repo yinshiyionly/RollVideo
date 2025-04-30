@@ -198,8 +198,8 @@ class VideoRenderer:
         height: int,
         fps: int = 30,
         scroll_speed: int = 2,  # 每帧滚动的像素数
-        frame_buffer_size: int = 24, # 帧缓冲区大小，默认为fps的80%
-        worker_threads: int = 4,  # 工作线程数
+        frame_buffer_size: int = 18, # 帧缓冲区大小 (调整默认值)
+        worker_threads: int = 6,  # 工作线程数 (调整默认值)
     ):
         """
         初始化视频渲染器
@@ -220,8 +220,12 @@ class VideoRenderer:
         self.height = height
         self.fps = fps
         self.scroll_speed = scroll_speed
-        self.frame_buffer_size = min(frame_buffer_size, int(fps * 0.8)) # 限制缓冲区大小
-        self.worker_threads = max(1, min(worker_threads, os.cpu_count() or 4)) # 限制线程数
+        # 限制缓冲区大小，基于fps或线程数*3，取较小者，确保不小于4
+        safe_buffer = max(4, min(frame_buffer_size, int(fps * 0.8), worker_threads * 3))
+        self.frame_buffer_size = safe_buffer
+        # 限制线程数在1和CPU核心数之间
+        self.worker_threads = max(1, min(worker_threads, os.cpu_count() or 4))
+        logger.info(f"VideoRenderer initialized with: worker_threads={self.worker_threads}, frame_buffer_size={self.frame_buffer_size}")
     
     def _get_ffmpeg_command(
         self,
@@ -265,7 +269,7 @@ class VideoRenderer:
 
     def _generate_frame(self, frame_data):
         """
-        生成单个帧 - 这个函数会被并行调用
+        生成单个帧 - 这个函数会被并行调用 (优化内存使用)
         """
         frame_idx, img_array, img_height, img_width, img_start_y, transparency_required, background_frame_rgb = frame_data
         
@@ -273,41 +277,58 @@ class VideoRenderer:
         frame_start_y = 0
         frame_end_y = img_end_y - img_start_y
         
+        output_frame_data = None # 初始化
+
         if img_start_y < img_end_y and frame_start_y < frame_end_y and frame_end_y <= self.height:
             img_h_slice = slice(img_start_y, img_end_y)
             img_w_slice = slice(0, min(self.width, img_width))
             frame_h_slice = slice(frame_start_y, frame_end_y)
             frame_w_slice = slice(0, min(self.width, img_width))
-            source_section = img_array[img_h_slice, img_w_slice]
+            
+            source_section = img_array[img_h_slice, img_w_slice] # RGBA section from source image
             
             if transparency_required:
+                # For transparency, create an RGBA frame and copy the source section
                 frame_rgba = np.zeros((self.height, self.width, 4), dtype=np.uint8)
                 target_area = frame_rgba[frame_h_slice, frame_w_slice]
-                if target_area.shape[:2] == source_section.shape[:2]: 
-                    np.copyto(target_area, source_section)
-                else: 
-                    copy_width = min(target_area.shape[1], source_section.shape[1])
-                    target_area[:target_area.shape[0], :copy_width] = source_section[:target_area.shape[0], :copy_width]
+                
+                copy_h = min(target_area.shape[0], source_section.shape[0])
+                copy_w = min(target_area.shape[1], source_section.shape[1])
+                
+                target_area[:copy_h, :copy_w] = source_section[:copy_h, :copy_w]
                 output_frame_data = frame_rgba.tobytes()
             else:
-                frame_rgb = background_frame_rgb.copy()
-                target_area = frame_rgb[frame_h_slice, frame_w_slice]
-                if target_area.shape[:2] == source_section.shape[:2]:
-                    # 优化的alpha混合 - 矢量化计算
-                    alpha = source_section[:, :, 3:4].astype(np.float32) / 255.0
-                    blended = (source_section[:, :, :3].astype(np.float32) * alpha + 
-                               target_area.astype(np.float32) * (1.0 - alpha))
-                    np.copyto(target_area, blended.astype(np.uint8))
-                else:
-                    copy_width = min(target_area.shape[1], source_section.shape[1])
-                    source_section_crop = source_section[:target_area.shape[0], :copy_width]
-                    target_area_crop = target_area[:target_area.shape[0], :copy_width]
-                    alpha = source_section_crop[:, :, 3:4].astype(np.float32) / 255.0
-                    blended = (source_section_crop[:, :, :3].astype(np.float32) * alpha + 
-                               target_area_crop.astype(np.float32) * (1.0 - alpha))
-                    target_area[:target_area.shape[0], :copy_width] = blended.astype(np.uint8)
+                # For opaque video, blend onto the background frame (use integer math)
+                frame_rgb = background_frame_rgb.copy() # Start with a copy of the background
+                target_area = frame_rgb[frame_h_slice, frame_w_slice] # RGB slice from background copy
+                
+                copy_h = min(target_area.shape[0], source_section.shape[0])
+                copy_w = min(target_area.shape[1], source_section.shape[1])
+
+                # Ensure we only work with the valid overlapping area
+                source_crop = source_section[:copy_h, :copy_w]
+                target_crop = target_area[:copy_h, :copy_w]
+
+                if source_crop.size > 0 and target_crop.size > 0:
+                    # Extract alpha channel (uint8) and RGB channels (uint8)
+                    alpha_byte = source_crop[:, :, 3:4] # Shape (copy_h, copy_w, 1)
+                    source_rgb_byte = source_crop[:, :, :3] # Shape (copy_h, copy_w, 3)
+
+                    # Perform integer alpha blending using uint16 to prevent overflow
+                    alpha_int = alpha_byte.astype(np.uint16) # Shape (copy_h, copy_w, 1)
+                    source_rgb_int = source_rgb_byte.astype(np.uint16) # Shape (copy_h, copy_w, 3)
+                    target_rgb_int = target_crop.astype(np.uint16) # Shape (copy_h, copy_w, 3)
+
+                    # Blend: (src * alpha + dst * (255 - alpha)) / 255
+                    blended_int = (source_rgb_int * alpha_int + target_rgb_int * (255 - alpha_int)) // 255
+                    
+                    # Copy the blended result (converted back to uint8) into the target area slice
+                    np.copyto(target_crop, blended_int.astype(np.uint8))
+
                 output_frame_data = frame_rgb.tobytes()
-        else:
+        
+        # Handle cases where the text image slice is empty or out of bounds
+        if output_frame_data is None:
             if transparency_required: 
                 output_frame_data = np.zeros((self.height, self.width, 4), dtype=np.uint8).tobytes()
             else: 
@@ -436,12 +457,12 @@ class VideoRenderer:
             ffmpeg_pix_fmt = "rgb24"
             output_path = os.path.splitext(output_path)[0] + ".mp4"
             
-            # GPU H.264参数
+            # GPU H.264参数 - 速度优先
             gpu_params = [
                 "-c:v", preferred_codec, 
-                "-preset", "p3",
+                "-preset", "p1", # 使用最快预设 (p1 或 fast)
                 "-rc:v", "vbr",
-                "-cq:v", "21", 
+                "-cq:v", "24", # 增加 CQ 值以提高速度 (降低质量)
                 "-b:v", "0",
                 "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart"
@@ -449,17 +470,17 @@ class VideoRenderer:
             
             video_codec_and_output_params = gpu_params
             
-            # CPU 参数：libx264，针对速度做更多优化
+            # CPU 参数：libx264 - 速度优先
             cpu_fallback_codec_and_output_params = [
                 "-c:v", "libx264",
-                "-crf", "23",        # 略微降低质量提高速度
-                "-preset", "fast",   # 比medium更快的预设
-                "-tune", "fastdecode", # 优化解码速度
+                "-crf", "28",        # 显著增加CRF以提高速度 (质量降低)
+                "-preset", "ultrafast", # 使用最快预设
+                "-tune", "fastdecode,zerolatency", # 针对快速解码和低延迟优化
                 "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart"
             ]
             logger.info(f"设置ffmpeg(不透明): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
-            logger.info(f"  GPU参数: {' '.join(video_codec_and_output_params)}")
+            logger.info(f"  GPU参数 (速度优先): {' '.join(video_codec_and_output_params)}")
             logger.info(f"  CPU回退参数: {' '.join(cpu_fallback_codec_and_output_params)}")
             
             # 准备背景色 (RGB)
