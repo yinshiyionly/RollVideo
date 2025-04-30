@@ -13,8 +13,73 @@ import tqdm
 import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor
+import mmap  # 导入mmap模块用于共享内存
 
 logger = logging.getLogger(__name__)
+
+# 优化5: 添加Numba JIT编译支持
+try:
+    from numba import jit, prange
+    
+    # 使用Numba JIT编译优化alpha混合计算
+    @jit(nopython=True, parallel=True, fastmath=True, cache=True)
+    def blend_alpha_fast(source, target, alpha):
+        """
+        使用Numba加速的alpha混合计算
+        
+        Args:
+            source: 源图像数据 (RGB)
+            target: 目标图像数据 (RGB)
+            alpha: Alpha通道数据
+            
+        Returns:
+            混合后的图像数据
+        """
+        # 确保输入是3D数组
+        result = np.empty_like(target)
+        h, w, c = source.shape
+        
+        # 并行处理每一行
+        for y in prange(h):
+            for x in range(w):
+                for ch in range(c):
+                    a = alpha[y, x, 0]
+                    result[y, x, ch] = source[y, x, ch] * a + target[y, x, ch] * (1.0 - a)
+        
+        return result
+    
+    # JIT优化的图像切片复制函数
+    @jit(nopython=True, parallel=True, fastmath=True, cache=True)
+    def copy_image_section_fast(target, source, max_h, max_w):
+        """使用Numba加速的图像区域复制"""
+        h = min(source.shape[0], max_h)
+        w = min(source.shape[1], max_w)
+        
+        # 并行处理每一行
+        for y in prange(h):
+            for x in range(w):
+                for c in range(source.shape[2]):
+                    target[y, x, c] = source[y, x, c]
+        
+        return target
+    
+    NUMBA_AVAILABLE = True
+    logger.info("Numba JIT编译支持已启用，性能将显著提升")
+except ImportError:
+    # 如果Numba不可用，提供普通的回退函数
+    def blend_alpha_fast(source, target, alpha):
+        """普通的alpha混合计算（无Numba）"""
+        return source * alpha + target * (1.0 - alpha)
+    
+    def copy_image_section_fast(target, source, max_h, max_w):
+        """普通的图像区域复制（无Numba）"""
+        h = min(source.shape[0], max_h)
+        w = min(source.shape[1], max_w)
+        target[:h, :w] = source[:h, :w]
+        return target
+    
+    NUMBA_AVAILABLE = False
+    logger.warning("Numba未安装，将使用标准Python函数。安装Numba可大幅提升性能：pip install numba")
 
 class TextRenderer:
     """文字渲染器，负责将文本渲染成图片"""
@@ -190,7 +255,9 @@ class VideoRenderer:
         self.scroll_speed = scroll_speed
         # 增加CPU线程使用数量，最大化利用8核CPU
         self.num_threads = min(7, os.cpu_count() or 1)  # 使用7个线程用于帧生成，保留1个核心给ffmpeg
-        logger.info(f"视频渲染器初始化: 宽={width}, 高={height}, 帧率={fps}, 滚动速度={scroll_speed}, 线程数={self.num_threads}")
+        # 优化3: 设置批量处理的大小
+        self.batch_size = 4  # 每次处理4帧
+        logger.info(f"视频渲染器初始化: 宽={width}, 高={height}, 帧率={fps}, 滚动速度={scroll_speed}, 线程数={self.num_threads}, 批量={self.batch_size}")
     
     def _get_ffmpeg_command(
         self,
@@ -236,21 +303,33 @@ class VideoRenderer:
                      padding_frames_start, scroll_frames, scroll_distance,
                      transparency_required, background_frame_rgb=None):
         """生成单帧的像素数据"""
-        # 计算当前帧的滚动位置
-        if frame_idx < padding_frames_start: 
-            current_position = 0
-        elif frame_idx < padding_frames_start + scroll_frames:
-            scroll_progress = frame_idx - padding_frames_start
-            current_position = scroll_progress * self.scroll_speed
-            current_position = min(current_position, scroll_distance)
-        else: 
-            current_position = scroll_distance
+        # 优化2: 实现帧位置缓存
+        if not hasattr(self, '_position_cache'):
+            self._position_cache = {}
+        
+        # 从缓存获取位置信息
+        position_key = frame_idx
+        if position_key in self._position_cache:
+            img_start_y, img_end_y, frame_start_y, frame_end_y = self._position_cache[position_key]
+        else:
+            # 计算当前帧的滚动位置
+            if frame_idx < padding_frames_start: 
+                current_position = 0
+            elif frame_idx < padding_frames_start + scroll_frames:
+                scroll_progress = frame_idx - padding_frames_start
+                current_position = scroll_progress * self.scroll_speed
+                current_position = min(current_position, scroll_distance)
+            else: 
+                current_position = scroll_distance
+                
+            # 计算图像和帧的切片位置
+            img_start_y = int(current_position)
+            img_end_y = min(img_height, img_start_y + self.height)
+            frame_start_y = 0
+            frame_end_y = img_end_y - img_start_y
             
-        # 计算图像和帧的切片位置
-        img_start_y = int(current_position)
-        img_end_y = min(img_height, img_start_y + self.height)
-        frame_start_y = 0
-        frame_end_y = img_end_y - img_start_y
+            # 将计算结果存入缓存
+            self._position_cache[position_key] = (img_start_y, img_end_y, frame_start_y, frame_end_y)
         
         # 生成帧数据
         output_frame_data = None
@@ -261,35 +340,58 @@ class VideoRenderer:
             frame_w_slice = slice(0, min(self.width, img_width))
             source_section = img_array[img_h_slice, img_w_slice]
             
+            # 优化2: 为不同透明度情况重用帧缓冲区
             if transparency_required:
-                frame_rgba = np.zeros((self.height, self.width, 4), dtype=np.uint8)
+                # 为RGBA模式创建/重用缓冲区
+                if not hasattr(self, '_frame_buffer_rgba'):
+                    self._frame_buffer_rgba = np.zeros((self.height, self.width, 4), dtype=np.uint8)
+                frame_rgba = self._frame_buffer_rgba.copy()  # 使用copy以避免副作用
+                
                 target_area = frame_rgba[frame_h_slice, frame_w_slice]
                 if target_area.shape[:2] == source_section.shape[:2]: 
                     np.copyto(target_area, source_section)
                 else: 
+                    # 优化5: 使用Numba优化的函数
                     copy_width = min(target_area.shape[1], source_section.shape[1])
-                    target_area[:target_area.shape[0], :copy_width] = source_section[:target_area.shape[0], :copy_width]
+                    copy_height = min(target_area.shape[0], source_section.shape[0])
+                    target_area = copy_image_section_fast(
+                        target_area, 
+                        source_section, 
+                        copy_height, 
+                        copy_width
+                    )
                 output_frame_data = frame_rgba.tobytes()
             else:
+                # 为RGB模式创建/重用缓冲区
                 frame_rgb = background_frame_rgb.copy()
                 target_area = frame_rgb[frame_h_slice, frame_w_slice]
                 if target_area.shape[:2] == source_section.shape[:2]:
                     alpha = source_section[:, :, 3:4].astype(np.float32) / 255.0
-                    blended = (source_section[:, :, :3].astype(np.float32) * alpha + 
-                              target_area.astype(np.float32) * (1.0 - alpha))
+                    # 优化5: 使用Numba优化的alpha混合
+                    blended = blend_alpha_fast(
+                        source_section[:, :, :3].astype(np.float32),
+                        target_area.astype(np.float32),
+                        alpha
+                    )
                     np.copyto(target_area, blended.astype(np.uint8))
                 else:
                     copy_width = min(target_area.shape[1], source_section.shape[1])
                     source_section_crop = source_section[:target_area.shape[0], :copy_width]
                     target_area_crop = target_area[:target_area.shape[0], :copy_width]
                     alpha = source_section_crop[:, :, 3:4].astype(np.float32) / 255.0
-                    blended = (source_section_crop[:, :, :3].astype(np.float32) * alpha + 
-                              target_area_crop.astype(np.float32) * (1.0 - alpha))
+                    # 优化5: 使用Numba优化的alpha混合
+                    blended = blend_alpha_fast(
+                        source_section_crop[:, :, :3].astype(np.float32),
+                        target_area_crop.astype(np.float32),
+                        alpha
+                    )
                     target_area[:target_area.shape[0], :copy_width] = blended.astype(np.uint8)
                 output_frame_data = frame_rgb.tobytes()
         else:
             if transparency_required:
-                output_frame_data = np.zeros((self.height, self.width, 4), dtype=np.uint8).tobytes()
+                if not hasattr(self, '_empty_frame_rgba'):
+                    self._empty_frame_rgba = np.zeros((self.height, self.width, 4), dtype=np.uint8)
+                output_frame_data = self._empty_frame_rgba.tobytes()
             else:
                 output_frame_data = background_frame_rgb.tobytes()
                 
@@ -419,6 +521,14 @@ class VideoRenderer:
                 ffmpeg_cmd.insert(-1, "-r")  # 在输出文件前插入
                 ffmpeg_cmd.insert(-1, str(self.fps))  # 在输出文件前插入
             
+            # 为透明视频添加线程限制
+            if transparency_required and "-threads" not in current_codec_params:
+                threads_index = next((i for i, x in enumerate(current_codec_params) if x == "-profile:v"), -1)
+                if threads_index != -1:
+                    current_codec_params.insert(threads_index, "-threads")
+                    current_codec_params.insert(threads_index+1, str(actual_threads))
+                    logger.info(f"添加FFmpeg线程限制: -threads {actual_threads}")
+            
             logger.info(f"执行ffmpeg命令: {' '.join(ffmpeg_cmd)}")
             process = None
             stdout_q = queue.Queue()
@@ -427,10 +537,30 @@ class VideoRenderer:
             stderr_thread = None
             
             try:
+                # 对于透明视频，设置环境变量限制线程
+                env = os.environ.copy()
+                if transparency_required:
+                    env["OMP_NUM_THREADS"] = str(actual_threads)
+                    env["MKL_NUM_THREADS"] = str(actual_threads)
+                    env["OPENBLAS_NUM_THREADS"] = str(actual_threads)
+                    env["VECLIB_MAXIMUM_THREADS"] = str(actual_threads)
+                    logger.info(f"设置FFmpeg环境线程限制: OMP_NUM_THREADS={env['OMP_NUM_THREADS']}")
+                    
+                    # 尝试设置CPU亲和性 (仅在Linux系统)
+                    try:
+                        if hasattr(os, "sched_setaffinity") and platform.system() == "Linux":
+                            import psutil
+                            proc = psutil.Process()
+                            # 设置只使用前8个核心
+                            proc.cpu_affinity(list(range(min(8, os.cpu_count() or 1))))
+                            logger.info(f"设置CPU亲和性: {proc.cpu_affinity()}")
+                    except (ImportError, AttributeError, OSError) as e:
+                        logger.warning(f"设置CPU亲和性失败: {e}")
+                
                 process = subprocess.Popen(
                     ffmpeg_cmd, stdin=subprocess.PIPE, 
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-                    # bufsize=0 might help with pipe buffering, but default is usually fine
+                    env=env  # 使用修改后的环境变量
                 )
                 
                 # --- 启动 stdout 和 stderr 读取线程 ---
@@ -461,37 +591,117 @@ class VideoRenderer:
                 frame_queue = queue.Queue(maxsize=queue_size)
                 frame_pool = ThreadPoolExecutor(max_workers=actual_threads)
                 
-                # 帧生成函数
-                def generate_frame(idx):
-                    actual_frame_idx = idx * actual_frame_skip if actual_frame_skip > 1 else idx
-                    actual_frame_idx = min(actual_frame_idx, total_frames - 1)  # 确保不超过总帧数
-                    frame_data = self._prepare_frame(
-                        actual_frame_idx, img_array, img_height, img_width, 
-                        total_frames, padding_frames_start, scroll_frames, 
-                        scroll_distance, transparency_required, background_frame_rgb
-                    )
-                    frame_queue.put(frame_data)
+                # 优化4: 为帧数据创建共享内存
+                frame_byte_size = self.width * self.height * (4 if transparency_required else 3)
+                total_buffer_size = frame_byte_size * self.batch_size * prefill_batches
+                try:
+                    # 尝试创建共享内存
+                    shared_buffer = mmap.mmap(-1, total_buffer_size)
+                    use_shared_memory = True
+                    logger.info(f"创建共享内存缓冲区: {total_buffer_size/1024/1024:.1f}MB")
+                except (ImportError, OSError, ValueError) as e:
+                    logger.warning(f"无法创建共享内存: {e}，将使用标准队列")
+                    use_shared_memory = False
+                    shared_buffer = None
                 
-                # 预填充队列（启动初始帧生成任务） - 增加预填充数量
-                prefill_count = min(queue_size-4, render_frame_count)  # 预填充接近队列容量的帧数
-                logger.info(f"启动{prefill_count}个预填充帧生成任务，使用{actual_threads}个线程")
-                for i in range(prefill_count):
-                    frame_pool.submit(generate_frame, i)
+                # 优化3+4: 批处理帧生成 + 可选共享内存
+                def generate_frame_batch(start_idx, count, buffer_offset=0):
+                    """批量生成帧，减少线程切换开销，可选使用共享内存"""
+                    if use_shared_memory:
+                        # 使用共享内存版本
+                        frames_metadata = []  # 存储每帧的元数据(偏移量和大小)
+                        current_offset = buffer_offset
+                        
+                        for i in range(count):
+                            idx = start_idx + i
+                            if idx >= render_frame_count:
+                                break
+                            actual_frame_idx = idx * actual_frame_skip if actual_frame_skip > 1 else idx
+                            actual_frame_idx = min(actual_frame_idx, total_frames - 1)
+                            
+                            frame_data = self._prepare_frame(
+                                actual_frame_idx, img_array, img_height, img_width, 
+                                total_frames, padding_frames_start, scroll_frames, 
+                                scroll_distance, transparency_required, background_frame_rgb
+                            )
+                            
+                            # 写入共享内存
+                            data_size = len(frame_data)
+                            shared_buffer[current_offset:current_offset+data_size] = frame_data
+                            frames_metadata.append((current_offset, data_size))
+                            current_offset += data_size
+                        
+                        frame_queue.put(frames_metadata)
+                    else:
+                        # 标准版本(不使用共享内存)
+                        frames_batch = []
+                        for i in range(count):
+                            idx = start_idx + i
+                            if idx >= render_frame_count:
+                                break
+                            actual_frame_idx = idx * actual_frame_skip if actual_frame_skip > 1 else idx
+                            actual_frame_idx = min(actual_frame_idx, total_frames - 1)
+                            
+                            frame_data = self._prepare_frame(
+                                actual_frame_idx, img_array, img_height, img_width, 
+                                total_frames, padding_frames_start, scroll_frames, 
+                                scroll_distance, transparency_required, background_frame_rgb
+                            )
+                            frames_batch.append(frame_data)
+                        
+                        frame_queue.put(frames_batch)
+                
+                # 计算批处理任务数量
+                batch_size = min(self.batch_size, render_frame_count)
+                num_batches = (render_frame_count + batch_size - 1) // batch_size  # 向上取整
+                
+                # 预填充队列（启动初始批处理任务）
+                prefill_batches = min(queue_size//batch_size, num_batches)
+                logger.info(f"启动{prefill_batches}个批处理任务(每批{batch_size}帧)，使用{actual_threads}个线程")
+                
+                if use_shared_memory:
+                    # 如果使用共享内存，计算每个批处理任务的缓冲区偏移量
+                    buffer_size_per_batch = total_buffer_size // prefill_batches
+                    for i in range(prefill_batches):
+                        start_idx = i * batch_size
+                        buffer_offset = i * buffer_size_per_batch
+                        frame_pool.submit(generate_frame_batch, start_idx, batch_size, buffer_offset)
+                else:
+                    # 不使用共享内存，正常提交任务
+                    for i in range(prefill_batches):
+                        start_idx = i * batch_size
+                        frame_pool.submit(generate_frame_batch, start_idx, batch_size)
                 
                 # 主循环：处理帧队列和提交新任务
-                frame_iterator = tqdm.tqdm(range(render_frame_count), desc=f"编码 ({codec_name}) ")
-                for frame_idx in frame_iterator:
+                frame_iterator = tqdm.tqdm(range(num_batches), desc=f"编码 ({codec_name}) ")
+                batch_idx = 0
+                
+                for _ in frame_iterator:
                     # 提交下一批帧的生成任务
-                    next_frame_idx = frame_idx + prefill_count
-                    if next_frame_idx < render_frame_count:
-                        frame_pool.submit(generate_frame, next_frame_idx)
+                    next_batch_idx = batch_idx + prefill_batches
+                    if next_batch_idx < num_batches:
+                        start_idx = next_batch_idx * batch_size
+                        if use_shared_memory:
+                            # 计算下一批次的缓冲区偏移量 (循环使用缓冲区)
+                            buffer_offset = (next_batch_idx % prefill_batches) * buffer_size_per_batch
+                            frame_pool.submit(generate_frame_batch, start_idx, batch_size, buffer_offset)
+                        else:
+                            frame_pool.submit(generate_frame_batch, start_idx, batch_size)
                     
-                    # 从队列获取当前帧数据
+                    # 从队列获取当前批帧数据
                     try:
-                        output_frame_data = frame_queue.get(timeout=60)  # 添加超时防止死锁
-                        if output_frame_data:
+                        batch_data = frame_queue.get(timeout=60)  # 添加超时防止死锁
+                        if batch_data:
                             try:
-                                process.stdin.write(output_frame_data)
+                                if use_shared_memory:
+                                    # 从共享内存读取并写入管道
+                                    for offset, size in batch_data:
+                                        frame_bytes = shared_buffer[offset:offset+size]
+                                        process.stdin.write(frame_bytes)
+                                else:
+                                    # 直接写入帧数据
+                                    for frame_data in batch_data:
+                                        process.stdin.write(frame_data)
                             except (IOError, BrokenPipeError) as e:
                                 logger.error(f"写入ffmpeg管道时出错: {e}")
                                 # 写入失败时，尝试获取stderr
@@ -507,18 +717,28 @@ class VideoRenderer:
                     except queue.Empty:
                         logger.error("等待帧数据超时，可能是帧生成线程卡住了")
                         raise Exception("帧生成超时")
+                    
+                    batch_idx += 1
                 
                 # 关闭线程池和清理
                 frame_pool.shutdown(wait=False)
                 logger.info("所有帧已生成并写入管道，关闭stdin...")
                 process.stdin.close()
                 
+                # 清理共享内存
+                if use_shared_memory and shared_buffer:
+                    try:
+                        shared_buffer.close()
+                        logger.info("共享内存缓冲区已关闭")
+                    except Exception as e:
+                        logger.warning(f"关闭共享内存缓冲区时出错: {e}")
+                
                 # --- 等待 ffmpeg 进程结束 --- 
                 logger.info("等待ffmpeg进程结束...")
                 process.wait() 
                 return_code = process.returncode
                 # --- 结束等待 --- 
-                
+
                 # --- 等待读取线程结束并收集输出 --- 
                 logger.info("等待输出读取线程结束...")
                 stdout_thread.join()
