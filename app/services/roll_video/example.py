@@ -20,12 +20,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     # 示例文本
-    sample_text = """
-    情断梨梦
-我相中了父亲身边年轻俊美的副官。
-
-那时我并不知，他已有娃娃亲。
-"""
+    sample_text = open("example.txt", "r").read()
 
     # 路径
     output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
@@ -42,13 +37,13 @@ def main():
             "description": "白底黑字（自动GPU -> MP4）",
             "params": {
                 "text": sample_text,
-                "width": 450,
-                "height": 700,
+                "width": 720,
+                "height": 1280,
                 "font_path": "方正黑体简体.ttf",
                 "font_size": 24,
-                "font_color": (0, 0, 0),
-                "bg_color": (255, 255, 255, 1.0), # 不透明
-                "line_spacing": int(24 * 3) - 24,
+                "font_color": [0,0,0],
+                "bg_color":[255,255,255,1.0], # 不透明
+                "line_spacing": 3,
                 "char_spacing": 5,
                 "fps": 30,
                 "scroll_speed": 1,
@@ -58,14 +53,14 @@ def main():
             # 透明背景 -> 使用 ProRes 4444 -> 输出 .mov (高质量，大文件)
             "description": "透明背景黑字（ProRes 4444 -> MOV）",
             "params": {
-                "text": sample_text[:300],  # 使用较少文字以加快测试
-                "width": 450,
-                "height": 700,
+                "text": sample_text[:2000],  # 使用较少文字以加快测试
+                "width": 720,
+                "height": 1280,
                 "font_path": "方正黑体简体.ttf",
                 "font_size": 24,
-                "font_color": (0, 0, 0),
-                "bg_color": (255, 255, 255, 0.5),  # 半透明背景
-                "line_spacing": int(24 * 1.5),
+                "font_color": [0,0,0],
+                "bg_color": [255,255,255,0.5],  # 半透明背景
+                "line_spacing": 1.5,
                 "char_spacing": 5,
                 "fps": 30,
                 "scroll_speed": 2,  # 较快的滚动速度
@@ -75,14 +70,14 @@ def main():
             # 透明背景 -> 使用 ProRes 422HQ -> 输出 .mov (中等质量，中等文件大小)
             "description": "透明背景黑字（ProRes 422HQ -> MOV）",
             "params": {
-                "text": sample_text[:300],  # 使用较少文字以加快测试
-                "width": 450,
-                "height": 700,
+                "text": sample_text[:2000],  # 使用较少文字以加快测试
+                "width": 720,
+                "height": 1280,
                 "font_path": "方正黑体简体.ttf",
                 "font_size": 24,
-                "font_color": (0, 0, 0),
-                "bg_color": (255, 255, 255, 0.5),  # 半透明背景
-                "line_spacing": int(24 * 1.5),
+                "font_color": [0,0,0],
+                "bg_color": [255,255,255,0.5],  # 半透明背景
+                "line_spacing": 1.5,
                 "char_spacing": 5,
                 "fps": 30,
                 "scroll_speed": 2, 
@@ -92,14 +87,14 @@ def main():
             # 透明背景 -> 使用 VP9 -> 输出 .webm (较低质量，小文件)
             "description": "透明背景黑字（VP9 -> WEBM）",
             "params": {
-                "text": sample_text[:300],  # 使用较少文字以加快测试
-                "width": 450,
-                "height": 700,
+                "text": sample_text[:2000],  # 使用较少文字以加快测试
+                "width": 720,
+                "height": 1280,
                 "font_path": "方正黑体简体.ttf",
                 "font_size": 24,
-                "font_color": (0, 0, 0),
-                "bg_color": (255, 255, 255, 0.5),  # 半透明背景
-                "line_spacing": int(24 * 1.5),
+                "font_color": [0,0,0],
+                "bg_color": [255,255,255,0.5],  # 半透明背景
+                "line_spacing": 1.5,
                 "char_spacing": 5,
                 "fps": 30,
                 "scroll_speed": 3,  # 更快的滚动速度

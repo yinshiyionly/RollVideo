@@ -275,9 +275,9 @@ class RollVideoService:
                 width=width,
                 font_path=font_path,
                 font_size=font_size,
-                font_color=font_color,
-                bg_color=bg_color_final, 
-                line_spacing=line_spacing,
+                font_color=tuple(font_color),
+                bg_color=bg_color_final,
+                line_spacing=int(font_size * line_spacing), # 使用 font_size * line_spacing
                 char_spacing=char_spacing,
             )
 
