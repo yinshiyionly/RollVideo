@@ -296,6 +296,9 @@ class VideoRenderer:
                     if frame_data:
                         # 阻塞式放入，但有超时，防止死锁
                         self.frame_queue.put((frame_index, frame_data), block=True, timeout=2.0)
+                        # 记录调试信息，但降低频率避免日志过多
+                        if frame_index % 100 == 0:
+                            logger.debug(f"线程处理完成帧 {frame_index}")
                 except Exception as e:
                     error_msg = f"帧 {frame_index} 生成错误: {str(e)}"
                     logger.error(error_msg)
@@ -314,36 +317,47 @@ class VideoRenderer:
     def _frame_writer(self):
         """从队列中获取帧并写入FFmpeg进程"""
         frame_index_expected = 0
+        # 添加帧缓冲区，用于存储乱序到达的帧
+        frame_buffer = {}
+        
         while not self.stop_threads:
             try:
                 # 获取队列中的下一帧，设置超时以防死锁
                 frame_index, frame_data = self.frame_queue.get(block=True, timeout=1.0)
                 
-                # 检查是否是预期的帧
-                if frame_index != frame_index_expected:
-                    logger.warning(f"帧顺序错误: 期望 {frame_index_expected}, 收到 {frame_index}")
+                # 将帧存入缓冲区
+                frame_buffer[frame_index] = frame_data
                 
-                # 写入帧数据到FFmpeg
-                if self.ffmpeg_process and self.ffmpeg_process.stdin:
-                    try:
-                        self.ffmpeg_process.stdin.write(frame_data)
-                        self.ffmpeg_process.stdin.flush()  # 确保数据立即写入
-                    except (BrokenPipeError, IOError) as e:
-                        if not self.stop_threads:  # 只有在非正常停止时报错
-                            logger.error(f"写入FFmpeg失败: {str(e)}")
-                            if self.error_callback:
-                                self.error_callback(f"视频编码失败: {str(e)}")
-                            self.stop_threads = True
-                            break
+                # 处理已缓冲的帧，按顺序写入
+                while frame_index_expected in frame_buffer:
+                    # 写入帧数据到FFmpeg
+                    if self.ffmpeg_process and self.ffmpeg_process.stdin:
+                        try:
+                            self.ffmpeg_process.stdin.write(frame_buffer[frame_index_expected])
+                            self.ffmpeg_process.stdin.flush()  # 确保数据立即写入
+                        except (BrokenPipeError, IOError) as e:
+                            if not self.stop_threads:  # 只有在非正常停止时报错
+                                logger.error(f"写入FFmpeg失败: {str(e)}")
+                                if self.error_callback:
+                                    self.error_callback(f"视频编码失败: {str(e)}")
+                                self.stop_threads = True
+                                break
+                    
+                    # 更新进度
+                    self.current_frame = frame_index_expected
+                    progress = min(100, int((frame_index_expected + 1) / self.total_frames * 100))
+                    if frame_index_expected % 30 == 0:  # 每30帧输出一次进度
+                        logger.info(f"渲染进度: {progress}% (帧 {frame_index_expected+1}/{self.total_frames})")
+                    
+                    # 从缓冲区中删除已处理的帧
+                    del frame_buffer[frame_index_expected]
+                    frame_index_expected += 1
                 
-                # 更新进度
-                self.current_frame = frame_index
-                progress = min(100, int((frame_index + 1) / self.total_frames * 100))
-                if frame_index % 30 == 0:  # 每30帧输出一次进度
-                    logger.info(f"渲染进度: {progress}% (帧 {frame_index+1}/{self.total_frames})")
-                
-                frame_index_expected = frame_index + 1
                 self.frame_queue.task_done()
+                
+                # 如果缓冲区太大，警告但继续处理
+                if len(frame_buffer) > 100:
+                    logger.warning(f"帧缓冲区过大 ({len(frame_buffer)} 帧)，可能存在性能问题")
                 
             except queue.Empty:
                 # 如果队列超时但渲染已完成，则退出
@@ -588,7 +602,9 @@ class VideoRenderer:
             threads.append(t)
             
         # 预先添加预填充任务到队列，提前生成更多帧减少等待
+        # 修改：按顺序添加任务，确保最早的帧优先处理
         pre_fill_count = min(self.pre_fill_count, total_frames)
+        logger.info(f"预填充 {pre_fill_count} 帧...")
         for i in range(pre_fill_count):
             task_queue.put(i)
             
@@ -599,25 +615,34 @@ class VideoRenderer:
             frame_index = pre_fill_count
             last_progress_report = time.time()
             
+            # 修改：更小的批次添加任务，每个线程处理连续的帧
+            batch_size = max(1, min(10, (total_frames - pre_fill_count) // (self.num_threads * 5)))
+            logger.info(f"使用批次大小: {batch_size} 帧/批次")
+            
             while frame_index < total_frames and not self.stop_threads:
                 try:
                     # 智能任务分配：队列半满时添加更多任务
                     queue_size = task_queue.qsize()
-                    queue_capacity = self.num_threads * 2
+                    queue_capacity = self.num_threads * 3  # 减少队列容量，避免过多未处理任务
                     
                     if queue_size < queue_capacity:
-                        # 一次添加多个任务，提高效率
-                        batch_size = min(queue_capacity - queue_size, total_frames - frame_index)
-                        for _ in range(batch_size):
+                        # 修改：以较小批次添加连续帧
+                        current_batch_size = min(batch_size, total_frames - frame_index)
+                        for batch_offset in range(current_batch_size):
                             task_queue.put(frame_index)
                             frame_index += 1
                             
                             # 定期报告进度
                             now = time.time()
-                            if now - last_progress_report > 2.0:  # 每2秒报告一次进度
+                            if now - last_progress_report > 5.0:  # 每5秒报告一次进度
                                 progress = min(100, int(self.current_frame / self.total_frames * 100))
                                 logger.info(f"渲染进度: {progress}% (帧 {self.current_frame+1}/{self.total_frames})")
+                                logger.info(f"任务分配: {frame_index}/{total_frames} ({int(frame_index/total_frames*100)}%)")
                                 last_progress_report = now
+                                
+                        # 短暂等待，让线程有时间处理刚分配的帧
+                        if frame_index < total_frames:
+                            time.sleep(0.001)
                     else:
                         # 队列已满，等待一段时间
                         time.sleep(0.01)
