@@ -538,21 +538,22 @@ class VideoRenderer:
             logger.debug(f"Initial state before loop: Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}")
 
             while not self._event_stop.is_set() or not self._frame_queue.empty():
-                # Log as the VERY FIRST action inside the loop
-                logger.debug(f"---> Loop {loop_counter + 1}: Entered loop top.") 
+                # Log as the VERY FIRST action inside the loop - Use INFO for testing
+                logger.info(f"---> Loop {loop_counter + 1}: Entered loop top.") # Changed to INFO
                 
                 loop_counter += 1
                 frame_data = None # Initialize frame_data for this iteration
                 try:
-                    # Log before getting from queue
-                    logger.debug(f"Loop {loop_counter}: Attempting to get frame from queue. Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}")
+                    # Log before getting from queue - Use INFO for testing
+                    logger.info(f"Loop {loop_counter}: Attempting to get frame from queue. Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}") # Changed to INFO
                     
                     # Try getting from queue with specific exception handling
                     try:
                         frame_data = self._frame_queue.get(timeout=0.1)
-                        logger.debug(f"Loop {loop_counter}: Got frame data from queue.")
+                        # Log after getting from queue - Use INFO for testing
+                        logger.info(f"Loop {loop_counter}: Got frame data from queue.") # Changed to INFO
                     except queue.Empty:
-                        # This is expected if queue is empty and we are waiting for stop/more frames
+                        # Use DEBUG here as it's less critical and frequent
                         logger.debug(f"Loop {loop_counter}: Queue empty, continuing loop.")
                         if self._event_stop.is_set():
                             logger.info(f"Loop {loop_counter}: Stop event set and queue empty, breaking loop.")
@@ -707,8 +708,8 @@ class VideoRenderer:
                         frame_buffer = []
                         logger.debug(f"Loop {loop_counter}: Processed frame buffer.")
 
-                    # Log at the end of a successful loop iteration BEFORE checking the while condition again
-                    logger.debug(f"Loop {loop_counter}: End of iteration. Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}")
+                    # Log at the end of a successful loop iteration - Use INFO for testing
+                    logger.info(f"Loop {loop_counter}: End of iteration. Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}") # Changed to INFO
 
                 except Exception as loop_e:
                     # Catch any unexpected error within the main try block of the loop
