@@ -1529,19 +1529,23 @@ class VideoRenderer:
 
     def calculate_total_frames(self, text_height, scroll_speed):
         """计算视频需要的总帧数"""
-        # 修改：需要滚动的总距离 = 文本高度 + 视频高度*2 (确保最后一行滚出屏幕顶部后，再预留一个屏幕的空白)
-        # 原代码：self.scroll_distance = text_height + self.height 
-        self.scroll_distance = text_height + self.height * 2
+        # 根据文本高度智能调整滚动距离
+        # 对于短文本（文本高度<屏幕高度的一半），我们只需要很少的额外空白
+        # 对于长文本，保持足够的滚动距离
+        
+        if text_height < self.height / 2:
+            # 短文本：文本高度 + 一小部分额外空白（文本高度的2倍或屏幕高度的20%，取较大值）
+            extra_space = max(text_height * 2, int(self.height * 0.2))
+            self.scroll_distance = text_height + extra_space
+        else:
+            # 长文本：确保完整滚出 + 一屏空白
+            self.scroll_distance = text_height + self.height
         
         # 确保滚动速度至少为1像素/帧
         actual_scroll_speed = max(1, scroll_speed)
         logger.info(f"使用实际滚动速度: {actual_scroll_speed}px/帧 (原始: {scroll_speed})")
 
-        # 计算所需的总帧数
-        # total_frames = self.scroll_distance // actual_scroll_speed
-        # if self.scroll_distance % actual_scroll_speed != 0:
-        #     total_frames += 1
-        # 使用 ceil 方式计算，确保包含最后一帧
+        # 使用ceil方式计算，确保包含最后一帧
         total_frames = int(np.ceil(self.scroll_distance / actual_scroll_speed))
 
         # 考虑跳帧 (frame_skip)
