@@ -21,6 +21,7 @@ import uuid
 import ctypes
 import gc
 import psutil
+import types  # 添加types模块导入
 
 logger = logging.getLogger(__name__)
 
@@ -270,42 +271,47 @@ class VideoRenderer:
         self.temp_dir = override_temp_working_dir
         self.error_callback = error_callback
         
-        # 优化线程数量，利用更多CPU核心加速渲染
-        self.num_threads = min(16, os.cpu_count() or 8)
+        # 优化线程数量，利用更多CPU核心加速渲染，但留出一些核心给FFmpeg
+        self.num_threads = min(18, max(8, (os.cpu_count() or 8) - 2))
         logger.info(f"初始化视频渲染器: 宽={self.width}, 高={self.height}, FPS={fps}, 缩放={scale_factor}, "
                    f"跳帧={self.actual_frame_skip}, 线程数={self.num_threads}, 透明={transparent}")
         
         # 利用大内存环境，大幅增加帧队列容量
-        self.frame_queue_size = 500 if not transparent else 300
+        self.frame_queue_size = 2000 if not transparent else 1000
         self.frame_queue = queue.Queue(maxsize=self.frame_queue_size)
         self.thread_pool = None
         self.stop_threads = False
         self.ffmpeg_process = None
         # 增加预填充数量，提高启动效率
-        self.pre_fill_count = max(100, self.num_threads * 5)
+        self.pre_fill_count = max(300, self.num_threads * 10)
         # 流控制标志
         self.producer_throttle = threading.Event()
         self.producer_throttle.set()  # 初始状态为不限制
         
-        # 高内存模式标志
+        # 高内存模式标志与预生成帧缓存
         self.high_memory_mode = True
-        logger.info(f"已启用高内存模式: 队列容量={self.frame_queue_size}, 预填充={self.pre_fill_count}帧, 线程数={self.num_threads}")
+        # 添加帧预缓存，直接在内存中保存生成好的帧
+        self.frame_cache = {}
+        self.use_frame_cache = True if width * height < 2000000 else False  # 对于小分辨率视频启用缓存
+        
+        logger.info(f"已启用高性能渲染模式: 队列容量={self.frame_queue_size}, 预填充={self.pre_fill_count}帧, 线程数={self.num_threads}")
+        logger.info(f"帧缓存: {'启用' if self.use_frame_cache else '禁用'}")
         
     def _generate_frames_worker(self, frame_generator, task_queue):
         """工作线程函数，用于生成帧"""
         # 每个线程处理的帧批次大小
-        batch_size = 3
+        batch_size = 5
         frames_processed = 0
         start_time = time.time()
         
         while not self.stop_threads:
             try:
                 # 高内存模式下，降低检查流控制频率
-                if frames_processed % 10 == 0:
-                    self.producer_throttle.wait(timeout=0.05)
+                if frames_processed % 20 == 0:
+                    self.producer_throttle.wait(timeout=0.02)
                 
-                # 高内存模式下，增加队列满检测阈值
-                if self.frame_queue.qsize() > self.frame_queue_size * 0.95:
+                # 只有当队列几乎满时才暂停
+                if self.frame_queue.qsize() > self.frame_queue_size * 0.98:
                     time.sleep(0.01)  # 短暂暂停
                     continue
                 
@@ -324,7 +330,7 @@ class VideoRenderer:
                 
                 if not frames_to_process:
                     # 如果没有取到任务，阻塞式获取一个
-                    task = task_queue.get(block=True, timeout=0.2)
+                    task = task_queue.get(block=True, timeout=0.1)
                     if task is None:  # 终止信号
                         # 放回终止信号给其他线程
                         task_queue.put(None)
@@ -334,47 +340,37 @@ class VideoRenderer:
                 # 处理所有获取到的帧
                 for frame_index in frames_to_process:
                     try:
-                        # 生成帧并放入队列
-                        frame_data = frame_generator(frame_index)
+                        frame_data = None
+                        
+                        # 如果启用了帧缓存，先检查缓存中是否存在
+                        if self.use_frame_cache and frame_index in self.frame_cache:
+                            frame_data = self.frame_cache[frame_index]
+                        else:
+                            # 生成帧
+                            frame_data = frame_generator(frame_index)
+                            
+                            # 如果启用缓存且内存使用率允许，则缓存帧
+                            if self.use_frame_cache and frame_index % 10 == 0:  # 只缓存10%的帧节省内存
+                                self.frame_cache[frame_index] = frame_data
+                            
                         if frame_data:
-                            # 使用非阻塞方式尝试放入队列，失败后短暂重试
-                            max_retries = 5
-                            for retry in range(max_retries):
-                                try:
-                                    self.frame_queue.put((frame_index, frame_data), block=False)
-                                    frames_processed += 1
-                                    break
-                                except queue.Full:
-                                    if retry < max_retries - 1:
-                                        time.sleep(0.05)  # 短暂等待后重试
-                                    else:
-                                        # 最后一次尝试，使用阻塞方式
-                                        try:
-                                            self.frame_queue.put((frame_index, frame_data), block=True, timeout=0.5)
-                                            frames_processed += 1
-                                        except queue.Full:
-                                            error_msg = f"帧 {frame_index} 无法加入队列: 队列已满，重新排队"
-                                            logger.warning(error_msg)
-                                            # 放回任务队列末尾
-                                            task_queue.put(frame_index)
+                            # 快速放入队列
+                            try:
+                                self.frame_queue.put((frame_index, frame_data), block=False)
+                                frames_processed += 1
+                            except queue.Full:
+                                # 如果队列满了，直接放回任务队列，不重试
+                                if not self.stop_threads:
+                                    task_queue.put(frame_index)
                             
                             # 定期报告处理速度
-                            if frames_processed % 100 == 0:
+                            if frames_processed % 1000 == 0:
                                 elapsed = time.time() - start_time
                                 if elapsed > 0:
                                     fps = frames_processed / elapsed
+                                    # 减少日志输出频率
                                     logger.debug(f"线程处理速度: {fps:.2f} 帧/秒, 已处理 {frames_processed} 帧")
                                     
-                    except BrokenPipeError as e:
-                        error_msg = f"帧 {frame_index} 生成错误: 管道已断开 - {str(e)}"
-                        logger.error(error_msg)
-                        if self.error_callback:
-                            self.error_callback(error_msg)
-                    except MemoryError as e:
-                        error_msg = f"帧 {frame_index} 生成错误: 内存不足 - {str(e)}"
-                        logger.error(error_msg)
-                        if self.error_callback:
-                            self.error_callback(error_msg)
                     except Exception as e:
                         import traceback
                         error_msg = f"帧 {frame_index} 生成错误: {str(e)}\n{traceback.format_exc()}"
@@ -387,7 +383,7 @@ class VideoRenderer:
                             
             except queue.Empty:
                 # 队列为空，继续等待
-                time.sleep(0.01)
+                time.sleep(0.001)  # 非常短的等待，提高响应性
                 continue
             except Exception as e:
                 import traceback
@@ -403,14 +399,35 @@ class VideoRenderer:
         # 跟踪写入性能
         frame_processed_count = 0 
         last_fps_check = time.time()
+        start_time = time.time()
+        bytes_written = 0
         
         # 流控制检查
         last_throttle_check = time.time()
-        throttle_check_interval = 0.5  # 降低检查频率
+        throttle_check_interval = 1.0  # 降低检查频率到每秒1次
         
-        # 批量写入设置
-        write_batch_size = 5  # 一次写入多少帧
+        # 批量写入设置 - 针对高速模式增大批量
+        write_batch_size = 10  # 一次写入更多帧
         frame_batch = []
+        
+        # 启用写入进程高优先级
+        try:
+            if platform.system() == 'Windows':
+                import win32api, win32process, win32con
+                win32process.SetPriorityClass(win32api.GetCurrentProcess(), win32process.HIGH_PRIORITY_CLASS)
+            elif platform.system() in ('Darwin', 'Linux'):
+                os.nice(-10)  # 提高优先级（仅适用于root权限）
+        except Exception as e:
+            logger.debug(f"设置写入线程优先级失败: {str(e)}")
+        
+        # 生成进度条
+        total_frames = self.total_frames
+        pbar = None
+        try:
+            from tqdm import tqdm
+            pbar = tqdm(total=total_frames, unit='帧', desc='渲染进度')
+        except:
+            pass  # 如果tqdm不可用，则跳过
         
         while not self.stop_threads:
             try:
@@ -419,27 +436,34 @@ class VideoRenderer:
                 if now - last_throttle_check > throttle_check_interval:
                     queue_size = self.frame_queue.qsize()
                     
-                    # 队列过满，暂停生产者 (提高阈值)
+                    # 修改流控制逻辑，允许更多帧进入队列
                     if queue_size > self.frame_queue_size * 0.9 and self.producer_throttle.is_set():
-                        logger.debug("队列接近满，暂停生产者")
                         self.producer_throttle.clear()
-                    # 队列不足，恢复生产者 (降低阈值)
-                    elif queue_size < self.frame_queue_size * 0.5 and not self.producer_throttle.is_set():
-                        logger.debug("队列已有空间，恢复生产者")
+                    elif queue_size < self.frame_queue_size * 0.7 and not self.producer_throttle.is_set():
                         self.producer_throttle.set()
                     
-                    # 计算并记录处理速度
-                    if now - last_fps_check > 5.0 and frame_processed_count > 0:
+                    # 简化处理速度日志，仅在出现问题时警告
+                    if now - last_fps_check > 10.0 and frame_processed_count > 0:
                         processing_fps = frame_processed_count / (now - last_fps_check)
-                        logger.info(f"写入处理速度: {processing_fps:.2f} 帧/秒，队列状态: {queue_size}/{self.frame_queue_size}")
+                        total_fps = frame_index_expected / (now - start_time) if now > start_time else 0
+                        
+                        # 如果写入速度过慢，输出警告
+                        if processing_fps < 10.0:
+                            mb_per_sec = bytes_written / 1024 / 1024 / (now - last_fps_check)
+                            logger.warning(f"写入处理速度较慢: {processing_fps:.2f}帧/秒 ({mb_per_sec:.2f} MB/s)，队列: {queue_size}/{self.frame_queue_size}")
+                        else:
+                            # 正常速度只在调试日志中记录
+                            logger.debug(f"写入处理速度: {processing_fps:.2f}帧/秒, 平均: {total_fps:.2f}帧/秒, 队列: {queue_size}/{self.frame_queue_size}")
+                        
                         frame_processed_count = 0
+                        bytes_written = 0
                         last_fps_check = now
                         
                     last_throttle_check = now
                 
                 # 一次尝试获取多个帧
                 frames_fetched = 0
-                for _ in range(write_batch_size):
+                for _ in range(write_batch_size * 2):  # 尝试获取更多帧
                     try:
                         # 非阻塞获取帧
                         frame_index, frame_data = self.frame_queue.get(block=False)
@@ -451,14 +475,16 @@ class VideoRenderer:
                     except queue.Empty:
                         break
                 
-                # 如果没有取到帧，则阻塞获取一个
+                # 如果非阻塞方式获取不到帧，改用短超时阻塞获取
                 if frames_fetched == 0:
-                    # 获取队列中的下一帧，设置较短超时以保持响应性
-                    frame_index, frame_data = self.frame_queue.get(block=True, timeout=0.1)
-                    
-                    # 将帧存入缓冲区
-                    frame_buffer[frame_index] = frame_data
-                    self.frame_queue.task_done()
+                    try:
+                        frame_index, frame_data = self.frame_queue.get(block=True, timeout=0.05)
+                        frame_buffer[frame_index] = frame_data
+                        self.frame_queue.task_done()
+                    except queue.Empty:
+                        # 如果队列确实为空，则短暂等待并继续
+                        time.sleep(0.001)
+                        continue
                 
                 # 处理已缓冲的帧，按顺序写入
                 while frame_index_expected in frame_buffer:
@@ -466,7 +492,8 @@ class VideoRenderer:
                     frame_batch = []
                     batch_indices = []
                     
-                    for i in range(write_batch_size):
+                    # 增大批量写入大小，但确保帧序列连续性
+                    for i in range(write_batch_size * 2):  # 尝试获取更多连续帧
                         idx = frame_index_expected + i
                         if idx in frame_buffer:
                             frame_batch.append(frame_buffer[idx])
@@ -476,32 +503,50 @@ class VideoRenderer:
                     
                     if not frame_batch:
                         break  # 没有连续帧可处理
-                        
-                    # 批量写入帧数据到FFmpeg
+                    
+                    # 批量写入帧数据到FFmpeg - 改进写入策略
                     if self.ffmpeg_process and self.ffmpeg_process.stdin:
                         try:
-                            # 一次写入所有帧数据
-                            for frame_data in frame_batch:
-                                self.ffmpeg_process.stdin.write(frame_data)
-                            # 只刷新一次
-                            self.ffmpeg_process.stdin.flush()
+                            # 使用writelines批量写入所有帧数据，避免多次调用write
+                            if hasattr(self.ffmpeg_process.stdin, 'writelines'):
+                                self.ffmpeg_process.stdin.writelines(frame_batch)
+                                self.ffmpeg_process.stdin.flush()
+                            else:
+                                # 回退至传统写入方式
+                                for frame_data in frame_batch:
+                                    self.ffmpeg_process.stdin.write(frame_data)
+                                    bytes_written += len(frame_data)
+                                self.ffmpeg_process.stdin.flush()
                             
-                            frame_processed_count += len(frame_batch)
+                            # 记录处理帧数
+                            batch_size = len(frame_batch)
+                            frame_processed_count += batch_size
                             
                             # 更新进度
                             last_frame_in_batch = batch_indices[-1]
                             self.current_frame = last_frame_in_batch
                             
+                            # 更新进度条
+                            if pbar:
+                                pbar.update(batch_size)
+                            
                             # 从缓冲区中删除已处理的帧
                             for idx in batch_indices:
                                 del frame_buffer[idx]
                                 
+                            # 更新期望的下一帧
                             frame_index_expected = last_frame_in_batch + 1
                             
-                            # 更新进度日志
-                            if frame_index_expected % 50 == 0:  # 降低日志频率
-                                progress = min(100, int((frame_index_expected) / self.total_frames * 100))
-                                logger.info(f"渲染进度: {progress}% (帧 {frame_index_expected}/{self.total_frames})")
+                            # 降低进度日志频率
+                            if frame_index_expected % 500 == 0:
+                                progress = min(100, int(frame_index_expected / self.total_frames * 100))
+                                elapsed = time.time() - start_time
+                                estimated_total = elapsed / frame_index_expected * self.total_frames if frame_index_expected > 0 else 0
+                                remaining = max(0, estimated_total - elapsed)
+                                
+                                mins_remaining = int(remaining / 60)
+                                secs_remaining = int(remaining % 60)
+                                logger.info(f"渲染进度: {progress}% (帧 {frame_index_expected}/{self.total_frames}, 剩余约 {mins_remaining}分{secs_remaining}秒)")
                                 
                         except (BrokenPipeError, IOError) as e:
                             if not self.stop_threads:  # 只有在非正常停止时报错
@@ -514,34 +559,21 @@ class VideoRenderer:
                         # FFmpeg进程不可用
                         break
                 
-                # 如果缓冲区太大，定期强制清理，而不是只发出警告
+                # 如果缓冲区太大，定期强制清理
                 buffer_size = len(frame_buffer)
                 if buffer_size > 200:
                     # 缓冲区过大时，查找未处理的最小帧
-                    if buffer_size > 500:  # 极端情况，强制处理最小帧
-                        missing_frames = [i for i in range(frame_index_expected, frame_index_expected + 100) if i not in frame_buffer]
-                        logger.warning(f"帧缓冲区过大 ({buffer_size} 帧)，跳过丢失帧: {missing_frames[:10]}...")
+                    if buffer_size > 500:
+                        # 找出缓冲区中最小的帧索引
+                        logger.warning(f"帧缓冲区过大 ({buffer_size} 帧)，跳过部分丢失帧...")
                         frame_index_expected = min(frame_buffer.keys())  # 跳到缓冲区中最小的帧
                     else:
-                        logger.warning(f"帧缓冲区较大 ({buffer_size} 帧)，内存使用增加")
+                        logger.debug(f"帧缓冲区较大 ({buffer_size} 帧)")
                 
             except queue.Empty:
-                # 检查并尝试处理缓冲区中的帧
-                if frame_buffer and frame_index_expected not in frame_buffer:
-                    # 如果当前等待的帧不在缓冲区中，但有其他帧，尝试跳过丢失的帧
-                    possible_next = sorted([idx for idx in frame_buffer.keys() if idx > frame_index_expected])
-                    if possible_next:
-                        # 找到缓冲区中大于当前期望的最小帧
-                        missing_count = possible_next[0] - frame_index_expected
-                        if missing_count < 10:  # 只处理少量缺失
-                            logger.warning(f"跳过丢失的帧 {frame_index_expected} 到 {possible_next[0]-1}")
-                            frame_index_expected = possible_next[0]
-                
-                # 如果队列超时但渲染已完成，则退出
-                if self.current_frame >= self.total_frames - 1:
-                    break
-                # 短暂超时，继续循环检查流控制
-                continue 
+                # 短暂等待
+                time.sleep(0.001)
+                continue
             except Exception as e:
                 import traceback
                 logger.error(f"帧写入线程错误: {str(e)}\n{traceback.format_exc()}")
@@ -550,157 +582,176 @@ class VideoRenderer:
                         self.error_callback(f"视频渲染错误: {str(e)}")
                     self.stop_threads = True
                 break
+        
+        # 清理进度条
+        if pbar:
+            pbar.close()
     
     def _prepare_ffmpeg_command(self):
-        """准备FFmpeg命令行，针对不同系统和需求优化参数"""
-        output_ext = os.path.splitext(self.output_path)[1].lower()
+        """准备FFmpeg命令行"""
         
-        # 根据透明度需求和输出路径调整格式
-        if self.transparent and output_ext != '.mov':
-            self.output_path = os.path.splitext(self.output_path)[0] + '.mov'
-            output_ext = '.mov'
-        elif not self.transparent and output_ext not in ['.mp4', '.webm']:
-            self.output_path = os.path.splitext(self.output_path)[0] + '.mp4'
-            output_ext = '.mp4'
+        # 确定视频编码器和硬件加速选项
+        codec = None
+        hwaccel = None
+        extra_params = []
         
-        pixel_format = 'rgba' if self.transparent else 'rgb24'
-        
-        # 精确控制帧率和缓冲区配置，减少抖动
-        input_args = [
-            '-f', 'rawvideo',
-            '-pixel_format', pixel_format,
-            '-video_size', f'{self.width}x{self.height}',
-            '-framerate', str(self.fps),
-            '-use_wallclock_as_timestamps', '1',  # 使用精确时间戳
-            '-thread_queue_size', '512',  # 增大线程队列大小
-            '-i', 'pipe:'
-        ]
-        
-        # 系统检测
+        # 检测系统类型，为不同平台配置最佳硬件加速
         system = platform.system()
         
-        # 视频大小调整配置（如果使用了缩放）
-        scaling_args = []
-        if self.scale_factor != 1.0 and (self.width != self.original_width or self.height != self.original_height):
-            scaling_args = [
-                '-vf', f'scale={self.original_width}:{self.original_height}:flags=lanczos'
-            ]
+        # 根据系统类型选择最佳编码器和硬件加速
+        if system == 'Darwin':  # macOS
+            # 检查M1/M2芯片
+            is_apple_silicon = platform.processor() == '' or 'arm' in platform.processor().lower()
+            if is_apple_silicon:
+                # Apple Silicon (M1/M2) 使用VideoToolbox，极速模式
+                codec = 'h264_videotoolbox'
+                hwaccel = 'videotoolbox'
+                # 使用低延迟模式和极高比特率以加速编码
+                extra_params.extend(['-b:v', '12M', '-tag:v', 'avc1'])
+                extra_params.extend(['-quality', 'speed'])  # 极速优先
+                extra_params.extend(['-allow_sw', '1'])  # 允许软件加速
+            else:
+                # Intel Mac 使用VideoToolbox
+                codec = 'h264_videotoolbox'
+                hwaccel = 'videotoolbox'
+                extra_params.extend(['-b:v', '10M'])
+                extra_params.extend(['-quality', 'speed'])  # 速度优先
+                
+        elif system == 'Windows':
+            # 尝试NVIDIA硬件加速
+            codec = 'h264_nvenc'
+            hwaccel = 'cuda'
+            # NVIDIA极速参数
+            extra_params.extend(['-tune', 'fastdecode', '-preset', 'p1'])
+            extra_params.extend(['-rc', 'vbr', '-cq', '24', '-b:v', '0'])
+        else:  # Linux及其他
+            # 先尝试NVIDIA，如果不支持则使用软件编码
+            if self._is_nvidia_available():
+                codec = 'h264_nvenc'
+                hwaccel = 'cuda'
+                extra_params.extend(['-tune', 'fastdecode', '-preset', 'p1'])
+                extra_params.extend(['-rc', 'vbr', '-cq', '24', '-b:v', '0'])
+            elif self._is_amd_available():
+                codec = 'h264_amf'
+                hwaccel = 'amf'
+                extra_params.extend(['-quality', 'speed'])
+            elif self._is_intel_available():
+                codec = 'h264_qsv'
+                hwaccel = 'qsv'
+                extra_params.extend(['-preset', 'veryfast'])
+            else:
+                # 使用软件编码，但用极速预设
+                codec = 'libx264'
+                extra_params.extend(['-preset', 'ultrafast'])
+                extra_params.extend(['-tune', 'fastdecode', '-crf', '28'])
         
-        # 针对macOS的VideoToolbox硬件加速配置
-        if system == 'Darwin' and not self.transparent:
-            video_codec = [
-                '-c:v', 'h264_videotoolbox',
-                '-profile:v', 'high',
-                '-b:v', '8M',
-                '-maxrate', '12M',
-                '-bufsize', '20M',
-                '-pix_fmt', 'yuv420p',
-                '-allow_sw', '1',
-                '-vsync', 'cfr',          # 使用恒定帧率
-                '-r', str(self.fps),      # 指定输出帧率
-                '-g', str(self.fps * 2),  # GOP大小设置为2秒
-                '-bf', '2',               # 最多使用2个B帧
-                '-movflags', '+faststart'
-            ]
-        # 针对Windows的NVIDIA硬件加速配置
-        elif system == 'Windows' and not self.transparent:
-            video_codec = [
-                '-c:v', 'h264_nvenc',
-                '-preset', 'p4',          # 质量优先
-                '-profile:v', 'high',
-                '-b:v', '8M',             # 基础比特率
-                '-maxrate', '12M',        # 最大比特率
-                '-bufsize', '20M',        # 缓冲区大小
-                '-rc', 'vbr_hq',          # 高质量可变比特率
-                '-rc-lookahead', '32',    # 前瞻帧数
-                '-pix_fmt', 'yuv420p',
-                '-g', str(self.fps * 2),  # GOP大小设置为2秒
-                '-bf', '3',               # B帧数量
-                '-vsync', 'cfr',          # 恒定帧率
-                '-spatial-aq', '1',       # 空间自适应量化
-                '-temporal-aq', '1',      # 时间自适应量化
-                '-r', str(self.fps),      # 输出帧率
-                '-movflags', '+faststart'
-            ]
-        # 透明视频编码配置 (使用ProRes)
-        elif self.transparent:
-            video_codec = [
-                '-c:v', 'prores_ks',
-                '-profile:v', '4444',     # 使用带Alpha通道的配置文件
-                '-pix_fmt', 'yuva444p10le',  # 高质量带Alpha通道的像素格式
-                '-vendor', 'ap10',        # Apple标识
-                '-bits_per_mb', '8000',   # 高质量设置
-                '-r', str(self.fps),      # 输出帧率
-                '-vsync', 'cfr'           # 恒定帧率
-            ]
-        # 通用软件编码配置 (libx264)
-        else:
-            video_codec = [
-                '-c:v', 'libx264',
-                '-preset', 'fast',        # 平衡编码速度和质量
-                '-tune', 'animation',     # 针对动画内容优化
-                '-profile:v', 'high',     # 高配置
-                '-crf', '18',             # 较高质量 (0-51, 越小越好)
-                '-pix_fmt', 'yuv420p',
-                '-g', str(self.fps * 2),  # GOP大小
-                '-bf', '2',               # B帧数量
-                '-r', str(self.fps),      # 输出帧率
-                '-vsync', 'cfr',          # 恒定帧率
-                '-x264opts', 'no-deblock:no-cabac:no-8x8dct:partitions=p8x8,b8x8,i8x8',  # 优化处理
-                '-movflags', '+faststart'  # 优化流式播放
-            ]
-        
-        # 针对滚动内容的去抖动和平滑处理滤镜
-        smooth_filter = []
-        if not self.transparent:
-            # 使用仅针对抖动处理的滤镜组合，不用平滑滤镜造成拖尾
-            smooth_filter = [
-                '-vf', f'minterpolate=mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1:fps={self.fps}'
-            ]
-            # 如果有缩放，合并滤镜
-            if scaling_args:
-                vf_scale = scaling_args[1]
-                smooth_filter = ['-vf', f'{vf_scale},minterpolate=mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1:fps={self.fps}']
-        
-        # 音频参数，如果需要
-        audio_args = []
-        if self.with_audio and self.audio_path and os.path.exists(self.audio_path):
-            audio_args = [
-                '-i', self.audio_path,
-                '-c:a', 'aac',
-                '-b:a', '192k',
-                '-ar', '48000',       # 采样率
-                '-ac', '2',           # 声道数
-                '-af', 'aresample=async=1000',  # 音频重采样，处理同步
-                '-shortest'           # 使用最短的输入流长度作为输出长度
-            ]
-        
-        # 输出文件
-        output_args = [
-            # 增加输出日志级别以便调试
-            '-loglevel', 'info',
-            # 其他全局参数
-            '-threads', str(os.cpu_count()),  # 使用所有可用CPU核心
-            '-y',                            # 覆盖已有文件
-            self.output_path
+        # 如果没有合适的GPU加速，退回到软件编码
+        if not codec:
+            codec = 'libx264'
+            extra_params.extend(['-preset', 'ultrafast'])
+            extra_params.extend(['-tune', 'fastdecode', '-crf', '28'])
+            
+        # 准备基本FFmpeg命令
+        command = [
+            'ffmpeg',
+            '-nostdin',         # 禁用交互模式
+            '-y',               # 自动覆盖输出文件
+            '-framerate', str(self.fps),  # 设置帧率
         ]
         
-        # 合并所有参数组
-        # 如果应用平滑滤镜，使用滤镜配置
-        if smooth_filter and not scaling_args:
-            command = ['ffmpeg'] + input_args + audio_args + smooth_filter + video_codec + output_args
-        # 如果只需要缩放，使用缩放滤镜
-        elif scaling_args and not smooth_filter:
-            command = ['ffmpeg'] + input_args + audio_args + scaling_args + video_codec + output_args
-        # 如果两者都不需要，不使用滤镜
-        else:
-            command = ['ffmpeg'] + input_args + audio_args + video_codec + output_args
+        # 添加硬件加速选项
+        if hwaccel:
+            command.extend(['-hwaccel', hwaccel])
+            command.extend(['-hwaccel_output_format', 'nv12'])  # 优化输出格式
         
-        # 记录完整命令以便调试
-        logger.info(f"准备执行FFmpeg命令: {' '.join(command)}")
+        # 配置输入格式
+        command.extend([
+            '-f', 'rawvideo',   # 使用原始视频格式
+            '-s', f'{self.width}x{self.height}',  # 视频尺寸
+            '-pix_fmt', 'rgba' if self.transparent else 'rgb24',  # 像素格式
+            '-i', 'pipe:',      # 从管道读取
+        ])
         
-        return command
+        # 添加特殊优化选项，提高处理速度
+        command.extend([
+            # 设置线程数量 - 使用更多的线程
+            '-threads', str(min(16, max(1, os.cpu_count()))),  # 使用更多CPU核心
+            # 使用更大的线程队列，提高多线程效率
+            '-thread_queue_size', '2048',
+            # 使用更快的缩放过滤器
+            '-sws_flags', 'fast_bilinear',
+            # 禁用音频
+            '-an',
+            # 提高处理缓冲区大小
+            '-bufsize', '100M',
+        ])
+        
+        # 添加前面确定的额外参数
+        if extra_params:
+            command.extend(extra_params)
             
+        # 配置视频编码 - 使用最低质量但最快的设置
+        command.extend([
+            '-c:v', codec,
+            '-pix_fmt', 'yuv420p',  # 兼容性像素格式
+            '-g', '300',            # 增大GOP大小，减少I帧数量
+            '-bf', '0',             # 禁用B帧以加速编码
+            '-flags', '+cgop',      # 闭合GOP，提高编码效率
+        ])
+        
+        # 添加输出文件
+        command.append(self.output_path)
+        
+        logger.info(f"FFmpeg极速命令: {' '.join(command)}")
+        return command
+        
+    def _is_nvidia_available(self):
+        """检查NVIDIA GPU是否可用"""
+        try:
+            # 尝试运行nvidia-smi命令
+            result = subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2)
+            return result.returncode == 0
+        except (subprocess.SubprocessError, FileNotFoundError):
+            return False
+            
+    def _is_amd_available(self):
+        """检查AMD GPU是否可用"""
+        system = platform.system()
+        if system == 'Windows':
+            # Windows下检查AMD GPU
+            try:
+                result = subprocess.run(['where', 'amf-enc'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2)
+                return result.returncode == 0
+            except (subprocess.SubprocessError, FileNotFoundError):
+                return False
+        elif system == 'Linux':
+            # Linux下检查AMD GPU
+            try:
+                with open('/proc/cpuinfo', 'r') as f:
+                    return 'amd' in f.read().lower()
+            except:
+                return False
+        return False
+        
+    def _is_intel_available(self):
+        """检查Intel GPU是否可用"""
+        system = platform.system()
+        if system == 'Windows':
+            # Windows下检查Intel GPU
+            try:
+                result = subprocess.run(['dxdiag'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2)
+                return 'intel' in result.stdout.decode('utf-8', errors='ignore').lower()
+            except (subprocess.SubprocessError, FileNotFoundError):
+                return False
+        elif system == 'Linux':
+            # Linux下检查Intel GPU
+            try:
+                result = subprocess.run(['lspci'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2)
+                return 'intel' in result.stdout.decode('utf-8', errors='ignore').lower()
+            except (subprocess.SubprocessError, FileNotFoundError):
+                return False
+        return False
+
     def render_frames(self, total_frames, frame_generator):
         """使用多线程渲染所有帧"""
         self.total_frames = total_frames
@@ -708,6 +759,19 @@ class VideoRenderer:
         # 添加开始时间记录，用于计算处理速度
         self.start_time = time.time()
         
+        # 高级内存管理设置
+        memory_limit_gb = 25  # 25GB内存限制
+        self.memory_limit = memory_limit_gb * 1024 * 1024 * 1024  # 转换为字节
+        self.memory_check_counter = 0  # 用于定期内存检查
+        
+        # 禁用Pillow内置缓存以减少内存使用
+        try:
+            from PIL import ImageFile
+            ImageFile.LOAD_TRUNCATED_IMAGES = True  # 允许处理截断的图像
+            Image.MAX_IMAGE_PIXELS = None  # 禁用图像大小限制
+        except:
+            pass
+            
         # 高内存模式下，降低垃圾回收频率
         if self.high_memory_mode:
             # 设置垃圾回收阈值，减少自动回收频率
@@ -725,13 +789,13 @@ class VideoRenderer:
         last_memory_check = time.time()
         memory_check_interval = 10.0  # 降低内存检查频率，因为我们有大量内存
         
-        logger.info(f"初始内存使用: {initial_memory:.2f} MB")
+        logger.info(f"初始内存使用: {initial_memory:.2f} MB，允许最大内存使用: {memory_limit_gb}GB")
         
         # 准备FFmpeg命令
         command = self._prepare_ffmpeg_command()
         
         # 启动FFmpeg进程，设置更大的缓冲区
-        buffer_size = 1024 * 1024 * 50  # 增大到50MB缓冲区
+        buffer_size = 1024 * 1024 * 100  # 增大到100MB缓冲区
         try:
             self.ffmpeg_process = subprocess.Popen(
                 command,
@@ -749,6 +813,13 @@ class VideoRenderer:
                 self.error_callback(error_msg)
             return False
         
+        # 修改stdin对象以支持writelines方法（如果不存在）
+        if not hasattr(self.ffmpeg_process.stdin, 'writelines'):
+            def writelines(self, lines):
+                for line in lines:
+                    self.write(line)
+            self.ffmpeg_process.stdin.writelines = types.MethodType(writelines, self.ffmpeg_process.stdin)
+            
         # 设置FFmpeg进程的IO优先级（如果系统支持）
         try:
             if platform.system() == 'Linux':
@@ -776,8 +847,6 @@ class VideoRenderer:
                         self.error_callback(f"编码错误: {line}")
                 elif line and 'warning' in line.lower():
                     logger.warning(f"FFmpeg警告: {line}")
-                elif line:
-                    logger.debug(f"FFmpeg输出: {line}")
                 
         # 启动错误监控线程
         error_thread = threading.Thread(target=ffmpeg_error_monitor)
@@ -820,7 +889,10 @@ class VideoRenderer:
             logger.info(f"使用批次大小: {batch_size} 帧/批次")
             
             # 高内存模式可以允许更多的超前生产
-            max_ahead = self.num_threads * 10
+            max_ahead = self.num_threads * 20
+            
+            # 定期检查内存使用，避免内存泄漏
+            memory_check_freq = 1000  # 每1000帧检查一次
             
             while frame_index < total_frames and not self.stop_threads:
                 try:
@@ -831,25 +903,43 @@ class VideoRenderer:
                         peak_memory = max(peak_memory, current_memory)
                         memory_growth = current_memory - initial_memory
                         
+                        # 输出当前内存使用情况
                         logger.info(f"内存使用: {current_memory:.2f} MB (增长: {memory_growth:.2f} MB, 峰值: {peak_memory:.2f} MB)")
                         
-                        # 高内存模式下仅在内存增长极高时执行垃圾回收
-                        if memory_growth > 20000:  # 增长超过20GB
-                            logger.warning(f"内存使用接近阈值，执行垃圾回收...")
+                        # 检查内存是否超过预设限制
+                        if current_memory * 1024 * 1024 > self.memory_limit * 0.9:
+                            logger.warning(f"内存使用接近限制 ({current_memory:.2f}MB/{memory_limit_gb}GB)，执行垃圾回收...")
                             gc.collect()
                             
+                            # 清理帧缓存
+                            if self.use_frame_cache and len(self.frame_cache) > 0:
+                                logger.info(f"清理帧缓存以释放内存，当前缓存大小: {len(self.frame_cache)} 帧")
+                                self.frame_cache.clear()
+                            
                         last_memory_check = now
+                    
+                    # 检查是否需要进行周期性内存管理
+                    self.memory_check_counter += 1
+                    if self.memory_check_counter % memory_check_freq == 0:
+                        # 轻量级内存检查，只获取内存占用而不记录
+                        current_memory = process.memory_info().rss
+                        if current_memory > self.memory_limit * 0.8:  # 如果内存使用超过限制的80%
+                            # 释放帧缓存中的一半项目
+                            if self.use_frame_cache and len(self.frame_cache) > 0:
+                                keys_to_remove = list(self.frame_cache.keys())[::2]  # 移除一半的缓存
+                                for key in keys_to_remove:
+                                    del self.frame_cache[key]
                     
                     # 高内存模式下允许更大的生产-消费差距
                     frames_ahead = frame_index - self.current_frame
                     if frames_ahead > max_ahead:
                         # 如果生产速度过快，给写入线程更多时间
-                        time.sleep(0.05)
+                        time.sleep(0.01)
                         continue
                     
                     # 智能任务分配：限制队列大小
                     queue_size = task_queue.qsize()
-                    max_queue_tasks = self.num_threads * 5  # 高内存模式下增大任务队列容量
+                    max_queue_tasks = self.num_threads * 10  # 高内存模式下增大任务队列容量
                     
                     if queue_size < max_queue_tasks:
                         # 批量添加任务，一次性加入更多帧
@@ -918,6 +1008,10 @@ class VideoRenderer:
                 self.error_callback(f"渲染失败: {str(e)}")
             self.stop_threads = True
         finally:
+            # 清理缓存
+            if self.use_frame_cache:
+                self.frame_cache.clear()
+            
             # 关闭FFmpeg进程
             if self.ffmpeg_process:
                 try:
