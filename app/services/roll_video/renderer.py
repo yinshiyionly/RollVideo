@@ -1422,68 +1422,76 @@ class VideoRenderer:
                  return False
                  
             # --- Start Generator Threads --- 
-            # 预填充帧队列 (Now happens *after* writer thread is confirmed started)
             logger.info(f"预填充 {self.prefill_count} 帧...")
-            
-            # 批量大小设置
-            batch_size = 100  # 大批量处理帧，提高效率
+            batch_size = 100
             logger.info(f"使用批次大小: {batch_size} 帧/批次")
-            
-            # 启动多个帧生成线程
             generator_threads = []
-            logger.info(f"已启动 {self.max_threads} 个帧生成线程, 预填充 {self.prefill_count} 帧")
+            logger.info(f"准备启动 {self.max_threads} 个帧生成线程...")
             for i in range(self.max_threads):
                 thread = threading.Thread(
                     target=self._generate_frames_worker,
-                    args=(frame_generator, i, batch_size)
+                    args=(frame_generator, i, batch_size),
+                    name=f"Generator-{i}" # Give threads names
                 )
                 thread.daemon = True
                 thread.start()
                 generator_threads.append(thread)
-                
-            # 等待完成或出错
-            while not self._event_complete.is_set() and self._error.value == 0:
-                # 定期检查内存使用情况
-                memory_check_counter += 1
-                if memory_check_counter % 500 == 0:  # 降低检查频率
-                    current_memory = process.memory_info().rss
-                    peak_memory = max(peak_memory, current_memory)
-                    memory_growth = current_memory - initial_memory
-                    
-                    logger.info(f"内存使用: {current_memory / 1024 / 1024:.2f} MB (增长: {memory_growth / 1024 / 1024:.2f} MB, 峰值: {peak_memory / 1024 / 1024:.2f} MB)")
-                    
-                    # 如果内存使用接近限制，主动清理
-                    if current_memory > memory_limit * 0.9:
-                        logger.warning(f"内存使用接近限制 ({current_memory / 1024 / 1024 / 1024:.2f}GB)，执行紧急垃圾回收")
-                        gc.collect()
-                        
-                # 让出时间片
-                time.sleep(0.1)
-                
-            # 等待所有线程完成
-            self._event_stop.set()
-            self.stop_threads = True  # 确保兼容性
+            logger.info(f"已启动 {len(generator_threads)} 个帧生成线程.")
+
+            # --- Wait for Generators to Finish --- 
+            logger.info("主线程: 等待所有生成器线程完成...")
+            start_join_generators = time.time()
+            for i, thread in enumerate(generator_threads):
+                try:
+                    logger.debug(f"Joining Generator Thread-{i}...")
+                    thread.join() # Wait indefinitely for this generator to finish
+                    logger.debug(f"Generator Thread-{i} finished.")
+                except Exception as join_e:
+                     logger.error(f"等待生成器线程 {i} 时出错: {join_e}", exc_info=True)
+                     # Decide if we should stop everything if one generator fails?
+                     # For now, set error and stop flag
+                     if self._error.value == 0: self._error.value = 1
+                     self._event_stop.set() # Signal writer and other generators
+            join_generators_duration = time.time() - start_join_generators
+            logger.info(f"所有生成器线程已完成. 耗时: {join_generators_duration:.2f}s.")
             
-            # 等待写入线程完成
-            writer_thread.join(timeout=30)
+            # --- Signal Writer to Stop --- 
+            logger.info("主线程: 所有生成器已完成, 设置 _event_stop 信号给写入线程.")
+            self._event_stop.set() 
+            self.stop_threads = True # Compatibility
             
-            # 检查是否有错误
+            # --- Wait for Writer Thread to Finish --- 
+            # Now wait for the writer thread to process remaining queue and finish
+            if writer_thread:
+                logger.info(f"主线程: 准备等待写入线程 (_frame_writer) 结束 (timeout=None - wait indefinitely)...")
+                writer_thread.join() # Wait indefinitely for writer thread
+                logger.info(f"主线程: 写入线程 (_frame_writer) 已结束.")
+                # We might not need the self._event_complete anymore if we join the writer thread? 
+                # Let's keep it for now as the writer sets it in finally.
+            else:
+                 logger.warning("主线程: 写入线程对象未成功创建，无法 join.")
+
+            # --- Check for Errors after threads finish --- 
+            logger.info("主线程: 检查最终错误状态.")
             if self._error.value != 0:
                 logger.error(f"渲染过程中发生错误，错误码: {self._error.value}")
                 if self.error_callback:
                     self.error_callback(f"渲染过程中发生错误，错误码: {self._error.value}")
+                # Restore GC threshold before returning False
+                gc.set_threshold(*old_threshold)
                 return False
                 
-            # 恢复原有GC设置
-            gc.set_threshold(*old_threshold)
+            # 恢复原有GC设置 (moved to finally)
+            # gc.set_threshold(*old_threshold)
             
-            # 记录内存使用情况
+            # 记录内存使用情况 (no change)
             final_memory = process.memory_info().rss
             memory_growth = final_memory - initial_memory
             logger.info(f"渲染完成。内存使用: {final_memory / 1024 / 1024:.2f} MB (增长: {memory_growth / 1024 / 1024:.2f} MB, 峰值: {peak_memory / 1024 / 1024:.2f} MB)")
             
+            logger.info("render_frames 正常完成.")
             return True
-            
+
         except Exception as e:
             logger.error(f"渲染视频时发生意外错误 (render_frames): {str(e)}", exc_info=True)
             if self.error_callback:
