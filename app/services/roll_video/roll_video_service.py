@@ -335,8 +335,9 @@ class RollVideoService:
         # 返回帧生成函数
         def frame_generator(frame_index):
             try:
-                # 计算当前滚动位置 (像素)
-                scroll_pos = (frame_index + 1) * scroll_speed
+                # 修改: 从第一帧开始就在屏幕底部显示文字，而不是在屏幕外
+                # 原始代码: scroll_pos = (frame_index + 1) * scroll_speed
+                scroll_pos = frame_index * scroll_speed  # 移除 +1，让第一帧文字就出现在底部
                 
                 # 创建视频帧
                 if should_be_transparent:
