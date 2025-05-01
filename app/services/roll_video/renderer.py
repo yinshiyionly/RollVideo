@@ -134,6 +134,9 @@ class TextRenderer:
 
         self.line_spacing = line_spacing
         self.char_spacing = char_spacing
+        
+        # 记录原始参数，便于调试
+        logger.info(f"文本渲染器初始化: 字体大小={font_size}, 行间距={line_spacing}, 字符间距={char_spacing}")
     
     def _calculate_text_layout(self, text: str) -> List[str]:
         """
@@ -206,7 +209,8 @@ class TextRenderer:
         screen_height = min_height if min_height else text_actual_height
         if screen_height <= 0: screen_height = 1 # 避免高度为0
         
-        # 在图像末尾添加一个屏幕高度的空白区域
+        # 修改：不再在图像顶部添加空白区域，只在底部添加足够的空白
+        # 这样视频一开始就会显示文本，而不是空白
         total_height = text_actual_height + screen_height
         
         # 使用指定的背景颜色（包括透明度）创建图片
@@ -233,6 +237,9 @@ class TextRenderer:
                       x_pos += char_width + self.char_spacing
 
             y_position += line_height
+        
+        # 记录渲染尺寸
+        logger.info(f"文本渲染结果: 总行数={len(lines)}, 文本高度={text_actual_height}px, 总图像高度={total_height}px")
         
         return img, text_actual_height # 返回图像和文本实际高度
 
@@ -589,10 +596,10 @@ class VideoRenderer:
             pbar.close()
     
     def _prepare_ffmpeg_command(self):
-        """准备FFmpeg命令行，优先考虑兼容性"""
+        """准备FFmpeg命令行，针对GPU/CPU选择最佳编码策略"""
         
-        # 强制使用软件编码以解决兼容性问题
-        force_software_encoding = True  # 临时设置为True以解决当前问题
+        # 关闭强制软件编码，改用GPU优先策略
+        force_software_encoding = False
         
         # 确定视频编码器和硬件加速选项
         codec = None
@@ -602,63 +609,88 @@ class VideoRenderer:
         # 获取文件扩展名，为临时文件设置正确的格式
         output_ext = os.path.splitext(self.output_path)[1].lower()
         if not output_ext or output_ext == '.tmp':
-            output_ext = '.mp4'  # 默认使用MP4，避免.tmp格式
+            # 根据透明度选择合适的容器格式
+            if self.transparent:
+                output_ext = '.mov'  # 透明视频使用MOV容器
+            else:
+                output_ext = '.mp4'  # 不透明视频使用MP4容器
             
         # 检测系统类型
         system = platform.system()
         
-        # 如果强制使用软件编码，跳过硬件加速检测
-        if force_software_encoding:
-            logger.info("强制使用软件编码 (libx264)，这提供最佳兼容性")
-            codec = 'libx264'
-            extra_params.extend(['-preset', 'ultrafast'])
-            extra_params.extend(['-tune', 'fastdecode', '-crf', '28'])
+        # 根据透明度选择不同的编码策略
+        if self.transparent:
+            # 透明视频 - 使用ProRes编码器和MOV容器
+            logger.info("透明视频使用ProRes 4444编码 (CPU)")
+            codec = 'prores_ks'
+            extra_params.extend([
+                '-profile:v', '4444',      # ProRes 4444支持Alpha通道
+                '-vendor', 'ap10',         # Apple标识
+                '-pix_fmt', 'yuva444p10le' # 支持Alpha通道的10位像素格式
+            ])
+            # 确保扩展名是.mov
+            if not output_ext.endswith('.mov'):
+                output_ext = '.mov'
         else:
-            # 按系统类型选择最佳编码器
-            if system == 'Darwin':  # macOS
-                # 检查M1/M2芯片
-                is_apple_silicon = platform.processor() == '' or 'arm' in platform.processor().lower()
-                if is_apple_silicon:
-                    codec = 'h264_videotoolbox'
-                    hwaccel = 'videotoolbox'
-                    extra_params.extend(['-b:v', '12M', '-tag:v', 'avc1'])
-                    extra_params.extend(['-quality', 'speed'])
-                    extra_params.extend(['-allow_sw', '1'])
-                else:
-                    codec = 'h264_videotoolbox'
-                    hwaccel = 'videotoolbox'
-                    extra_params.extend(['-b:v', '10M'])
-                    extra_params.extend(['-quality', 'speed'])
-            elif system == 'Windows':
+            # 不透明视频 - 尝试使用GPU加速，失败时回退到CPU
+            try:
+                # 首先尝试使用NVIDIA GPU
                 if self._is_nvidia_available():
+                    logger.info("检测到NVIDIA GPU，使用硬件加速编码(h264_nvenc)")
                     codec = 'h264_nvenc'
                     hwaccel = 'cuda'
-                    extra_params.extend(['-tune', 'fastdecode', '-preset', 'p1'])
-                    extra_params.extend(['-rc', 'vbr', '-cq', '24', '-b:v', '0'])
-                else:
-                    codec = 'libx264'
-                    extra_params.extend(['-preset', 'ultrafast'])
-                    extra_params.extend(['-tune', 'fastdecode', '-crf', '28'])
-            else:  # Linux及其他
-                if self._is_nvidia_available():
-                    codec = 'h264_nvenc'
-                    hwaccel = 'cuda'
-                    extra_params.extend(['-tune', 'fastdecode', '-preset', 'p1'])
-                    extra_params.extend(['-rc', 'vbr', '-cq', '24', '-b:v', '0'])
+                    # 优化NVENC参数，利用10GB显存
+                    extra_params.extend([
+                        '-tune', 'hq',            # 高质量模式
+                        '-preset', 'p2',          # 平衡速度和质量的预设(p1-p7，p1最快)
+                        '-rc', 'vbr',             # 可变比特率
+                        '-cq', '23',              # 较好的质量(0-51，越小越好)
+                        '-b:v', '4M',             # 目标比特率
+                        '-maxrate', '8M',         # 最大比特率
+                        '-bufsize', '16M',        # 缓冲大小
+                        '-spatial-aq', '1',       # 空间自适应量化，提高质量
+                        '-temporal-aq', '1'       # 时间自适应量化，提高质量
+                    ])
+                # 然后检查AMD GPU
                 elif self._is_amd_available():
+                    logger.info("检测到AMD GPU，使用硬件加速编码(h264_amf)")
                     codec = 'h264_amf'
                     hwaccel = 'amf'
-                    extra_params.extend(['-quality', 'speed'])
+                    extra_params.extend([
+                        '-quality', 'balanced',   # 平衡速度和质量
+                        '-rc', 'vbr_peak'         # 峰值约束可变比特率
+                    ])
+                # 最后检查Intel GPU
+                elif self._is_intel_available() and self._test_qsv_support():
+                    logger.info("检测到Intel GPU，使用硬件加速编码(h264_qsv)")
+                    codec = 'h264_qsv'
+                    hwaccel = 'qsv'
+                    extra_params.extend([
+                        '-preset', 'medium',      # 平衡速度和质量
+                        '-global_quality', '23'   # 质量水平(1-51，越小越好)
+                    ])
                 else:
-                    codec = 'libx264'
-                    extra_params.extend(['-preset', 'ultrafast'])
-                    extra_params.extend(['-tune', 'fastdecode', '-crf', '28'])
+                    # 没有检测到支持的GPU或GPU检测失败，使用CPU编码
+                    raise Exception("未检测到支持的GPU或GPU检测失败")
+            except Exception as e:
+                # 任何GPU相关错误都回退到CPU
+                logger.warning(f"GPU编码不可用({str(e)})，回退到CPU编码(libx264)")
+                codec = 'libx264'
+                hwaccel = None
+                # 为8核CPU优化参数
+                extra_params.extend([
+                    '-preset', 'veryfast',  # 速度优先预设
+                    '-tune', 'fastdecode',  # 优化解码速度
+                    '-crf', '23',           # 平衡质量(0-51，越小越好)
+                    '-x264opts', 'no-deblock:no-cabac', # 禁用一些CPU密集型选项
+                    '-level', '4.0'         # 兼容性级别
+                ])
         
-        # 如果没有选择编码器，使用libx264作为回退
+        # 如果没有选择编码器，使用libx264作为最终回退
         if not codec:
+            logger.warning("未能选择合适的编码器，使用libx264默认配置")
             codec = 'libx264'
-            extra_params.extend(['-preset', 'ultrafast'])
-            extra_params.extend(['-tune', 'fastdecode', '-crf', '28'])
+            extra_params.extend(['-preset', 'veryfast', '-crf', '23'])
             
         # 准备基本FFmpeg命令
         command = [
@@ -668,9 +700,12 @@ class VideoRenderer:
             '-framerate', str(self.fps),  # 设置帧率
         ]
         
-        # 只有在非强制软件编码模式下才添加硬件加速选项
-        if hwaccel and not force_software_encoding:
+        # 只有在有硬件加速选项并且不是透明视频时添加
+        if hwaccel and not self.transparent and not force_software_encoding:
             command.extend(['-hwaccel', hwaccel])
+            # 只为NVIDIA GPU添加hwaccel_output_format
+            if hwaccel == 'cuda':
+                command.extend(['-hwaccel_output_format', 'cuda'])
         
         # 配置输入格式
         command.extend([
@@ -680,39 +715,52 @@ class VideoRenderer:
             '-i', 'pipe:',      # 从管道读取
         ])
         
-        # 添加特殊优化选项，提高处理速度
+        # 利用30GB内存和8核CPU优化FFmpeg性能
         command.extend([
-            # 设置线程数量 - 使用更多的线程
-            '-threads', str(min(16, max(1, os.cpu_count()))),
-            # 使用更大的线程队列，提高多线程效率
-            '-thread_queue_size', '2048',
-            # 使用更快的缩放过滤器
-            '-sws_flags', 'fast_bilinear',
+            # 线程设置
+            '-threads', str(min(8, max(1, os.cpu_count()))),  # 使用所有可用CPU核心但不超过8
+            # 线程队列大小(30GB内存可以使用更大的值)
+            '-thread_queue_size', '4096',  # 增加队列大小
+            # 缩放算法，针对文本优化
+            '-sws_flags', 'lanczos+accurate_rnd',  # 高质量文本缩放
             # 禁用音频
             '-an',
-            # 提高处理缓冲区大小
-            '-bufsize', '100M',
+            # 增大缓冲区以利用大内存
+            '-bufsize', '500M',  # 利用30GB内存设置更大缓冲
         ])
         
         # 添加前面确定的额外参数
         if extra_params:
             command.extend(extra_params)
             
-        # 配置视频编码 - 使用最低质量但最快的设置
-        command.extend([
-            '-c:v', codec,
-            '-pix_fmt', 'yuv420p',  # 兼容性像素格式
-            '-g', '300',            # 增大GOP大小，减少I帧数量
-            '-bf', '0',             # 禁用B帧以加速编码
-            '-flags', '+cgop',      # 闭合GOP，提高编码效率
-        ])
+        # 根据透明度选择不同的编码配置
+        if self.transparent:
+            # 透明视频保持ProRes设置
+            pass  # 已经在前面设置了ProRes参数
+        else:
+            # 不透明视频配置
+            if codec.startswith('h264'):
+                # 添加H.264通用参数
+                command.extend([
+                    '-c:v', codec,
+                    '-pix_fmt', 'yuv420p',  # 兼容性像素格式
+                    '-g', str(self.fps * 2),  # GOP大小设为2秒
+                    '-keyint_min', str(self.fps),  # 最小关键帧间隔
+                    '-movflags', '+faststart',  # 优化网络播放
+                ])
+            else:
+                # 其他编码器(如libx264)的参数
+                command.extend([
+                    '-c:v', codec,
+                    '-pix_fmt', 'yuv420p',
+                ])
         
         # 确保输出文件有正确的扩展名
         output_path = self.output_path
-        if output_path.endswith('.tmp'):
+        if output_path.endswith('.tmp') or os.path.splitext(output_path)[1] != output_ext:
             # 修改临时文件扩展名为正确的视频格式
             output_path = os.path.splitext(output_path)[0] + output_ext
-            logger.info(f"修正临时文件扩展名: {self.output_path} -> {output_path}")
+            logger.info(f"修正文件扩展名: {self.output_path} -> {output_path}")
             self.output_path = output_path
             
         # 添加输出文件路径
@@ -727,7 +775,7 @@ class VideoRenderer:
             except Exception as e:
                 logger.error(f"创建输出目录失败: {str(e)}")
         
-        logger.info(f"FFmpeg极速命令: {' '.join(command)}")
+        logger.info(f"FFmpeg命令: {' '.join(command)}")
         return command
         
     def _is_nvidia_available(self):
@@ -806,6 +854,17 @@ class VideoRenderer:
         
         # 默认情况下返回False，确保安全回退到软件编码
         return False
+
+    def _test_qsv_support(self):
+        """测试QSV编码器是否可用"""
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-encoders'],
+                stdout=subprocess.PIPE, stderr=DEVNULL, timeout=2
+            )
+            return 'h264_qsv' in result.stdout.decode('utf-8', errors='ignore')
+        except:
+            return False
 
     def render_frames(self, total_frames, frame_generator):
         """使用多线程渲染所有帧"""
