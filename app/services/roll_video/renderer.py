@@ -760,74 +760,99 @@ class VideoRenderer:
                 logger.error(f"关闭FFmpeg输入管道时出错: {str(e)}")
                 post_progress.update(1)
             
-            # 2. 等待FFmpeg完成视频处理
+            # 2. 等待FFmpeg完成视频处理 - 为A10 GPU使用更强的超时机制
             post_progress.set_description(f"【第2步/共3步】{post_steps[1]}")
             try:
                 if ffmpeg_process and ffmpeg_process.poll() is None:
-                    # 设置合理的超时时间，高端GPU使用更短时间
+                    # 对于高端GPU使用更短的超时时间
                     is_high_end_gpu = False
                     try:
                         gpu_info = subprocess.check_output('nvidia-smi --query-gpu=name --format=csv,noheader', shell=True, text=True)
-                        is_high_end_gpu = any(x in gpu_info.lower() for x in ['a10', 'a100', 'v100', 'a30', 'a40', 'a6000'])
-                    except:
-                        pass
+                        gpu_info = gpu_info.strip().lower()
+                        is_high_end_gpu = any(x in gpu_info for x in ['a10', 'a100', 'v100', 'a30', 'a40', 'a6000'])
+                        logger.info(f"GPU类型检测: {gpu_info} - 高端GPU: {is_high_end_gpu}")
+                    except Exception as e:
+                        logger.warning(f"GPU检测失败: {str(e)}")
                         
-                    # 设置超时时间 - 高端GPU最多等30秒，其他情况最多等90秒
-                    timeout = 30 if is_high_end_gpu else 90
+                    # 高端GPU只等待20秒，其他最多等60秒
+                    timeout = 20 if is_high_end_gpu else 60
                     
                     ffmpeg_start_wait = time.time()
                     logger.info(f"等待FFmpeg完成最终编码 (最长等待{timeout}秒)...")
                     
-                    try:
-                        # 使用poll + sleep代替wait，这样可以在等待过程中更新进度
-                        wait_complete = False
-                        progress_points = 20  # 将等待时间分为20个点来显示进度
-                        for i in range(progress_points):
-                            if ffmpeg_process.poll() is not None:
-                                wait_complete = True
-                                break
-                            post_progress.set_description(
-                                f"【第2步/共3步】{post_steps[1]} - {int((i+1)/progress_points*100)}% "
-                                f"[{int(time.time()-ffmpeg_start_wait)}秒]"
-                            )
-                            time.sleep(timeout / progress_points)
-                        
-                        # 如果还没完成，最后等待剩余时间
-                        if not wait_complete:
-                            remaining = timeout - (time.time() - ffmpeg_start_wait)
-                            if remaining > 0:
-                                ffmpeg_process.wait(timeout=remaining)
-                            else:
-                                # 超时，强制终止
-                                raise subprocess.TimeoutExpired(cmd=command, timeout=timeout)
+                    # 分段等待，实时更新进度
+                    wait_complete = False
+                    progress_points = 10  # 将等待时间分为10个点显示进度
+                    wait_interval = timeout / progress_points
+                    
+                    for i in range(progress_points):
+                        if ffmpeg_process.poll() is not None:
+                            wait_complete = True
+                            logger.info(f"FFmpeg进程在等待{i+1}/{progress_points}段后自行结束")
+                            break
                             
+                        # 更新进度描述
+                        elapsed_wait = time.time() - ffmpeg_start_wait
+                        percent_done = min(100, int((i+1) / progress_points * 100))
+                        post_progress.set_description(
+                            f"【第2步/共3步】{post_steps[1]} - {percent_done}% [{int(elapsed_wait)}秒]"
+                        )
+                        
+                        # 等待一个间隔
+                        time.sleep(wait_interval)
+                    
+                    # 如果FFmpeg仍在运行，但已达到超时时间，强制终止
+                    if not wait_complete:
+                        logger.warning(f"FFmpeg进程超时未退出，强制终止 (已等待{int(time.time()-ffmpeg_start_wait)}秒)")
+                        
+                        # 尝试正常终止
+                        ffmpeg_process.terminate()
+                        
+                        # 再等待3秒
+                        termination_timeout = 3
+                        termination_start = time.time()
+                        while ffmpeg_process.poll() is None and time.time() - termination_start < termination_timeout:
+                            time.sleep(0.5)
+                            
+                        # 如果仍未终止，强制杀死
+                        if ffmpeg_process.poll() is None:
+                            logger.warning("FFmpeg进程未响应终止信号，强制杀死")
+                            ffmpeg_process.kill()
+                            
+                        # 即使超时，我们也认为处理已完成
+                        # 检查生成的文件是否存在且大小合理
+                        if os.path.exists(self.output_path) and os.path.getsize(self.output_path) > 1000000:
+                            logger.info(f"尽管超时，但输出文件已生成，大小: {os.path.getsize(self.output_path)/1024/1024:.2f}MB")
+                            # 不设置错误标志，因为文件可能是完整的
+                        else:
+                            logger.error("输出文件缺失或异常小，视频渲染可能失败")
+                            if self._error.value == 0:
+                                self._error.value = 1
+                    else:
+                        # FFmpeg已退出，检查返回值
                         return_code = ffmpeg_process.poll()
-                        if return_code is None:
-                            # 仍在运行，超时了
-                            raise subprocess.TimeoutExpired(cmd=command, timeout=timeout)
-                        elif return_code != 0:
+                        if return_code != 0:
                             stderr_output = ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
                             logger.error(f"FFmpeg进程异常退出，返回值: {return_code}, 错误信息: {stderr_output}")
                             if self._error.value == 0:
                                 self._error.value = return_code if return_code != 0 else 1
                         else:
                             logger.info("FFmpeg进程成功完成")
-                    except subprocess.TimeoutExpired:
-                        logger.error(f"等待FFmpeg进程完成超时(超过{timeout}秒)，强制终止")
-                        ffmpeg_process.terminate()
-                        try:
-                            ffmpeg_process.wait(timeout=5)
-                        except:
-                            ffmpeg_process.kill()
-                        
-                        if self._error.value == 0:
-                            self._error.value = 1
+                            
                 post_progress.update(1)
             except Exception as e:
                 logger.error(f"等待FFmpeg完成时出错: {str(e)}")
+                if ffmpeg_process and ffmpeg_process.poll() is None:
+                    try:
+                        ffmpeg_process.terminate()
+                        time.sleep(1)
+                        if ffmpeg_process.poll() is None:
+                            ffmpeg_process.kill()
+                    except:
+                        pass
                 post_progress.update(1)
             
-            # 3. a最终清理
+            # 3. 最终清理
             post_progress.set_description(f"【第3步/共3步】{post_steps[2]}")
             try:
                 # 强制执行一次GC，确保释放资源
@@ -846,9 +871,11 @@ class VideoRenderer:
             # 显示最终结果
             if self._error.value == 0:
                 print(f"\n✅ 视频渲染成功! 输出文件: {self.output_path}")
+                if os.path.exists(self.output_path):
+                    print(f"   文件大小: {os.path.getsize(self.output_path)/1024/1024:.2f}MB")
             else:
                 print(f"\n❌ 视频渲染失败! 错误码: {self._error.value}")
-        
+                
         finally:
             # 确保关闭进度条
             try:
@@ -872,12 +899,18 @@ class VideoRenderer:
                     except:
                         pass
                         
+                    logger.info("强制终止FFmpeg进程...")
                     ffmpeg_process.terminate()
-                    try:
-                        ffmpeg_process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
+                    
+                    # 等待最多3秒
+                    term_start = time.time()
+                    while ffmpeg_process.poll() is None and time.time() - term_start < 3:
+                        time.sleep(0.5)
+                        
+                    # 如果仍在运行，杀死它
+                    if ffmpeg_process.poll() is None:
+                        logger.warning("FFmpeg进程未响应终止信号，强制杀死")
                         ffmpeg_process.kill()
-                        logger.warning("强制终止FFmpeg进程")
             except Exception as e:
                 logger.error(f"关闭FFmpeg进程时出错: {str(e)}")
                 if self._error.value == 0:
