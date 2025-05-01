@@ -721,250 +721,224 @@ class VideoRenderer:
                     except Exception as e:
                         logger.error(f"写入最后帧时出错: {str(e)}")
             
-            # 关闭帧渲染进度条
-            progress_bar.close()
-            logger.info("主帧渲染进度条已关闭")
-            
-            # 创建后处理进度条并立即显示
-            print("\n正在完成视频编码和文件处理...")
-            logger.info("准备启动视频后处理步骤...")
-            post_steps = [
-                "关闭帧输入管道",
-                "等待FFmpeg完成视频编码",
-                "执行最终资源清理"
-            ]
-            
-            try:
-                post_progress = tqdm.tqdm(
-                    total=len(post_steps),
-                    desc="视频后处理",
-                    unit="步骤",
-                    ncols=100,
-                    position=0, # 确保主进度条在顶层
-                    leave=True
-                )
-                logger.info("后处理步骤进度条已创建")
-            except Exception as e:
-                logger.error(f"创建后处理进度条失败: {str(e)}")
-                self._error.value = 1
-                self._event_complete.set()
-                return # 无法继续
-            
-            # 记录总结信息
-            if frames_written > 0:
-                total_time = time.time() - start_time
-                logger.info(f"帧写入完成: 已写入 {frames_written} 帧, 耗时 {total_time:.2f} 秒, 平均速度 {frames_written/total_time:.2f} 帧/秒")
-                if skipped_frames > 0:
-                    logger.warning(f"跳过了 {skipped_frames} 帧由于错误")
-            
-            # 1. 关闭帧输入管道
-            logger.info("准备关闭FFmpeg输入管道 (步骤 1/3)")
-            post_progress.set_description(f"【第1步/共3步】{post_steps[0]}")
-            try:
-                if ffmpeg_process and ffmpeg_process.poll() is None:
-                    logger.info("尝试关闭 ffmpeg_process.stdin ...")
-                    ffmpeg_process.stdin.close()
-                    logger.info("ffmpeg_process.stdin 已关闭")
+            # --- Start of Post-Processing Block --- 
+            logger.info("帧写入循环结束，准备进入后处理...")
+            # 这个 try...except...finally 块包裹整个后处理逻辑
+            try: 
+                # 关闭帧渲染进度条
+                if 'progress_bar' in locals() and progress_bar:
+                    progress_bar.close()
+                    logger.info("主帧渲染进度条已关闭")
+                else:
+                    logger.warning("主帧渲染进度条未定义或已关闭")
+
+                # 创建后处理进度条并立即显示
+                print("\n正在完成视频编码和文件处理...")
+                logger.info("准备启动视频后处理步骤...")
+                post_steps = [
+                    "关闭帧输入管道",
+                    "等待FFmpeg完成视频编码",
+                    "执行最终资源清理"
+                ]
+                
+                # 这个 try...except 用于捕获创建后处理进度条的错误
+                try:
+                    post_progress = tqdm.tqdm(
+                        total=len(post_steps),
+                        desc="视频后处理",
+                        unit="步骤",
+                        ncols=100,
+                        position=0, # 确保主进度条在顶层
+                        leave=True
+                    )
+                    logger.info("后处理步骤进度条已创建")
+                except Exception as e:
+                    logger.error(f"创建后处理进度条失败: {str(e)}", exc_info=True)
+                    self._error.value = 1
+                    # 如果进度条创建失败，无法继续后处理，直接跳到finally
+                    raise # 重新抛出异常，由外层 except 捕获并进入 finally
+                
+                # 记录总结信息
+                if frames_written > 0:
+                    total_time = time.time() - start_time
+                    logger.info(f"帧写入完成: 已写入 {frames_written} 帧, 耗时 {total_time:.2f} 秒, 平均速度 {frames_written/total_time:.2f} 帧/秒")
+                    if skipped_frames > 0:
+                        logger.warning(f"跳过了 {skipped_frames} 帧由于错误")
+                
+                # 1. 关闭帧输入管道
+                logger.info("准备关闭FFmpeg输入管道 (步骤 1/3)")
+                post_progress.set_description(f"【第1步/共3步】{post_steps[0]}")
+                # 这个 try...except 用于捕获关闭管道的错误
+                try:
+                    if ffmpeg_process and ffmpeg_process.poll() is None:
+                        logger.info("尝试关闭 ffmpeg_process.stdin ...")
+                        ffmpeg_process.stdin.close()
+                        logger.info("ffmpeg_process.stdin 已关闭")
+                    else:
+                        logger.warning("FFmpeg 进程在关闭管道前已结束或不存在")
                     post_progress.update(1)
                     time.sleep(0.1)
-                else:
-                    logger.warning("FFmpeg 进程在关闭管道前已结束或不存在")
-                    post_progress.update(1) # 仍然更新进度
-            except Exception as e:
-                logger.error(f"关闭FFmpeg输入管道时出错: {str(e)}")
-                post_progress.update(1) # 即使出错也更新进度
-            
-            # 2. 等待FFmpeg完成视频处理 - 为A10 GPU使用更强的超时机制
-            logger.info("准备等待 FFmpeg 完成 (步骤 2/3)")
-            post_progress.set_description(f"【第2步/共3步】{post_steps[1]}")
-            try:
-                if ffmpeg_process and ffmpeg_process.poll() is None:
-                    # 对于高端GPU使用更短的超时时间
-                    is_high_end_gpu = False
-                    gpu_info = "未知" # 初始化gpu_info
-                    try:
-                        gpu_info = subprocess.check_output('nvidia-smi --query-gpu=name --format=csv,noheader', shell=True, text=True)
-                        gpu_info = gpu_info.strip().lower()
-                        # 原始代码根据GPU型号判断是否高端
-                        is_high_end_gpu = any(x in gpu_info for x in ['a10', 'a100', 'v100', 'a30', 'a40', 'a6000', 'rtx']) # 扩展高端GPU列表
-                        logger.info(f"GPU类型检测: {gpu_info} - 高端GPU: {is_high_end_gpu}")
-                    except Exception as e:
-                        logger.warning(f"GPU检测失败: {str(e)}")
-                        
-                    # 大幅增加超时时间：高端GPU等待10分钟，其他等待5分钟
-                    timeout = 600 if is_high_end_gpu else 300
-                    
-                    ffmpeg_start_wait = time.time()
-                    logger.info(f"等待FFmpeg完成最终编码 (最长等待{timeout}秒)...")
-                    
-                    # 创建等待FFmpeg的独立进度条 (移除 position 参数)
-                    logger.info("准备创建 FFmpeg 等待进度条...")
-                    try:
-                        wait_bar = tqdm.tqdm(
-                            total=timeout, 
-                            desc="  └─ 等待FFmpeg编码", 
-                            unit="秒", 
-                            ncols=100, 
-                            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}秒 [{elapsed}<{remaining}]",
-                            # position=1, # 移除 position 参数，让tqdm自动处理
-                            leave=False
-                        )
-                        logger.info("FFmpeg 等待进度条已创建")
-                    except Exception as e:
-                        logger.error(f"创建 FFmpeg 等待进度条失败: {str(e)}")
-                        # 即使进度条失败，仍然继续等待，但没有可视化
-                        wait_bar = None # 标记进度条不可用
-
-                    # 分段等待，实时更新进度
-                    wait_complete = False
-                    progress_points = max(10, timeout // 5)
-                    wait_interval = timeout / progress_points
-                    
-                    for i in range(progress_points):
-                        if ffmpeg_process.poll() is not None:
-                            wait_complete = True
-                            if wait_bar: # 仅当进度条创建成功时更新
-                                wait_bar.n = timeout
-                                wait_bar.refresh()
-                            logger.info(f"FFmpeg进程在等待{i+1}/{progress_points}段后自行结束")
-                            break
-                            
-                        # 更新主进度条描述
-                        elapsed_wait = time.time() - ffmpeg_start_wait
-                        percent_done = min(100, int((i+1) / progress_points * 100))
-                        post_progress.set_description(
-                            f"【第2步/共3步】{post_steps[1]} - {percent_done}% [{int(elapsed_wait)}秒]"
-                        )
-
-                        # 更新等待进度条
-                        if wait_bar: # 仅当进度条创建成功时更新
-                            wait_bar.update(wait_interval)
-                        
-                        # 等待一个间隔
-                        time.sleep(wait_interval)
-                    
-                    # 关闭等待进度条
-                    if wait_bar: # 仅当进度条创建成功时关闭
-                        wait_bar.close()
-                        logger.info("FFmpeg 等待进度条已关闭")
-
-                    # 如果FFmpeg仍在运行，但已达到超时时间，强制终止
-                    if not wait_complete:
-                        logger.warning(f"FFmpeg进程超时未退出，强制终止 (已等待{int(time.time()-ffmpeg_start_wait)}秒)")
-                        
-                        # 尝试正常终止
-                        ffmpeg_process.terminate()
-                        
-                        # 再等待3秒
-                        termination_timeout = 3
-                        termination_start = time.time()
-                        while ffmpeg_process.poll() is None and time.time() - termination_start < termination_timeout:
-                            time.sleep(0.5)
-                            
-                        # 如果仍未终止，强制杀死
-                        if ffmpeg_process.poll() is None:
-                            logger.warning("FFmpeg进程未响应终止信号，强制杀死")
-                            ffmpeg_process.kill()
-                            
-                        # 即使超时，我们也认为处理已完成
-                        # 检查生成的文件是否存在且大小合理
-                        if os.path.exists(self.output_path) and os.path.getsize(self.output_path) > 1000000:
-                            logger.info(f"尽管超时，但输出文件已生成，大小: {os.path.getsize(self.output_path)/1024/1024:.2f}MB")
-                            # 不设置错误标志，因为文件可能是完整的
+                except Exception as e:
+                    logger.error(f"关闭FFmpeg输入管道时出错: {str(e)}", exc_info=True)
+                    post_progress.update(1) # 即使出错也更新进度
+                
+                # 2. 等待FFmpeg完成视频处理
+                logger.info("准备等待 FFmpeg 完成 (步骤 2/3)")
+                post_progress.set_description(f"【第2步/共3步】{post_steps[1]}")
+                # 这个 try...except 用于捕获等待FFmpeg或创建其进度条的错误
+                try:
+                    if ffmpeg_process and ffmpeg_process.poll() is None:
+                        # ... (GPU 检测, 超时设置, wait_bar 创建/更新/关闭, FFmpeg 等待循环, 超时处理等逻辑不变) ...
+                        # ---- Start of Wait Logic -----
+                        is_high_end_gpu = False
+                        gpu_info = "未知"
+                        try:
+                            gpu_info = subprocess.check_output('nvidia-smi --query-gpu=name --format=csv,noheader', shell=True, text=True)
+                            gpu_info = gpu_info.strip().lower()
+                            is_high_end_gpu = any(x in gpu_info for x in ['a10', 'a100', 'v100', 'a30', 'a40', 'a6000', 'rtx'])
+                            logger.info(f"GPU类型检测: {gpu_info} - 高端GPU: {is_high_end_gpu}")
+                        except Exception as e:
+                            logger.warning(f"GPU检测失败: {str(e)}")
+                        timeout = 600 if is_high_end_gpu else 300
+                        ffmpeg_start_wait = time.time()
+                        logger.info(f"等待FFmpeg完成最终编码 (最长等待{timeout}秒)...")
+                        wait_bar = None
+                        try:
+                            logger.info("准备创建 FFmpeg 等待进度条...")
+                            wait_bar = tqdm.tqdm(
+                                total=timeout,
+                                desc="  └─ 等待FFmpeg编码",
+                                unit="秒",
+                                ncols=100,
+                                bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}秒 [{elapsed}<{remaining}]",
+                                leave=False
+                            )
+                            logger.info("FFmpeg 等待进度条已创建")
+                        except Exception as e:
+                            logger.error(f"创建 FFmpeg 等待进度条失败: {str(e)}", exc_info=True)
+                        wait_complete = False
+                        progress_points = max(10, timeout // 5)
+                        wait_interval = timeout / progress_points
+                        for i in range(progress_points):
+                            if ffmpeg_process.poll() is not None:
+                                wait_complete = True
+                                if wait_bar:
+                                    wait_bar.n = timeout
+                                    wait_bar.refresh()
+                                logger.info(f"FFmpeg进程在等待{i+1}/{progress_points}段后自行结束")
+                                break
+                            elapsed_wait = time.time() - ffmpeg_start_wait
+                            percent_done = min(100, int((i+1) / progress_points * 100))
+                            post_progress.set_description(f"【第2步/共3步】{post_steps[1]} - {percent_done}% [{int(elapsed_wait)}秒]")
+                            if wait_bar:
+                                wait_bar.update(wait_interval)
+                            time.sleep(wait_interval)
+                        if wait_bar:
+                            wait_bar.close()
+                            logger.info("FFmpeg 等待进度条已关闭")
+                        if not wait_complete:
+                            logger.warning(f"FFmpeg进程超时未退出，强制终止 (已等待{int(time.time()-ffmpeg_start_wait)}秒)")
+                            ffmpeg_process.terminate()
+                            termination_timeout = 3
+                            termination_start = time.time()
+                            while ffmpeg_process.poll() is None and time.time() - termination_start < termination_timeout:
+                                time.sleep(0.5)
+                            if ffmpeg_process.poll() is None:
+                                logger.warning("FFmpeg进程未响应终止信号，强制杀死")
+                                ffmpeg_process.kill()
+                            if os.path.exists(self.output_path) and os.path.getsize(self.output_path) > 1000000:
+                                logger.info(f"尽管超时，但输出文件已生成，大小: {os.path.getsize(self.output_path)/1024/1024:.2f}MB")
+                            else:
+                                logger.error("输出文件缺失或异常小，视频渲染可能失败")
+                                if self._error.value == 0: self._error.value = 1
                         else:
-                            logger.error("输出文件缺失或异常小，视频渲染可能失败")
-                            if self._error.value == 0:
-                                self._error.value = 1
+                            return_code = ffmpeg_process.poll()
+                            if return_code != 0:
+                                stderr_output = ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
+                                logger.error(f"FFmpeg进程异常退出，返回值: {return_code}, 错误信息: {stderr_output}")
+                                if self._error.value == 0: self._error.value = return_code if return_code != 0 else 1
+                            else:
+                                logger.info("FFmpeg进程成功完成")
+                        # ---- End of Wait Logic -----
                     else:
-                        # FFmpeg已退出，检查返回值
-                        return_code = ffmpeg_process.poll()
-                        if return_code != 0:
-                            stderr_output = ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
-                            logger.error(f"FFmpeg进程异常退出，返回值: {return_code}, 错误信息: {stderr_output}")
-                            if self._error.value == 0:
-                                self._error.value = return_code if return_code != 0 else 1
-                        else:
-                            logger.info("FFmpeg进程成功完成")
-                            
-                post_progress.update(1) # 完成步骤2
-            except Exception as e:
-                logger.error(f"等待FFmpeg完成时出错: {str(e)}")
-                if ffmpeg_process and ffmpeg_process.poll() is None:
-                    try:
-                        ffmpeg_process.terminate()
-                        time.sleep(1)
-                        if ffmpeg_process.poll() is None:
-                            ffmpeg_process.kill()
-                    except:
-                        pass
-                post_progress.update(1) # 即使出错也标记步骤2完成
-            
-            # 3. 最终清理
-            logger.info("准备执行最终清理 (步骤 3/3)")
-            post_progress.set_description(f"【第3步/共3步】{post_steps[2]}")
-            try:
-                # 强制执行一次GC，确保释放资源
-                import gc
-                gc.collect()
-                logger.info("最终资源清理完成")
-                post_progress.update(1)
-                time.sleep(0.2)  # 短暂暂停使进度条可见
-            except Exception as e:
-                logger.error(f"最终清理时出错: {str(e)}")
-                post_progress.update(1)
-            
-            # 完成后处理
-            post_progress.set_description("视频后处理完成！")
-            
-            # 显示最终结果
-            if self._error.value == 0:
-                print(f"\n✅ 视频渲染成功! 输出文件: {self.output_path}")
-                if os.path.exists(self.output_path):
-                    print(f"   文件大小: {os.path.getsize(self.output_path)/1024/1024:.2f}MB")
-            else:
-                print(f"\n❌ 视频渲染失败! 错误码: {self._error.value}")
+                        logger.warning("FFmpeg 进程在开始等待前已结束或不存在")
+                                
+                    post_progress.update(1) # 完成步骤2
+                except Exception as e:
+                    logger.error(f"等待FFmpeg完成步骤时出错: {str(e)}", exc_info=True)
+                    post_progress.update(1) # 即使出错也标记步骤2完成
                 
-        finally:
-            # 确保关闭进度条
-            try:
-                if 'progress_bar' in locals():
-                    progress_bar.close()
-            except:
-                pass
+                # 3. 最终清理
+                logger.info("准备执行最终清理 (步骤 3/3)")
+                post_progress.set_description(f"【第3步/共3步】{post_steps[2]}")
+                # 这个 try...except 用于捕获GC的错误
+                try:
+                    import gc
+                    gc.collect()
+                    logger.info("最终资源清理完成")
+                    post_progress.update(1)
+                    time.sleep(0.2)
+                except Exception as e:
+                    logger.error(f"最终清理时出错: {str(e)}", exc_info=True)
+                    post_progress.update(1)
                 
-            try:
-                if 'post_progress' in locals():
-                    post_progress.close()
-            except:
-                pass
+                # 完成后处理
+                post_progress.set_description("视频后处理完成！")
                 
-            # 无论如何都要关闭FFmpeg进程
-            try:
-                if ffmpeg_process and ffmpeg_process.poll() is None:
-                    logger.info("确保FFmpeg进程完全关闭...")
-                    try:
-                        ffmpeg_process.stdin.close()
-                    except:
-                        pass
-                        
-                    logger.info("强制终止FFmpeg进程...")
-                    ffmpeg_process.terminate()
+                # 显示最终结果
+                if self._error.value == 0:
+                    print(f"\n✅ 视频渲染成功! 输出文件: {self.output_path}")
+                    if os.path.exists(self.output_path):
+                        print(f"   文件大小: {os.path.getsize(self.output_path)/1024/1024:.2f}MB")
+                else:
+                    print(f"\n❌ 视频渲染失败! 错误码: {self._error.value}")
                     
-                    # 等待最多3秒
+            # 这个 except 捕获整个后处理块的任何未预料错误
+            except Exception as e:
+                logger.error(f"在视频后处理阶段发生意外错误: {str(e)}", exc_info=True)
+                if self._error.value == 0:
+                    self._error.value = 1
+                    
+        # 这个 finally 块确保无论如何都会执行清理和事件设置
+        finally:
+            logger.info("进入 _frame_writer 的 finally 块")
+            # 确保关闭所有可能的进度条
+            try:
+                if 'progress_bar' in locals() and progress_bar and not progress_bar.disable:
+                    progress_bar.close()
+            except Exception as e: logger.debug(f"关闭 progress_bar 出错: {e}")
+            try:
+                if 'post_progress' in locals() and post_progress and not post_progress.disable:
+                    post_progress.close()
+            except Exception as e: logger.debug(f"关闭 post_progress 出错: {e}")
+            try:
+                if 'wait_bar' in locals() and wait_bar and not wait_bar.disable:
+                    wait_bar.close()
+            except Exception as e: logger.debug(f"关闭 wait_bar 出错: {e}")
+                
+            # 无论如何都要尝试关闭FFmpeg进程
+            try:
+                if 'ffmpeg_process' in locals() and ffmpeg_process and ffmpeg_process.poll() is None:
+                    logger.info("确保FFmpeg进程完全关闭 (finally block)...")
+                    try: ffmpeg_process.stdin.close()
+                    except: pass
+                    logger.info("强制终止FFmpeg进程 (finally block)...")
+                    ffmpeg_process.terminate()
                     term_start = time.time()
                     while ffmpeg_process.poll() is None and time.time() - term_start < 3:
                         time.sleep(0.5)
-                        
-                    # 如果仍在运行，杀死它
                     if ffmpeg_process.poll() is None:
-                        logger.warning("FFmpeg进程未响应终止信号，强制杀死")
+                        logger.warning("FFmpeg进程未响应终止信号，强制杀死 (finally block)")
                         ffmpeg_process.kill()
+                else:
+                    logger.info("FFmpeg 进程在 finally 块执行时已结束或不存在")
             except Exception as e:
-                logger.error(f"关闭FFmpeg进程时出错: {str(e)}")
+                logger.error(f"关闭FFmpeg进程时出错 (finally block): {str(e)}", exc_info=True)
                 if self._error.value == 0:
                     self._error.value = 1
             
             # 设置完成事件
+            logger.info("_frame_writer 线程即将设置完成事件并退出")
             self._event_complete.set()
 
     def _prepare_ffmpeg_command(self):
