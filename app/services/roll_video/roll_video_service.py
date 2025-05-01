@@ -324,8 +324,6 @@ class RollVideoService:
         render_width = video_renderer.width
         render_height = video_renderer.height
         should_be_transparent = video_renderer.transparent
-        total_frames = video_renderer.total_frames
-        total_scroll_distance = video_renderer.scroll_distance
         
         # 获取背景色，防止透明视频的背景也是透明的
         if hasattr(img, 'info') and 'background' in img.info:
@@ -343,22 +341,16 @@ class RollVideoService:
                 else:
                     frame = Image.new("RGB", (render_width, render_height), bg_color)
                 
-                # 简化滚动逻辑：实现稳定的滚动效果
-                # 1. 首先，文本从顶部开始显示（第一帧就有文字）
-                # 2. 然后根据帧索引平滑滚动
-                # 3. 直到文本完全滚出屏幕
+                # 直接使用最简单的滚动逻辑
+                # 1. 第一帧文字在屏幕顶部(text_y=0)
+                # 2. 每帧向上滚动固定的像素数(scroll_speed)
                 
-                # 计算滚动进度比例
-                progress_ratio = frame_index / (total_frames - 1) if total_frames > 1 else 0
+                # 计算文本在这一帧的Y坐标
+                text_y = 0 - (frame_index * scroll_speed)
                 
-                # 计算总的滚动距离（从文本顶部对齐屏幕顶部，到文本底部滚出屏幕底部）
-                total_scroll_pixels = img.height + render_height
-                
-                # 计算当前应该滚动的像素数
-                scroll_pixels = int(progress_ratio * total_scroll_pixels)
-                
-                # 计算文本Y坐标：一开始文本位于屏幕顶部(text_y=0)，然后逐渐向上滚动(text_y变为负值)
-                text_y = -scroll_pixels
+                # 记录日志用于调试(每100帧记录一次)
+                if frame_index % 100 == 0 or frame_index < 10:
+                    logger.info(f"Frame {frame_index}: text_y={text_y}, scroll_speed={scroll_speed}")
                 
                 # --- Cropping and Pasting Logic --- 
                 # 确定需要从源文本图像 (img) 上裁剪的 Y 范围
