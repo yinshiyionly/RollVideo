@@ -343,47 +343,22 @@ class RollVideoService:
                 else:
                     frame = Image.new("RGB", (render_width, render_height), bg_color)
                 
-                # 完全重新设计滚动逻辑，采用分阶段模式
-                # 阶段1：显示第一行文字（前10%的帧）
-                # 阶段2：平滑滚动（10%-90%的帧）
-                # 阶段3：显示最终状态（最后10%的帧）
+                # 简化滚动逻辑：实现稳定的滚动效果
+                # 1. 首先，文本从顶部开始显示（第一帧就有文字）
+                # 2. 然后根据帧索引平滑滚动
+                # 3. 直到文本完全滚出屏幕
                 
-                # 确定当前帧是在哪个阶段
-                frame_percent = frame_index / total_frames if total_frames > 0 else 0
+                # 计算滚动进度比例
+                progress_ratio = frame_index / (total_frames - 1) if total_frames > 1 else 0
                 
-                if frame_percent < 0.05:
-                    # 阶段1：前5%的帧保持第一行文字的位置
-                    # 文字顶部刚好在屏幕上方一点点
-                    # 这里设置第一行文字在屏幕上方约20像素处
-                    text_y = 0
-                    
-                elif frame_percent < 0.9:
-                    # 阶段2：从5%到90%的帧进行平滑滚动
-                    # 将这一段时间的滚动平均分配
-                    scroll_phase_frames = int(total_frames * 0.85)  # 阶段2的帧数
-                    scroll_phase_index = frame_index - int(total_frames * 0.05)  # 当前在阶段2中的帧索引
-                    
-                    # 计算总滚动距离（需要滚动的实际像素数）
-                    # 文本总高度 - 已显示部分
-                    scroll_range = max(1, img.height - render_height + 20)
-                    
-                    # 计算当前滚动位置
-                    if scroll_phase_frames > 0:
-                        scroll_progress = min(1.0, scroll_phase_index / scroll_phase_frames)
-                        scroll_pos = int(scroll_progress * scroll_range)
-                    else:
-                        scroll_pos = 0
-                    
-                    # 计算文本Y坐标
-                    text_y = -scroll_pos
-                    
-                else:
-                    # 阶段3：最后10%的帧保持在最终位置
-                    # 文本已经完全滚动完毕，显示空白或末尾
-                    text_y = -(img.height - render_height)
-                    # 如果文本高度小于屏幕，则保证文本底部对齐屏幕底部
-                    if img.height < render_height:
-                        text_y = render_height - img.height
+                # 计算总的滚动距离（从文本顶部对齐屏幕顶部，到文本底部滚出屏幕底部）
+                total_scroll_pixels = img.height + render_height
+                
+                # 计算当前应该滚动的像素数
+                scroll_pixels = int(progress_ratio * total_scroll_pixels)
+                
+                # 计算文本Y坐标：一开始文本位于屏幕顶部(text_y=0)，然后逐渐向上滚动(text_y变为负值)
+                text_y = -scroll_pixels
                 
                 # --- Cropping and Pasting Logic --- 
                 # 确定需要从源文本图像 (img) 上裁剪的 Y 范围
