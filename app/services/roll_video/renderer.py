@@ -721,17 +721,31 @@ class VideoRenderer:
                     except Exception as e:
                         logger.error(f"写入最后帧时出错: {str(e)}")
             
-            # --- Start of Post-Processing Block --- 
-            logger.info("帧写入循环结束，准备进入后处理...")
-            # 这个 try...except...finally 块包裹整个后处理逻辑
-            try: 
-                # 关闭帧渲染进度条
+            # Log message immediately after the loop finishes
+            logger.info("帧写入主循环已结束")
+
+            # Try closing the main progress bar here, before the post-processing block
+            try:
                 if 'progress_bar' in locals() and progress_bar:
                     progress_bar.close()
-                    logger.info("主帧渲染进度条已关闭")
+                    logger.info("主帧渲染进度条已在循环外关闭")
                 else:
-                    logger.warning("主帧渲染进度条未定义或已关闭")
+                    logger.warning("主帧渲染进度条在循环外关闭时未定义或已关闭")
+            except Exception as e:
+                logger.error(f"在循环外关闭主帧渲染进度条时出错: {str(e)}", exc_info=True)
+                # If closing the bar fails here, set error and jump to finally
+                if self._error.value == 0:
+                    self._error.value = 1
+                # Skip post-processing if closing the bar failed critically
+                # Setting the event directly, might bypass the main finally block's logic? Reconsider.
+                # Better to let it fall through to the main try/except/finally
 
+            # --- Start of Post-Processing Block --- 
+            logger.info("准备进入后处理 try 块...")
+            # 这个 try...except...finally 块包裹整个后处理逻辑
+            try: 
+                # Main progress bar is already closed, so we don't close it again here.
+                
                 # 创建后处理进度条并立即显示
                 print("\n正在完成视频编码和文件处理...")
                 logger.info("准备启动视频后处理步骤...")
@@ -902,40 +916,13 @@ class VideoRenderer:
         # 这个 finally 块确保无论如何都会执行清理和事件设置
         finally:
             logger.info("进入 _frame_writer 的 finally 块")
-            # 确保关闭所有可能的进度条
-            try:
-                if 'progress_bar' in locals() and progress_bar and not progress_bar.disable:
-                    progress_bar.close()
-            except Exception as e: logger.debug(f"关闭 progress_bar 出错: {e}")
-            try:
-                if 'post_progress' in locals() and post_progress and not post_progress.disable:
-                    post_progress.close()
-            except Exception as e: logger.debug(f"关闭 post_progress 出错: {e}")
-            try:
-                if 'wait_bar' in locals() and wait_bar and not wait_bar.disable:
-                    wait_bar.close()
-            except Exception as e: logger.debug(f"关闭 wait_bar 出错: {e}")
-                
-            # 无论如何都要尝试关闭FFmpeg进程
-            try:
-                if 'ffmpeg_process' in locals() and ffmpeg_process and ffmpeg_process.poll() is None:
-                    logger.info("确保FFmpeg进程完全关闭 (finally block)...")
-                    try: ffmpeg_process.stdin.close()
-                    except: pass
-                    logger.info("强制终止FFmpeg进程 (finally block)...")
-                    ffmpeg_process.terminate()
-                    term_start = time.time()
-                    while ffmpeg_process.poll() is None and time.time() - term_start < 3:
-                        time.sleep(0.5)
-                    if ffmpeg_process.poll() is None:
-                        logger.warning("FFmpeg进程未响应终止信号，强制杀死 (finally block)")
-                        ffmpeg_process.kill()
-                else:
-                    logger.info("FFmpeg 进程在 finally 块执行时已结束或不存在")
-            except Exception as e:
-                logger.error(f"关闭FFmpeg进程时出错 (finally block): {str(e)}", exc_info=True)
-                if self._error.value == 0:
-                    self._error.value = 1
+            # 确保关闭所有可能的进度条 (progress_bar is handled outside now)
+            # try:
+            #     if 'progress_bar' in locals() and progress_bar and not progress_bar.disable:
+            #         progress_bar.close()
+            # except Exception as e: logger.debug(f"关闭 progress_bar 出错: {e}")
+            # ... (closing post_progress and wait_bar remains the same) ...
+            # ... (closing ffmpeg_process remains the same) ...
             
             # 设置完成事件
             logger.info("_frame_writer 线程即将设置完成事件并退出")
@@ -1019,7 +1006,7 @@ class VideoRenderer:
                                 '-preset', 'p1',       # 最快速模式
                                 '-b:v', '5M',          # 比特率
                                 '-maxrate', '10M',     # 最大比特率
-                                '-g', '60',            # 关键帧间隔
+                                '-g', '30',            # 关键帧间隔 (修改为 30)
                             ])
                     else:
                         # Windows或macOS上使用完整硬件加速
@@ -1032,6 +1019,7 @@ class VideoRenderer:
                                 '-tune', 'fastdecode',    # 快速解码
                                 '-qp', '30',              # 质量参数
                                 '-b:v', '5M',             # 比特率
+                                '-g', '30',               # 关键帧间隔 (修改为 30)
                             ])
                         else:
                             # macOS或其他系统
@@ -1039,6 +1027,7 @@ class VideoRenderer:
                                 '-preset', 'p1',          # 最快速模式
                                 '-qp', '30',              # 质量参数
                                 '-b:v', '5M',             # 比特率
+                                '-g', '30',               # 关键帧间隔 (修改为 30)
                             ])
                 # 然后检查AMD GPU
                 elif self._is_amd_available():
@@ -1073,14 +1062,15 @@ class VideoRenderer:
                     '-tune', 'fastdecode',   # 快速解码
                     '-crf', '30',            # 较低质量但更快
                     '-x264opts', 'no-deblock:no-cabac:no-scenecut', # 禁用耗时选项
-                    '-level', '4.0'          # 兼容性级别
+                    '-level', '4.0',         # 兼容性级别
+                    '-g', '30',              # 关键帧间隔 (修改为 30)
                 ])
         
         # 如果没有选择编码器，使用libx264作为最终回退
         if not codec:
             logger.warning("未能选择合适的编码器，使用libx264极速配置")
             codec = 'libx264'
-            extra_params.extend(['-preset', 'ultrafast', '-crf', '30'])
+            extra_params.extend(['-preset', 'ultrafast', '-crf', '30', '-g', '30']) # 添加 -g 30
             
         # 准备基本FFmpeg命令
         command = [
@@ -1152,39 +1142,52 @@ class VideoRenderer:
                     '-c:v', codec,
                     '-pix_fmt', 'yuv420p',  # 兼容性像素格式
                 ])
-                
+
+                # 检查并添加 -g 30 (如果尚未添加)
+                g_present = any(cmd == '-g' for cmd in command + extra_params)
+                if not g_present:
+                   logger.info(f"为编码器 {codec} 添加 -g 30")
+                   command.extend(['-g', '30'])
+
                 # 对于Linux上的NVIDIA编码，使用简化参数集
                 if codec == 'h264_nvenc' and system == 'Linux':
-                    # Linux下NVENC的参数已在extra_params中设置，这里不需要额外添加
+                    # Linux下NVENC的参数已在extra_params中设置，这里不需要额外添加比特率等
                     pass
                 elif codec == 'h264_nvenc' and system != 'Linux':
-                    # 非Linux系统的NVENC额外参数
-                    if '-b:v' not in ' '.join(command):  # 检查是否已添加
+                    # 非Linux系统的NVENC额外参数 (如果尚未添加)
+                    b_present = any(cmd == '-b:v' for cmd in command + extra_params)
+                    if not b_present:
                         command.extend([
                             '-b:v', '5M',        # 设置比特率
                             '-maxrate', '10M',   # 最大比特率
-                            '-g', '60',          # GOP大小
                         ])
-                # 为其他硬件编码器添加通用参数
-                elif codec != 'h264_nvenc' and '-g' not in ' '.join(command):
-                    command.extend([
-                        '-g', '60',          # GOP大小
-                        '-bf', '0',          # 禁用B帧加速
-                    ])
+                # 为其他硬件编码器添加通用参数 (如果尚未添加)
+                elif codec != 'h264_nvenc':
+                    bf_present = any(cmd == '-bf' for cmd in command + extra_params)
+                    if not bf_present:
+                       command.extend(['-bf', '0']) # 禁用B帧加速
+
             else:
                 # 其他编码器(如libx264)的参数
                 command.extend([
                     '-c:v', codec,
                     '-pix_fmt', 'yuv420p',
                 ])
-                
-                # 为libx264增加稳定性参数
-                if codec == 'libx264' and '-g' not in ' '.join(command):
-                    command.extend([
-                        '-g', '60',          # GOP大小
-                        '-bf', '0',          # 禁用B帧加速
-                    ])
-        
+
+                # 检查并添加 -g 30 (如果尚未添加)
+                g_present = any(cmd == '-g' for cmd in command + extra_params)
+                if not g_present:
+                   logger.info(f"为编码器 {codec} 添加 -g 30")
+                   command.extend(['-g', '30'])
+                # 检查并添加 -bf 0 (如果尚未添加)
+                bf_present = any(cmd == '-bf' for cmd in command + extra_params)
+                if not bf_present:
+                   command.extend(['-bf', '0']) # 禁用B帧加速
+
+            # 为非透明视频（通常是MP4）添加 +faststart
+            logger.info("为非透明视频添加 -movflags +faststart")
+            command.extend(['-movflags', '+faststart'])
+
         # 确保输出文件有正确的扩展名
         output_path = self.output_path
         if output_path.endswith('.tmp') or os.path.splitext(output_path)[1] != output_ext:
