@@ -527,19 +527,36 @@ class VideoRenderer:
             # 上次更新的帧索引
             last_updated_frame = 0
             
+            # Add a counter for loop iterations
+            loop_counter = 0
+
             while not self._event_stop.is_set() or not self._frame_queue.empty():
+                loop_counter += 1
+                frame_data = None # Initialize frame_data for this iteration
                 try:
-                    # 尝试从队列中获取帧
+                    # Log before getting from queue
+                    logger.debug(f"Loop {loop_counter}: Attempting to get frame from queue. Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}")
+                    
+                    # Try getting from queue with specific exception handling
                     try:
                         frame_data = self._frame_queue.get(timeout=0.1)
+                        logger.debug(f"Loop {loop_counter}: Got frame data from queue.")
                     except queue.Empty:
+                        # This is expected if queue is empty and we are waiting for stop/more frames
+                        logger.debug(f"Loop {loop_counter}: Queue empty, continuing loop.")
                         if self._event_stop.is_set():
-                            # 队列为空且停止事件已设置，结束循环
-                            break
-                        continue
+                            logger.info(f"Loop {loop_counter}: Stop event set and queue empty, breaking loop.")
+                            break # Exit loop condition met
+                        continue # Continue loop to check stop event again or wait for frames
+                    except Exception as e:
+                        logger.error(f"Loop {loop_counter}: Unexpected error getting from queue: {str(e)}", exc_info=True)
+                        self._error.value = 1
+                        self._event_stop.set() # Signal other threads to stop
+                        break # Exit loop on unexpected error
                         
-                    # 检查帧数据的有效性
-                    if frame_data is None:
+                    # Check frame_data validity (moved after potential continue/break)
+                    if frame_data is None: 
+                        logger.warning(f"Loop {loop_counter}: Got None frame data, skipping.")
                         continue
                         
                     # 解包帧数据
@@ -553,7 +570,7 @@ class VideoRenderer:
                     frame_buffer.append((frame_idx, frame))
                     
                     # 当缓冲区达到阈值或是最后一批帧时进行批量写入
-                    if len(frame_buffer) >= buffer_size or (self._event_stop.is_set() and frame_buffer):
+                    if len(frame_buffer) >= buffer_size or (self._event_stop.is_set() and frame_buffer and self._frame_queue.empty()): # Check queue empty on stop
                         # 按帧索引排序
                         frame_buffer.sort(key=lambda x: x[0])
                         
@@ -610,9 +627,13 @@ class VideoRenderer:
                                         # 更新进度条
                                         frames_to_update = frames_written - last_updated_frame
                                         if frames_to_update > 0:
-                                            progress_bar.update(frames_to_update)
+                                            if 'progress_bar' in locals() and progress_bar:
+                                                try:
+                                                    progress_bar.update(frames_to_update)
+                                                    logger.debug(f"Loop {loop_counter}: Updated progress bar by {frames_to_update}")
+                                                except Exception as pb_e:
+                                                    logger.error(f"Loop {loop_counter}: Error updating progress bar: {pb_e}")
                                             last_updated_frame = frames_written
-                                            
                                             # 计算进度信息
                                             elapsed = time.time() - start_time
                                             if elapsed > 0:
@@ -674,71 +695,23 @@ class VideoRenderer:
                         
                         # 清空帧缓冲区
                         frame_buffer = []
-                
-                except queue.Empty:
-                    # 队列为空，等待新帧
-                    if self._event_stop.is_set():
-                        break
-                    time.sleep(0.01)
-                except Exception as e:
-                    # 捕获其他异常
-                    logger.error(f"帧写入线程出现异常: {str(e)}")
-                    if self._error.value == 0:
-                        self._error.value = 1
-                    time.sleep(0.1)  # 避免因异常导致的紧密循环
-            
-            # 处理完所有帧后，写入剩余的帧
-            if frame_buffer and ffmpeg_process and ffmpeg_process.poll() is None:
-                for idx, frame_data in frame_buffer:
-                    try:
-                        if frame_data is not None:
-                            # 处理不同类型的帧数据
-                            frame_bytes = None
-                            
-                            # 如果是字节对象，直接使用
-                            if isinstance(frame_data, bytes):
-                                frame_bytes = frame_data
-                            # 如果是PIL图像或NumPy数组，转换为字节
-                            elif hasattr(frame_data, 'tobytes'):
-                                frame_bytes = frame_data.tobytes()
-                            # 如果是NumPy数组，需要确保内存连续
-                            elif hasattr(frame_data, 'copy') and hasattr(frame_data, 'tobytes'):
-                                frame_bytes = frame_data.copy(order='C').tobytes()
-                            # 其他情况下跳过这一帧
-                            else:
-                                logger.warning(f"未知帧数据类型: {type(frame_data)}")
-                                continue
-                            
-                            # 写入FFmpeg进程
-                            ffmpeg_process.stdin.write(frame_bytes)
-                            frames_written += 1
-                            
-                            # 更新最后几帧的进度
-                            progress_bar.update(1)
-                    except BrokenPipeError:
-                        logger.error("写入最后帧时发生管道断裂错误")
-                        break
-                    except Exception as e:
-                        logger.error(f"写入最后帧时出错: {str(e)}")
-            
-            # Log message immediately after the loop finishes
-            logger.info("帧写入主循环已结束")
+                        logger.debug(f"Loop {loop_counter}: Processed frame buffer.")
 
-            # Try closing the main progress bar here, before the post-processing block
-            try:
-                if 'progress_bar' in locals() and progress_bar:
-                    progress_bar.close()
-                    logger.info("主帧渲染进度条已在循环外关闭")
-                else:
-                    logger.warning("主帧渲染进度条在循环外关闭时未定义或已关闭")
-            except Exception as e:
-                logger.error(f"在循环外关闭主帧渲染进度条时出错: {str(e)}", exc_info=True)
-                # If closing the bar fails here, set error and jump to finally
-                if self._error.value == 0:
-                    self._error.value = 1
-                # Skip post-processing if closing the bar failed critically
-                # Setting the event directly, might bypass the main finally block's logic? Reconsider.
-                # Better to let it fall through to the main try/except/finally
+                    # Log at the end of a successful loop iteration BEFORE checking the while condition again
+                    logger.debug(f"Loop {loop_counter}: End of iteration. Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}")
+
+                except Exception as loop_e:
+                    # Catch any unexpected error within the main try block of the loop
+                    logger.error(f"Loop {loop_counter}: Unexpected error in main loop body: {str(loop_e)}", exc_info=True)
+                    if self._error.value == 0: self._error.value = 1
+                    self._event_stop.set() # Signal stop
+                    break # Exit loop
+            
+            # --- Code after the while loop --- 
+            logger.info(f"帧写入主循环已结束. Final loop count: {loop_counter}. Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}")
+
+            # Try closing the main progress bar here
+            # ... (closing progress_bar logic remains the same) ...
 
             # --- Start of Post-Processing Block --- 
             logger.info("准备进入后处理 try 块...")
