@@ -514,6 +514,19 @@ class VideoRenderer:
             start_time = time.time()
             next_log_time = start_time + 10  # 每10秒记录一次进度
             
+            # 创建进度条
+            progress_bar = tqdm.tqdm(
+                total=self.total_frames,
+                desc="渲染进度",
+                unit="帧",
+                unit_scale=False,
+                ncols=100,
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]"
+            )
+            
+            # 上次更新的帧索引
+            last_updated_frame = 0
+            
             while not self._event_stop.is_set() or not self._frame_queue.empty():
                 try:
                     # 尝试从队列中获取帧
@@ -593,6 +606,23 @@ class VideoRenderer:
                                         ffmpeg_process.stdin.flush()
                                         frames_written += 1
                                         consecutive_errors = 0  # 重置错误计数
+                                        
+                                        # 更新进度条
+                                        frames_to_update = frames_written - last_updated_frame
+                                        if frames_to_update > 0:
+                                            progress_bar.update(frames_to_update)
+                                            last_updated_frame = frames_written
+                                            
+                                            # 计算进度信息
+                                            elapsed = time.time() - start_time
+                                            if elapsed > 0:
+                                                fps = frames_written / elapsed
+                                                progress = (frames_written / self.total_frames) * 100
+                                                # 更新进度条附加信息
+                                                progress_bar.set_postfix(
+                                                    FPS=f"{fps:.1f}帧/秒",
+                                                    进度=f"{progress:.1f}%"
+                                                )
                                     else:
                                         # 进程已终止，结束循环
                                         logger.error("FFmpeg进程已终止，无法继续写入帧")
@@ -644,16 +674,6 @@ class VideoRenderer:
                         
                         # 清空帧缓冲区
                         frame_buffer = []
-                    
-                    # 定期记录进度
-                    current_time = time.time()
-                    if current_time >= next_log_time:
-                        elapsed = current_time - start_time
-                        if elapsed > 0:
-                            fps = frames_written / elapsed
-                            progress = (frame_idx / self.total_frames) * 100
-                            logger.info(f"渲染进度: {progress:.0f}% (帧 {frame_idx}/{self.total_frames}, 速度: {fps:.2f}帧/秒)")
-                            next_log_time = current_time + 10
                 
                 except queue.Empty:
                     # 队列为空，等待新帧
@@ -692,11 +712,17 @@ class VideoRenderer:
                             # 写入FFmpeg进程
                             ffmpeg_process.stdin.write(frame_bytes)
                             frames_written += 1
+                            
+                            # 更新最后几帧的进度
+                            progress_bar.update(1)
                     except BrokenPipeError:
                         logger.error("写入最后帧时发生管道断裂错误")
                         break
                     except Exception as e:
                         logger.error(f"写入最后帧时出错: {str(e)}")
+            
+            # 关闭进度条
+            progress_bar.close()
             
             # 记录总结信息
             if frames_written > 0:
@@ -706,6 +732,12 @@ class VideoRenderer:
                     logger.warning(f"跳过了 {skipped_frames} 帧由于错误")
         
         finally:
+            # 确保关闭进度条
+            try:
+                progress_bar.close()
+            except:
+                pass
+                
             # 无论如何都要关闭FFmpeg进程的stdin
             try:
                 if ffmpeg_process and ffmpeg_process.poll() is None:

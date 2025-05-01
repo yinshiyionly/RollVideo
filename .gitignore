@@ -51,3 +51,9 @@ pip-wheel-metadata/
 thumbs.db
 *.swp
 *.swo
+
+# 输出文件目录
+output/
+app/services/roll_video/output/
+*/output/
+**/output/
