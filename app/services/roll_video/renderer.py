@@ -7,6 +7,7 @@ import textwrap
 import platform
 import logging
 import subprocess
+from subprocess import DEVNULL  # 添加导入DEVNULL
 import tempfile
 import shutil
 import tqdm
@@ -588,64 +589,72 @@ class VideoRenderer:
             pbar.close()
     
     def _prepare_ffmpeg_command(self):
-        """准备FFmpeg命令行"""
+        """准备FFmpeg命令行，优先考虑兼容性"""
+        
+        # 强制使用软件编码以解决兼容性问题
+        force_software_encoding = True  # 临时设置为True以解决当前问题
         
         # 确定视频编码器和硬件加速选项
         codec = None
         hwaccel = None
         extra_params = []
         
-        # 检测系统类型，为不同平台配置最佳硬件加速
+        # 获取文件扩展名，为临时文件设置正确的格式
+        output_ext = os.path.splitext(self.output_path)[1].lower()
+        if not output_ext or output_ext == '.tmp':
+            output_ext = '.mp4'  # 默认使用MP4，避免.tmp格式
+            
+        # 检测系统类型
         system = platform.system()
         
-        # 根据系统类型选择最佳编码器和硬件加速
-        if system == 'Darwin':  # macOS
-            # 检查M1/M2芯片
-            is_apple_silicon = platform.processor() == '' or 'arm' in platform.processor().lower()
-            if is_apple_silicon:
-                # Apple Silicon (M1/M2) 使用VideoToolbox，极速模式
-                codec = 'h264_videotoolbox'
-                hwaccel = 'videotoolbox'
-                # 使用低延迟模式和极高比特率以加速编码
-                extra_params.extend(['-b:v', '12M', '-tag:v', 'avc1'])
-                extra_params.extend(['-quality', 'speed'])  # 极速优先
-                extra_params.extend(['-allow_sw', '1'])  # 允许软件加速
-            else:
-                # Intel Mac 使用VideoToolbox
-                codec = 'h264_videotoolbox'
-                hwaccel = 'videotoolbox'
-                extra_params.extend(['-b:v', '10M'])
-                extra_params.extend(['-quality', 'speed'])  # 速度优先
-                
-        elif system == 'Windows':
-            # 尝试NVIDIA硬件加速
-            codec = 'h264_nvenc'
-            hwaccel = 'cuda'
-            # NVIDIA极速参数
-            extra_params.extend(['-tune', 'fastdecode', '-preset', 'p1'])
-            extra_params.extend(['-rc', 'vbr', '-cq', '24', '-b:v', '0'])
-        else:  # Linux及其他
-            # 先尝试NVIDIA，如果不支持则使用软件编码
-            if self._is_nvidia_available():
-                codec = 'h264_nvenc'
-                hwaccel = 'cuda'
-                extra_params.extend(['-tune', 'fastdecode', '-preset', 'p1'])
-                extra_params.extend(['-rc', 'vbr', '-cq', '24', '-b:v', '0'])
-            elif self._is_amd_available():
-                codec = 'h264_amf'
-                hwaccel = 'amf'
-                extra_params.extend(['-quality', 'speed'])
-            elif self._is_intel_available():
-                codec = 'h264_qsv'
-                hwaccel = 'qsv'
-                extra_params.extend(['-preset', 'veryfast'])
-            else:
-                # 使用软件编码，但用极速预设
-                codec = 'libx264'
-                extra_params.extend(['-preset', 'ultrafast'])
-                extra_params.extend(['-tune', 'fastdecode', '-crf', '28'])
+        # 如果强制使用软件编码，跳过硬件加速检测
+        if force_software_encoding:
+            logger.info("强制使用软件编码 (libx264)，这提供最佳兼容性")
+            codec = 'libx264'
+            extra_params.extend(['-preset', 'ultrafast'])
+            extra_params.extend(['-tune', 'fastdecode', '-crf', '28'])
+        else:
+            # 按系统类型选择最佳编码器
+            if system == 'Darwin':  # macOS
+                # 检查M1/M2芯片
+                is_apple_silicon = platform.processor() == '' or 'arm' in platform.processor().lower()
+                if is_apple_silicon:
+                    codec = 'h264_videotoolbox'
+                    hwaccel = 'videotoolbox'
+                    extra_params.extend(['-b:v', '12M', '-tag:v', 'avc1'])
+                    extra_params.extend(['-quality', 'speed'])
+                    extra_params.extend(['-allow_sw', '1'])
+                else:
+                    codec = 'h264_videotoolbox'
+                    hwaccel = 'videotoolbox'
+                    extra_params.extend(['-b:v', '10M'])
+                    extra_params.extend(['-quality', 'speed'])
+            elif system == 'Windows':
+                if self._is_nvidia_available():
+                    codec = 'h264_nvenc'
+                    hwaccel = 'cuda'
+                    extra_params.extend(['-tune', 'fastdecode', '-preset', 'p1'])
+                    extra_params.extend(['-rc', 'vbr', '-cq', '24', '-b:v', '0'])
+                else:
+                    codec = 'libx264'
+                    extra_params.extend(['-preset', 'ultrafast'])
+                    extra_params.extend(['-tune', 'fastdecode', '-crf', '28'])
+            else:  # Linux及其他
+                if self._is_nvidia_available():
+                    codec = 'h264_nvenc'
+                    hwaccel = 'cuda'
+                    extra_params.extend(['-tune', 'fastdecode', '-preset', 'p1'])
+                    extra_params.extend(['-rc', 'vbr', '-cq', '24', '-b:v', '0'])
+                elif self._is_amd_available():
+                    codec = 'h264_amf'
+                    hwaccel = 'amf'
+                    extra_params.extend(['-quality', 'speed'])
+                else:
+                    codec = 'libx264'
+                    extra_params.extend(['-preset', 'ultrafast'])
+                    extra_params.extend(['-tune', 'fastdecode', '-crf', '28'])
         
-        # 如果没有合适的GPU加速，退回到软件编码
+        # 如果没有选择编码器，使用libx264作为回退
         if not codec:
             codec = 'libx264'
             extra_params.extend(['-preset', 'ultrafast'])
@@ -659,10 +668,9 @@ class VideoRenderer:
             '-framerate', str(self.fps),  # 设置帧率
         ]
         
-        # 添加硬件加速选项
-        if hwaccel:
+        # 只有在非强制软件编码模式下才添加硬件加速选项
+        if hwaccel and not force_software_encoding:
             command.extend(['-hwaccel', hwaccel])
-            command.extend(['-hwaccel_output_format', 'nv12'])  # 优化输出格式
         
         # 配置输入格式
         command.extend([
@@ -675,7 +683,7 @@ class VideoRenderer:
         # 添加特殊优化选项，提高处理速度
         command.extend([
             # 设置线程数量 - 使用更多的线程
-            '-threads', str(min(16, max(1, os.cpu_count()))),  # 使用更多CPU核心
+            '-threads', str(min(16, max(1, os.cpu_count()))),
             # 使用更大的线程队列，提高多线程效率
             '-thread_queue_size', '2048',
             # 使用更快的缩放过滤器
@@ -699,8 +707,25 @@ class VideoRenderer:
             '-flags', '+cgop',      # 闭合GOP，提高编码效率
         ])
         
-        # 添加输出文件
+        # 确保输出文件有正确的扩展名
+        output_path = self.output_path
+        if output_path.endswith('.tmp'):
+            # 修改临时文件扩展名为正确的视频格式
+            output_path = os.path.splitext(output_path)[0] + output_ext
+            logger.info(f"修正临时文件扩展名: {self.output_path} -> {output_path}")
+            self.output_path = output_path
+            
+        # 添加输出文件路径
         command.append(self.output_path)
+        
+        # 确保输出目录存在
+        output_dir = os.path.dirname(self.output_path)
+        if output_dir and not os.path.exists(output_dir):
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+                logger.info(f"创建输出目录: {output_dir}")
+            except Exception as e:
+                logger.error(f"创建输出目录失败: {str(e)}")
         
         logger.info(f"FFmpeg极速命令: {' '.join(command)}")
         return command
@@ -734,22 +759,52 @@ class VideoRenderer:
         return False
         
     def _is_intel_available(self):
-        """检查Intel GPU是否可用"""
-        system = platform.system()
-        if system == 'Windows':
-            # Windows下检查Intel GPU
-            try:
-                result = subprocess.run(['dxdiag'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2)
-                return 'intel' in result.stdout.decode('utf-8', errors='ignore').lower()
-            except (subprocess.SubprocessError, FileNotFoundError):
+        """检查Intel GPU是否可用且可被FFmpeg使用"""
+        try:
+            # 先检查FFmpeg是否支持qsv
+            result = subprocess.run(['ffmpeg', '-hide_banner', '-encoders'], 
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+            output = result.stdout.decode('utf-8', errors='ignore')
+            if 'h264_qsv' not in output:
+                logger.info("FFmpeg不支持QSV硬件加速")
                 return False
-        elif system == 'Linux':
-            # Linux下检查Intel GPU
-            try:
-                result = subprocess.run(['lspci'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2)
-                return 'intel' in result.stdout.decode('utf-8', errors='ignore').lower()
-            except (subprocess.SubprocessError, FileNotFoundError):
-                return False
+                
+            # 然后检查系统是否有Intel GPU
+            system = platform.system()
+            if system == 'Windows':
+                # 尝试通过wmic查询
+                try:
+                    result = subprocess.run(['wmic', 'path', 'win32_VideoController', 'get', 'name'], 
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2)
+                    return 'intel' in result.stdout.decode('utf-8', errors='ignore').lower()
+                except:
+                    return False
+            elif system == 'Linux':
+                # 在Linux上检查有无Intel集成显卡
+                try:
+                    result = subprocess.run(['lspci'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2)
+                    return 'intel' in result.stdout.decode('utf-8', errors='ignore').lower() and 'vga' in result.stdout.decode('utf-8', errors='ignore').lower()
+                except:
+                    # 如果lspci不可用，尝试其他检查
+                    try:
+                        with open('/proc/cpuinfo', 'r') as f:
+                            cpu_info = f.read().lower()
+                            return 'intel' in cpu_info and not self._is_nvidia_available() and not self._is_amd_available()
+                    except:
+                        return False
+            elif system == 'Darwin':
+                # macOS上检查Intel图形处理器
+                try:
+                    result = subprocess.run(['system_profiler', 'SPDisplaysDataType'], 
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2)
+                    return 'intel' in result.stdout.decode('utf-8', errors='ignore').lower()
+                except:
+                    # 如果命令失败，尝试检查处理器类型
+                    return 'intel' in platform.processor().lower()
+        except Exception as e:
+            logger.debug(f"检查Intel GPU时出错: {str(e)}")
+        
+        # 默认情况下返回False，确保安全回退到软件编码
         return False
 
     def render_frames(self, total_frames, frame_generator):
