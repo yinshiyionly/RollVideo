@@ -19,8 +19,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def main():
-    # 示例文本
-    sample_text = open("example.txt", "r").read()
+    # 示例文本 - 使用绝对路径
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    sample_text_path = os.path.join(current_dir, "example.txt")
+    sample_text = open(sample_text_path, "r").read()
 
     # 路径
     output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")

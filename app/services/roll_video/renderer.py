@@ -766,41 +766,63 @@ class VideoRenderer:
                 if ffmpeg_process and ffmpeg_process.poll() is None:
                     # 对于高端GPU使用更短的超时时间
                     is_high_end_gpu = False
+                    gpu_info = "未知" # 初始化gpu_info
                     try:
                         gpu_info = subprocess.check_output('nvidia-smi --query-gpu=name --format=csv,noheader', shell=True, text=True)
                         gpu_info = gpu_info.strip().lower()
-                        is_high_end_gpu = any(x in gpu_info for x in ['a10', 'a100', 'v100', 'a30', 'a40', 'a6000'])
+                        # 原始代码根据GPU型号判断是否高端
+                        is_high_end_gpu = any(x in gpu_info for x in ['a10', 'a100', 'v100', 'a30', 'a40', 'a6000', 'rtx']) # 扩展高端GPU列表
                         logger.info(f"GPU类型检测: {gpu_info} - 高端GPU: {is_high_end_gpu}")
                     except Exception as e:
                         logger.warning(f"GPU检测失败: {str(e)}")
                         
-                    # 高端GPU只等待20秒，其他最多等60秒
-                    timeout = 20 if is_high_end_gpu else 60
+                    # 大幅增加超时时间：高端GPU等待10分钟，其他等待5分钟
+                    timeout = 600 if is_high_end_gpu else 300
                     
                     ffmpeg_start_wait = time.time()
                     logger.info(f"等待FFmpeg完成最终编码 (最长等待{timeout}秒)...")
                     
+                    # 创建等待FFmpeg的独立进度条
+                    wait_bar = tqdm.tqdm(
+                        total=timeout, 
+                        desc="  └─ 等待FFmpeg编码", 
+                        unit="秒", 
+                        ncols=100, 
+                        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}秒 [{elapsed}<{remaining}]",
+                        position=1, # 尝试放在下一行
+                        leave=False # 完成后消失
+                    )
+
                     # 分段等待，实时更新进度
                     wait_complete = False
-                    progress_points = 10  # 将等待时间分为10个点显示进度
+                    progress_points = max(10, timeout // 5) # 每5秒更新一次，至少10个点
                     wait_interval = timeout / progress_points
                     
                     for i in range(progress_points):
                         if ffmpeg_process.poll() is not None:
                             wait_complete = True
+                            # 更新等待进度条到100%
+                            wait_bar.n = timeout
+                            wait_bar.refresh()
                             logger.info(f"FFmpeg进程在等待{i+1}/{progress_points}段后自行结束")
                             break
                             
-                        # 更新进度描述
+                        # 更新主进度条描述
                         elapsed_wait = time.time() - ffmpeg_start_wait
                         percent_done = min(100, int((i+1) / progress_points * 100))
                         post_progress.set_description(
                             f"【第2步/共3步】{post_steps[1]} - {percent_done}% [{int(elapsed_wait)}秒]"
                         )
+
+                        # 更新等待进度条
+                        wait_bar.update(wait_interval)
                         
                         # 等待一个间隔
                         time.sleep(wait_interval)
                     
+                    # 关闭等待进度条
+                    wait_bar.close()
+
                     # 如果FFmpeg仍在运行，但已达到超时时间，强制终止
                     if not wait_complete:
                         logger.warning(f"FFmpeg进程超时未退出，强制终止 (已等待{int(time.time()-ffmpeg_start_wait)}秒)")
