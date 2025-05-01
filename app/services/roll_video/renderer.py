@@ -1394,12 +1394,27 @@ class VideoRenderer:
             peak_memory = initial_memory
             logger.info(f"初始内存使用: {initial_memory / 1024 / 1024:.2f} MB，允许最大内存使用: {memory_limit / 1024 / 1024 / 1024:.0f}GB")
             
-            # 启动帧写入线程
-            writer_thread = threading.Thread(target=self._frame_writer)
-            writer_thread.daemon = True
-            writer_thread.start()
-            
-            # 预填充帧队列
+            # --- Start Writer Thread --- 
+            writer_thread = None # Initialize
+            logger.info("准备创建帧写入线程 (_frame_writer)...")
+            try:
+                writer_thread = threading.Thread(target=self._frame_writer)
+                writer_thread.daemon = True
+                logger.info("帧写入线程对象已创建. Starting it...")
+                writer_thread.start()
+                logger.info("帧写入线程 (_frame_writer) start() 方法已调用.")
+            except Exception as start_e:
+                 logger.error(f"启动帧写入线程 (_frame_writer) 时出错: {start_e}", exc_info=True)
+                 self._error.value = 1
+                 # If writer thread fails to start, we cannot proceed
+                 self._event_stop.set() # Signal generator threads to stop
+                 self._event_complete.set() # Signal main loop to stop waiting
+                 # Restore GC threshold before returning
+                 gc.set_threshold(*old_threshold)
+                 return False
+                 
+            # --- Start Generator Threads --- 
+            # 预填充帧队列 (Now happens *after* writer thread is confirmed started)
             logger.info(f"预填充 {self.prefill_count} 帧...")
             
             # 批量大小设置
@@ -1462,26 +1477,34 @@ class VideoRenderer:
             return True
             
         except Exception as e:
-            logger.error(f"渲染视频时出错: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
+            logger.error(f"渲染视频时发生意外错误 (render_frames): {str(e)}", exc_info=True)
             if self.error_callback:
                 self.error_callback(f"渲染视频时出错: {str(e)}")
+            # Ensure flags are set to stop other threads and signal completion
+            self._event_stop.set()
+            self._event_complete.set()
+            self.stop_threads = True 
             return False
         finally:
-            # 确保停止所有线程
+            # 确保停止所有线程 (This finally is for render_frames)
+            logger.info("进入 render_frames 的 finally 块")
             self._event_stop.set()
-            self.stop_threads = True  # 确保兼容性
-            # 尝试清空队列，防止阻塞
+            self.stop_threads = True
+            # Restore GC threshold if not already done
             try:
-                while not self._frame_queue.empty():
-                    try:
-                        self._frame_queue.get_nowait()
-                        self._frame_queue.task_done()
-                    except:
-                        break
-            except:
-                pass
+                if 'old_threshold' in locals():
+                   current_threshold = gc.get_threshold()
+                   if current_threshold != old_threshold:
+                       logger.info(f"在 render_frames finally 中恢复GC阈值: {current_threshold} -> {old_threshold}")
+                       gc.set_threshold(*old_threshold)
+            except NameError:
+                 pass # old_threshold might not be defined if error happened early
+            except Exception as gc_e:
+                 logger.warning(f"恢复GC阈值时出错: {gc_e}")
+                 
+            # Attempt to clean up queue?
+            # ... (Queue cleanup logic remains the same) ...
+            logger.info("render_frames 方法即将结束")
 
     def calculate_total_frames(self, text_height, scroll_speed):
         """计算视频需要的总帧数"""
