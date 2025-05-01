@@ -336,7 +336,7 @@ class RollVideoService:
         def frame_generator(frame_index):
             try:
                 # 计算当前滚动位置 (像素)
-                scroll_pos = frame_index * scroll_speed
+                scroll_pos = (frame_index + 1) * scroll_speed
                 
                 # 创建视频帧
                 if should_be_transparent:
