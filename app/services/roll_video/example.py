@@ -120,11 +120,11 @@ def main():
         )
 
         # 输出结果
-        if result["status"] == "success":
-            logger.info(f"场景 {i+1} 成功: {result['message']}")
-            logger.info(f"最终输出视频路径: {result['output_path']}") # 注意这里是最终路径
+        if result:
+            logger.info(f"场景 {i+1} 成功: 视频创建完成")
+            logger.info(f"最终输出视频路径: {result}") # 注意这里是最终路径
         else:
-            logger.error(f"场景 {i+1} 失败: {result['message']}")
+            logger.error(f"场景 {i+1} 失败: 未能创建视频")
 
         logger.info(f"--- 场景 {i+1} 生成结束 ---")
 
