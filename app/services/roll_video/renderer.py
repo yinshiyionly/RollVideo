@@ -533,7 +533,14 @@ class VideoRenderer:
             # Add a counter for loop iterations
             loop_counter = 0
 
+            # Log just before entering the loop
+            logger.info("Entering main frame writing loop...")
+            logger.debug(f"Initial state before loop: Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}")
+
             while not self._event_stop.is_set() or not self._frame_queue.empty():
+                # Log as the VERY FIRST action inside the loop
+                logger.debug(f"---> Loop {loop_counter + 1}: Entered loop top.") 
+                
                 loop_counter += 1
                 frame_data = None # Initialize frame_data for this iteration
                 try:
