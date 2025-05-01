@@ -324,6 +324,7 @@ class RollVideoService:
         render_width = video_renderer.width
         render_height = video_renderer.height
         should_be_transparent = video_renderer.transparent
+        total_frames = video_renderer.total_frames
         total_scroll_distance = video_renderer.scroll_distance
         
         # 获取背景色，防止透明视频的背景也是透明的
@@ -336,27 +337,53 @@ class RollVideoService:
         # 返回帧生成函数
         def frame_generator(frame_index):
             try:
-                # 修改：确保第一帧立即显示文字在屏幕中可见位置
-                # 1. 将初始位置设为屏幕底部上方一点，而不是屏幕底部边缘
-                initial_offset = 30  # 第一帧文字在屏幕底部上方30像素处
-                
-                # 2. 计算当前滚动位置
-                scroll_pos = frame_index * scroll_speed
-                
-                # 3. 调整文字Y坐标，使第一帧就能看到文字
-                text_y = render_height - initial_offset - scroll_pos
-                
-                # 4. 防止循环：如果已经滚动超过总滚动距离，保持在最终位置
-                max_scroll = total_scroll_distance
-                if scroll_pos > max_scroll:
-                    # 文字已经完全滚出，只显示背景
-                    text_y = render_height - max_scroll - initial_offset
-                
                 # 创建视频帧
                 if should_be_transparent:
                     frame = Image.new("RGBA", (render_width, render_height), (0, 0, 0, 0))
                 else:
                     frame = Image.new("RGB", (render_width, render_height), bg_color)
+                
+                # 完全重新设计滚动逻辑，采用分阶段模式
+                # 阶段1：显示第一行文字（前10%的帧）
+                # 阶段2：平滑滚动（10%-90%的帧）
+                # 阶段3：显示最终状态（最后10%的帧）
+                
+                # 确定当前帧是在哪个阶段
+                frame_percent = frame_index / total_frames if total_frames > 0 else 0
+                
+                if frame_percent < 0.05:
+                    # 阶段1：前5%的帧保持第一行文字的位置
+                    # 文字顶部刚好在屏幕上方一点点
+                    # 这里设置第一行文字在屏幕上方约20像素处
+                    text_y = 0
+                    
+                elif frame_percent < 0.9:
+                    # 阶段2：从5%到90%的帧进行平滑滚动
+                    # 将这一段时间的滚动平均分配
+                    scroll_phase_frames = int(total_frames * 0.85)  # 阶段2的帧数
+                    scroll_phase_index = frame_index - int(total_frames * 0.05)  # 当前在阶段2中的帧索引
+                    
+                    # 计算总滚动距离（需要滚动的实际像素数）
+                    # 文本总高度 - 已显示部分
+                    scroll_range = max(1, img.height - render_height + 20)
+                    
+                    # 计算当前滚动位置
+                    if scroll_phase_frames > 0:
+                        scroll_progress = min(1.0, scroll_phase_index / scroll_phase_frames)
+                        scroll_pos = int(scroll_progress * scroll_range)
+                    else:
+                        scroll_pos = 0
+                    
+                    # 计算文本Y坐标
+                    text_y = -scroll_pos
+                    
+                else:
+                    # 阶段3：最后10%的帧保持在最终位置
+                    # 文本已经完全滚动完毕，显示空白或末尾
+                    text_y = -(img.height - render_height)
+                    # 如果文本高度小于屏幕，则保证文本底部对齐屏幕底部
+                    if img.height < render_height:
+                        text_y = render_height - img.height
                 
                 # --- Cropping and Pasting Logic --- 
                 # 确定需要从源文本图像 (img) 上裁剪的 Y 范围
