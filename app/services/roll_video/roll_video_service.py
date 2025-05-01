@@ -319,12 +319,12 @@ class RollVideoService:
                     # 计算文本位置 (从底部向上滚动)
                     text_y = render_height - scroll_pos
                     
-                    # 只取需要的文本部分，避免复制整个大图像
-                    visible_region_top = max(0, scroll_pos - render_height)
-                    visible_region_bottom = min(text_image.height, scroll_pos)
-                    
+                    # 性能优化：根据滚动位置只处理当前可见区域
                     if text_y < render_height and abs(text_y) < text_image.height:
-                        # 将文本图像粘贴到当前帧
+                        # 计算可见区域
+                        visible_region_top = max(0, scroll_pos - render_height)
+                        visible_region_bottom = min(text_image.height, scroll_pos)
+                        
                         # 只复制屏幕可见区域的文本，减少内存使用
                         visible_crop = text_image.crop((
                             0,                                # 左
@@ -342,6 +342,7 @@ class RollVideoService:
                         frame.save(buffer, format="PNG")
                         frame_bytes = buffer.getvalue()
                     else:
+                        # 对于非透明视频，直接使用更高效的raw格式
                         frame_bytes = frame.tobytes()
                     
                     # 清理以释放内存
@@ -349,6 +350,7 @@ class RollVideoService:
                     del frame
                     
                     return frame_bytes
+                
                 except Exception as e:
                     import traceback
                     logger.error(f"生成帧 {frame_index} 时出错: {str(e)}\n{traceback.format_exc()}")
