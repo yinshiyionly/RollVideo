@@ -116,19 +116,24 @@ class TextRenderer:
         self.font = ImageFont.truetype(font_path, font_size)
         self.font_size = font_size
         
+        # 确保字体颜色是RGB格式，处理list或tuple类型
+        # 将font_color和bg_color统一转为tuple处理
+        font_color_tuple = tuple(font_color) if isinstance(font_color, list) else font_color
+        bg_color_tuple = tuple(bg_color) if isinstance(bg_color, list) else bg_color
+        
         # 确保字体颜色是RGB格式
-        if len(font_color) == 3:
-            self.font_color = font_color + (255,) # 添加alpha通道用于绘制
-        elif len(font_color) == 4:
-            self.font_color = font_color
+        if len(font_color_tuple) == 3:
+            self.font_color = font_color_tuple + (255,) # 添加alpha通道用于绘制
+        elif len(font_color_tuple) == 4:
+            self.font_color = font_color_tuple
         else: # 如果无效，默认使用不透明黑色
              self.font_color = (0, 0, 0, 255)
             
         # 确保背景颜色是RGBA格式
-        if len(bg_color) == 4:
-            self.bg_color = bg_color
-        elif len(bg_color) == 3:
-            self.bg_color = bg_color + (255,)  # 添加Alpha通道，默认不透明
+        if len(bg_color_tuple) == 4:
+            self.bg_color = bg_color_tuple
+        elif len(bg_color_tuple) == 3:
+            self.bg_color = bg_color_tuple + (255,)  # 添加Alpha通道，默认不透明
         else:
             self.bg_color = (255, 255, 255, 0) # 默认使用透明白色
 
