@@ -332,6 +332,9 @@ class RollVideoService:
             # 默认白色背景
             bg_color = (255, 255, 255)
         
+        # 计算最大滚动距离 - 确保文字完全滚出屏幕
+        max_scroll_distance = img.height + render_height
+        
         # 返回帧生成函数
         def frame_generator(frame_index):
             try:
@@ -341,16 +344,19 @@ class RollVideoService:
                 else:
                     frame = Image.new("RGB", (render_width, render_height), bg_color)
                 
-                # 直接使用最简单的滚动逻辑
-                # 1. 第一帧文字在屏幕顶部(text_y=0)
-                # 2. 每帧向上滚动固定的像素数(scroll_speed)
+                # 计算当前滚动距离
+                current_scroll = frame_index * scroll_speed
+                
+                # 防止超过最大滚动距离（避免重复滚动）
+                if current_scroll > max_scroll_distance:
+                    current_scroll = max_scroll_distance
                 
                 # 计算文本在这一帧的Y坐标
-                text_y = 0 - (frame_index * scroll_speed)
+                text_y = 0 - current_scroll
                 
                 # 记录日志用于调试(每100帧记录一次)
                 if frame_index % 100 == 0 or frame_index < 10:
-                    logger.info(f"Frame {frame_index}: text_y={text_y}, scroll_speed={scroll_speed}")
+                    logger.info(f"Frame {frame_index}: text_y={text_y}, current_scroll={current_scroll}, max_distance={max_scroll_distance}")
                 
                 # --- Cropping and Pasting Logic --- 
                 # 确定需要从源文本图像 (img) 上裁剪的 Y 范围
