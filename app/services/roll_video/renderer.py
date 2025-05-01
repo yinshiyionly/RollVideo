@@ -724,6 +724,17 @@ class VideoRenderer:
             # 关闭进度条
             progress_bar.close()
             
+            # 创建后处理进度条，显示完成后的步骤
+            post_progress = tqdm.tqdm(
+                total=3,
+                desc="视频后处理",
+                unit="步骤",
+                ncols=100,
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}] {desc}",
+                position=0
+            )
+            post_progress.set_description_str("视频后处理: 等待FFmpeg编码完成")
+            
             # 记录总结信息
             if frames_written > 0:
                 total_time = time.time() - start_time
@@ -738,29 +749,70 @@ class VideoRenderer:
             except:
                 pass
                 
-            # 无论如何都要关闭FFmpeg进程的stdin
+            # 1. 关闭FFmpeg进程stdin并等待编码完成
             try:
+                if 'post_progress' in locals():
+                    post_progress.set_description_str("视频后处理: 关闭帧输入管道")
+                
                 if ffmpeg_process and ffmpeg_process.poll() is None:
                     logger.info("正常关闭FFmpeg进程...")
                     ffmpeg_process.stdin.close()
                     
+                    if 'post_progress' in locals():
+                        post_progress.update(1)
+                        post_progress.set_description_str("视频后处理: 等待FFmpeg完成视频编码")
+                    
                     # 等待FFmpeg处理完成
                     try:
-                        return_code = ffmpeg_process.wait(timeout=30)
+                        return_code = ffmpeg_process.wait(timeout=60)  # 增加超时时间
                         if return_code != 0:
                             stderr_output = ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
                             logger.error(f"FFmpeg进程异常退出，返回值: {return_code}, 错误信息: {stderr_output}")
                             if self._error.value == 0:
                                 self._error.value = return_code if return_code != 0 else 1
+                        else:
+                            logger.info("FFmpeg进程成功完成")
+                        
+                        if 'post_progress' in locals():
+                            post_progress.update(1)
+                            post_progress.set_description_str("视频后处理: 执行最终资源清理")
                     except subprocess.TimeoutExpired:
                         logger.error("等待FFmpeg进程完成超时，强制终止")
                         ffmpeg_process.kill()
                         if self._error.value == 0:
                             self._error.value = 1
+                        
+                        if 'post_progress' in locals():
+                            post_progress.update(1)
             except Exception as e:
                 logger.error(f"关闭FFmpeg进程时出错: {str(e)}")
                 if self._error.value == 0:
                     self._error.value = 1
+            
+            # 2. 最终资源清理
+            try:
+                # 强制执行一次GC，确保释放资源
+                import gc
+                gc.collect()
+                logger.info("执行最终资源清理完成")
+                
+                if 'post_progress' in locals():
+                    post_progress.update(1)
+                    post_progress.set_description_str("视频后处理: 完成")
+                    post_progress.close()
+                
+                # 显示最终结果
+                if self._error.value == 0:
+                    print(f"\n✅ 视频渲染成功! 输出文件: {self.output_path}")
+                else:
+                    print(f"\n❌ 视频渲染失败! 错误码: {self._error.value}")
+            except Exception as e:
+                logger.error(f"最终清理时出错: {str(e)}")
+                if 'post_progress' in locals():
+                    try:
+                        post_progress.close()
+                    except:
+                        pass
             
             # 设置完成事件
             self._event_complete.set()
