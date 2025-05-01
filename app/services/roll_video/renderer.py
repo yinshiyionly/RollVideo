@@ -479,6 +479,9 @@ class VideoRenderer:
 
     def _frame_writer(self):
         """将帧写入FFmpeg进程"""
+        # Add log right at the beginning of the method
+        logger.info("_frame_writer thread started.")
+        
         frame_buffer = []
         frames_written = 0
         buffer_size = 10  # 批量写入的大小
