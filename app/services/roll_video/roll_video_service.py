@@ -324,6 +324,7 @@ class RollVideoService:
         render_width = video_renderer.width
         render_height = video_renderer.height
         should_be_transparent = video_renderer.transparent
+        total_scroll_distance = video_renderer.scroll_distance
         
         # 获取背景色，防止透明视频的背景也是透明的
         if hasattr(img, 'info') and 'background' in img.info:
@@ -335,9 +336,21 @@ class RollVideoService:
         # 返回帧生成函数
         def frame_generator(frame_index):
             try:
-                # 修改: 从第一帧开始就在屏幕底部显示文字，而不是在屏幕外
-                # 原始代码: scroll_pos = (frame_index + 1) * scroll_speed
-                scroll_pos = frame_index * scroll_speed  # 移除 +1，让第一帧文字就出现在底部
+                # 修改：确保第一帧立即显示文字在屏幕中可见位置
+                # 1. 将初始位置设为屏幕底部上方一点，而不是屏幕底部边缘
+                initial_offset = 30  # 第一帧文字在屏幕底部上方30像素处
+                
+                # 2. 计算当前滚动位置
+                scroll_pos = frame_index * scroll_speed
+                
+                # 3. 调整文字Y坐标，使第一帧就能看到文字
+                text_y = render_height - initial_offset - scroll_pos
+                
+                # 4. 防止循环：如果已经滚动超过总滚动距离，保持在最终位置
+                max_scroll = total_scroll_distance
+                if scroll_pos > max_scroll:
+                    # 文字已经完全滚出，只显示背景
+                    text_y = render_height - max_scroll - initial_offset
                 
                 # 创建视频帧
                 if should_be_transparent:
@@ -345,13 +358,7 @@ class RollVideoService:
                 else:
                     frame = Image.new("RGB", (render_width, render_height), bg_color)
                 
-                # 计算文本图像顶部应该在当前帧的哪个 Y 坐标
-                # 当 scroll_pos = 0, text_y = render_height (文本在屏幕正下方)
-                # 当 scroll_pos = render_height, text_y = 0 (文本顶部到达屏幕顶部)
-                # 当 scroll_pos = render_height + img.height, text_y = -img.height (文本底部离开屏幕顶部)
-                text_y = render_height - scroll_pos
-                
-                # --- Corrected Cropping and Pasting Logic --- 
+                # --- Cropping and Pasting Logic --- 
                 # 确定需要从源文本图像 (img) 上裁剪的 Y 范围
                 src_y_start = max(0, -text_y) # 源图像裁剪起始 Y
                 src_y_end = min(img.height, render_height - text_y) # 源图像裁剪结束 Y
@@ -383,9 +390,6 @@ class RollVideoService:
                         
                     except Exception as e:
                         logger.error(f"裁剪或粘贴帧 {frame_index} 时出错: {e}, text_y={text_y}, src_y=({src_y_start},{src_y_end}), paste_y={paste_y}", exc_info=True)
-                # else: # crop_height <= 0，表示文本完全在屏幕外，不需要粘贴
-                #    logger.debug(f"Frame {frame_index}: Text out of view (text_y={text_y}, crop_height={crop_height})")
-                # --- End of Corrected Logic --- 
 
                 # 转换为字节流
                 buffer = io.BytesIO()
