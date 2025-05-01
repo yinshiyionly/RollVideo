@@ -776,13 +776,37 @@ class VideoRenderer:
                 if self._is_nvidia_available():
                     logger.info("检测到NVIDIA GPU，使用硬件加速编码(h264_nvenc)")
                     codec = 'h264_nvenc'
-                    hwaccel = 'cuda'
-                    # 简化NVENC参数，减少可能出错的选项
-                    extra_params.extend([
-                        '-preset', 'p1',           # 最快速模式(p1-p7，p1最快)
-                        '-tune', 'fastdecode',     # 快速解码模式
-                        '-qp', '30',               # 质量参数(较低质量但超快)
-                    ])
+                    
+                    # 根据操作系统调整NVIDIA加速参数
+                    if system == 'Linux':
+                        # 在Linux上使用更简单的硬件加速参数
+                        hwaccel = 'cuda'
+                        # 移除hwaccel_output_format，避免Linux上的兼容性问题
+                        extra_params.extend([
+                            '-preset', 'p1',       # 最快速模式
+                            '-b:v', '5M',          # 比特率
+                            '-maxrate', '10M',     # 最大比特率
+                            '-g', '60',            # 关键帧间隔
+                        ])
+                    else:
+                        # Windows或macOS上使用完整硬件加速
+                        hwaccel = 'cuda'
+                        # 只在非Linux系统上使用hwaccel_output_format
+                        if system in ['Windows']:
+                            extra_params.extend([
+                                '-hwaccel_output_format', 'cuda',
+                                '-preset', 'p1',          # 最快速模式
+                                '-tune', 'fastdecode',    # 快速解码
+                                '-qp', '30',              # 质量参数
+                                '-b:v', '5M',             # 比特率
+                            ])
+                        else:
+                            # macOS或其他系统
+                            extra_params.extend([
+                                '-preset', 'p1',          # 最快速模式
+                                '-qp', '30',              # 质量参数
+                                '-b:v', '5M',             # 比特率
+                            ])
                 # 然后检查AMD GPU
                 elif self._is_amd_available():
                     logger.info("检测到AMD GPU，使用硬件加速编码(h264_amf)")
@@ -833,14 +857,16 @@ class VideoRenderer:
             '-framerate', str(self.fps),  # 设置帧率
         ]
         
-        # 只有在有硬件加速选项并且不是透明视频时添加
+        # 只有在有硬件加速选项并且不是透明视频时添加硬件加速参数
         if hwaccel and not self.transparent and not force_software_encoding:
+            # 添加基本硬件加速参数
             command.extend(['-hwaccel', hwaccel])
             
-            # 只为NVIDIA GPU添加hwaccel_output_format，确保其稳定性
-            if hwaccel == 'cuda' and system in ['Linux', 'Windows']:
-                # 在Linux和Windows上提供CUDA输出选项
-                command.extend(['-hwaccel_output_format', 'cuda'])
+            # 视情况添加hwaccel_output_format
+            # 在Linux上不添加hwaccel_output_format，避免兼容性问题
+            if hwaccel == 'cuda' and system in ['Windows'] and '-hwaccel_output_format' in extra_params:
+                # hwaccel_output_format 已经在extra_params中处理
+                pass
         
         # 配置输入格式
         command.extend([
@@ -850,48 +876,66 @@ class VideoRenderer:
             '-i', 'pipe:',      # 从管道读取
         ])
         
-        # 优化FFmpeg性能参数，极大提升速度
+        # 优化FFmpeg性能参数
         command.extend([
             # 核心处理设置
             '-threads', str(os.cpu_count()),  # 使用所有可用CPU核心
-            # 增大队列容量，但适当减小避免内存问题
-            '-thread_queue_size', '2048',  # 使用较小的队列大小增加稳定性
+            # 减小队列大小，避免某些环境中的溢出问题
+            '-thread_queue_size', '1024',  # 使用适中的队列大小提高稳定性
             # 使用极速缩放算法
             '-sws_flags', 'fast_bilinear',  # 最快的缩放算法
             # 禁用音频
             '-an',
-            # 增大缓冲区，但适当减小避免内存问题
-            '-bufsize', '200M',  # 使用较小的缓冲区增加稳定性
+            # 使用适中的缓冲区大小
+            '-bufsize', '100M',  # 使用适中的缓冲区增加稳定性
         ])
         
-        # 添加前面确定的额外参数
+        # 添加前面确定的额外参数，但过滤掉hwaccel_output_format（在Linux上）
         if extra_params:
-            command.extend(extra_params)
+            if system == 'Linux' and hwaccel == 'cuda':
+                # 在Linux上过滤掉hwaccel_output_format参数
+                filtered_params = []
+                skip_next = False
+                for i, param in enumerate(extra_params):
+                    if skip_next:
+                        skip_next = False
+                        continue
+                    if param == '-hwaccel_output_format':
+                        skip_next = True
+                        continue
+                    filtered_params.append(param)
+                command.extend(filtered_params)
+            else:
+                command.extend(extra_params)
             
         # 根据透明度选择不同的编码配置
         if self.transparent:
             # 透明视频保持ProRes设置
             pass  # 已经在前面设置了ProRes参数
         else:
-            # 不透明视频配置 - 极致速度设置
+            # 不透明视频配置
             if codec.startswith('h264'):
-                # 添加H.264极速参数，但移除可能导致问题的选项
                 command.extend([
                     '-c:v', codec,
                     '-pix_fmt', 'yuv420p',  # 兼容性像素格式
                 ])
                 
-                # 为NVENC添加更兼容的参数
-                if codec == 'h264_nvenc':
-                    command.extend([
-                        '-b:v', '5M',        # 设置固定比特率而非零比特率
-                        '-maxrate', '10M',   # 最大比特率
-                        '-g', '60',         # 较小的GOP大小增加稳定性
-                    ])
+                # 对于Linux上的NVIDIA编码，使用简化参数集
+                if codec == 'h264_nvenc' and system == 'Linux':
+                    # Linux下NVENC的参数已在extra_params中设置，这里不需要额外添加
+                    pass
+                elif codec == 'h264_nvenc' and system != 'Linux':
+                    # 非Linux系统的NVENC额外参数
+                    if '-b:v' not in ' '.join(command):  # 检查是否已添加
+                        command.extend([
+                            '-b:v', '5M',        # 设置比特率
+                            '-maxrate', '10M',   # 最大比特率
+                            '-g', '60',          # GOP大小
+                        ])
                 # 为其他硬件编码器添加通用参数
-                else:
+                elif codec != 'h264_nvenc' and '-g' not in ' '.join(command):
                     command.extend([
-                        '-g', '60',          # 较小的GOP大小
+                        '-g', '60',          # GOP大小
                         '-bf', '0',          # 禁用B帧加速
                     ])
             else:
@@ -902,9 +946,9 @@ class VideoRenderer:
                 ])
                 
                 # 为libx264增加稳定性参数
-                if codec == 'libx264':
+                if codec == 'libx264' and '-g' not in ' '.join(command):
                     command.extend([
-                        '-g', '60',          # 较小的GOP大小
+                        '-g', '60',          # GOP大小
                         '-bf', '0',          # 禁用B帧加速
                     ])
         
