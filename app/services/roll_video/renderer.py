@@ -1529,36 +1529,47 @@ class VideoRenderer:
 
     def calculate_total_frames(self, text_height, scroll_speed):
         """计算视频需要的总帧数"""
-        # 简化逻辑：滚动距离 = 文本高度 + 屏幕高度
-        # 这确保文本从底部完全进入到顶部完全离开，再加上一屏空白
-        # 
-        # 对于非常短的文本，增加一些额外时间让文字在屏幕上停留
-        if text_height < self.height / 3:  # 如果文本高度小于屏幕的1/3
-            # 确保短文本能在屏幕上显示足够长时间
-            min_display_time_frames = int(self.fps * 3)  # 至少显示3秒
-            
-            # 基本滚动距离：文本高度 + 屏幕高度（确保文字能完全滚出屏幕）
-            self.scroll_distance = text_height + self.height
-            
-            # 确保滚动速度合理
-            actual_scroll_speed = max(1, scroll_speed)
-            
-            # 先计算基本帧数
-            basic_frames = int(np.ceil(self.scroll_distance / actual_scroll_speed))
-            
-            # 如果基本帧数小于最小显示时间，调整滚动距离使总帧数达到最小显示时间
-            if basic_frames < min_display_time_frames:
-                self.scroll_distance = min_display_time_frames * actual_scroll_speed
-        else:
-            # 对于中长文本，使用标准滚动距离
-            self.scroll_distance = text_height + self.height
+        # 对短文本采用完全不同的计算策略
+        # 不再使用 text_height + screen_height 的公式
         
         # 确保滚动速度至少为1像素/帧
         actual_scroll_speed = max(1, scroll_speed)
         logger.info(f"使用实际滚动速度: {actual_scroll_speed}px/帧 (原始: {scroll_speed})")
-
-        # 使用ceil方式计算，确保包含最后一帧
-        total_frames = int(np.ceil(self.scroll_distance / actual_scroll_speed))
+        
+        # 1. 如果文本高度小于屏幕高度的1/3（非常短的文本）
+        if text_height < self.height / 3:
+            # 短文本显示时间：3-5秒取决于文本高度
+            # 文本越短，显示时间越接近3秒；文本越长，显示时间越接近5秒
+            ratio = text_height / (self.height / 3)  # 0到1之间的比例
+            display_seconds = 3 + ratio * 2  # 3到5秒之间
+            
+            # 计算总帧数 = FPS * 显示秒数
+            total_frames = int(self.fps * display_seconds)
+            
+            # 反向计算所需的滚动距离
+            self.scroll_distance = total_frames * actual_scroll_speed
+            
+            logger.info(f"短文本优化: 文本高度={text_height}px, 显示时间={display_seconds:.1f}秒, 帧数={total_frames}")
+            
+        # 2. 如果文本高度小于屏幕高度（完全在一屏内）
+        elif text_height < self.height:
+            # 中等文本：适度滚动距离
+            # 文本高度 + 额外空间（取决于文本占屏幕的比例）
+            ratio = text_height / self.height  # 0.33到1之间
+            # 额外空间从屏幕高度的75%到150%不等
+            extra_space = int(self.height * (0.75 + ratio * 0.75))
+            
+            # 计算滚动距离
+            self.scroll_distance = text_height + extra_space
+            
+            # 计算总帧数
+            total_frames = int(np.ceil(self.scroll_distance / actual_scroll_speed))
+            
+        # 3. 对于长文本（超过一屏）
+        else:
+            # 长文本：标准滚动距离 = 文本高度 + 一屏空白
+            self.scroll_distance = text_height + self.height
+            total_frames = int(np.ceil(self.scroll_distance / actual_scroll_speed))
 
         # 考虑跳帧 (frame_skip)
         if self.actual_frame_skip > 1:
