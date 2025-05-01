@@ -109,39 +109,59 @@ class TextRenderer:
             font_size: 字体大小
             font_color: 字体颜色 (R,G,B)
             bg_color: 背景颜色 (R,G,B,A)，A为透明度，0表示完全透明，255表示完全不透明
-            line_spacing: 行间距
+            line_spacing: 行间距，将乘以字体大小计算实际间距
             char_spacing: 字符间距
         """
         self.width = width
         self.font = ImageFont.truetype(font_path, font_size)
         self.font_size = font_size
         
-        # 确保字体颜色是RGB格式，处理list或tuple类型
-        # 将font_color和bg_color统一转为tuple处理
-        font_color_tuple = tuple(font_color) if isinstance(font_color, list) else font_color
-        bg_color_tuple = tuple(bg_color) if isinstance(bg_color, list) else bg_color
+        # 将传入的参数转换为列表，以便统一处理
+        font_color_list = list(font_color) if not isinstance(font_color, list) else font_color.copy()
+        bg_color_list = list(bg_color) if not isinstance(bg_color, list) else bg_color.copy()
         
-        # 确保字体颜色是RGB格式
-        if len(font_color_tuple) == 3:
-            self.font_color = font_color_tuple + (255,) # 添加alpha通道用于绘制
-        elif len(font_color_tuple) == 4:
-            self.font_color = font_color_tuple
-        else: # 如果无效，默认使用不透明黑色
-             self.font_color = (0, 0, 0, 255)
-            
-        # 确保背景颜色是RGBA格式
-        if len(bg_color_tuple) == 4:
-            self.bg_color = bg_color_tuple
-        elif len(bg_color_tuple) == 3:
-            self.bg_color = bg_color_tuple + (255,)  # 添加Alpha通道，默认不透明
+        # 确保字体颜色是RGB格式，并转换为整数
+        for i in range(len(font_color_list)):
+            font_color_list[i] = int(font_color_list[i])
+        
+        # 添加alpha通道给字体颜色
+        if len(font_color_list) == 3:
+            font_color_list.append(255)  # 添加不透明的alpha通道
+        elif len(font_color_list) != 4:
+            font_color_list = [0, 0, 0, 255]  # 默认黑色不透明
+        
+        # 确保背景颜色是RGBA格式，并转换为整数
+        for i in range(len(bg_color_list)):
+            # 处理Alpha通道可能的浮点数(0.0-1.0)转整数(0-255)
+            if i == 3 and 0 <= bg_color_list[i] <= 1 and isinstance(bg_color_list[i], float):
+                bg_color_list[i] = int(bg_color_list[i] * 255)
+            else:
+                bg_color_list[i] = int(bg_color_list[i])
+        
+        # 补充RGBA
+        if len(bg_color_list) == 3:
+            bg_color_list.append(255)  # 添加不透明的alpha通道
+        elif len(bg_color_list) != 4:
+            bg_color_list = [255, 255, 255, 255]  # 默认白色不透明
+        
+        # 转换为元组，适配PIL需要
+        self.font_color = tuple(font_color_list)
+        self.bg_color = tuple(bg_color_list)
+        
+        # 行间距计算，支持比例行间距
+        if line_spacing <= 0:
+            self.line_spacing = 0
+        elif line_spacing < 1:
+            # 如果小于1，认为是字体大小的倍数
+            self.line_spacing = int(line_spacing * font_size)
         else:
-            self.bg_color = (255, 255, 255, 0) # 默认使用透明白色
-
-        self.line_spacing = line_spacing
+            # 否则直接使用像素值
+            self.line_spacing = int(line_spacing)
+            
         self.char_spacing = char_spacing
         
         # 记录原始参数，便于调试
-        logger.info(f"文本渲染器初始化: 字体大小={font_size}, 行间距={line_spacing}, 字符间距={char_spacing}")
+        logger.info(f"文本渲染器初始化: 字体大小={font_size}, 行间距={self.line_spacing}, 字符间距={char_spacing}")
     
     def _calculate_text_layout(self, text: str) -> List[str]:
         """
@@ -782,7 +802,7 @@ class VideoRenderer:
         
         logger.info(f"FFmpeg命令: {' '.join(command)}")
         return command
-        
+
     def _is_nvidia_available(self):
         """检查NVIDIA GPU是否可用"""
         try:
@@ -1172,7 +1192,8 @@ class VideoRenderer:
                 if self.error_callback:
                     self.error_callback(error_msg)
                 return False
-                
+            
+            # 如果一切正常，返回True
             return True
 
     def calculate_total_frames(self, text_height, scroll_speed):
