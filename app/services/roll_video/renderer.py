@@ -723,23 +723,32 @@ class VideoRenderer:
             
             # 关闭帧渲染进度条
             progress_bar.close()
+            logger.info("主帧渲染进度条已关闭")
             
             # 创建后处理进度条并立即显示
             print("\n正在完成视频编码和文件处理...")
+            logger.info("准备启动视频后处理步骤...")
             post_steps = [
                 "关闭帧输入管道",
                 "等待FFmpeg完成视频编码",
                 "执行最终资源清理"
             ]
             
-            post_progress = tqdm.tqdm(
-                total=len(post_steps),
-                desc="视频后处理",
-                unit="步骤",
-                ncols=100,
-                position=0,
-                leave=True
-            )
+            try:
+                post_progress = tqdm.tqdm(
+                    total=len(post_steps),
+                    desc="视频后处理",
+                    unit="步骤",
+                    ncols=100,
+                    position=0, # 确保主进度条在顶层
+                    leave=True
+                )
+                logger.info("后处理步骤进度条已创建")
+            except Exception as e:
+                logger.error(f"创建后处理进度条失败: {str(e)}")
+                self._error.value = 1
+                self._event_complete.set()
+                return # 无法继续
             
             # 记录总结信息
             if frames_written > 0:
@@ -749,18 +758,24 @@ class VideoRenderer:
                     logger.warning(f"跳过了 {skipped_frames} 帧由于错误")
             
             # 1. 关闭帧输入管道
+            logger.info("准备关闭FFmpeg输入管道 (步骤 1/3)")
             post_progress.set_description(f"【第1步/共3步】{post_steps[0]}")
             try:
                 if ffmpeg_process and ffmpeg_process.poll() is None:
-                    logger.info("正常关闭FFmpeg输入管道...")
+                    logger.info("尝试关闭 ffmpeg_process.stdin ...")
                     ffmpeg_process.stdin.close()
+                    logger.info("ffmpeg_process.stdin 已关闭")
                     post_progress.update(1)
-                    time.sleep(0.1)  # 短暂暂停使进度条可见
+                    time.sleep(0.1)
+                else:
+                    logger.warning("FFmpeg 进程在关闭管道前已结束或不存在")
+                    post_progress.update(1) # 仍然更新进度
             except Exception as e:
                 logger.error(f"关闭FFmpeg输入管道时出错: {str(e)}")
-                post_progress.update(1)
+                post_progress.update(1) # 即使出错也更新进度
             
             # 2. 等待FFmpeg完成视频处理 - 为A10 GPU使用更强的超时机制
+            logger.info("准备等待 FFmpeg 完成 (步骤 2/3)")
             post_progress.set_description(f"【第2步/共3步】{post_steps[1]}")
             try:
                 if ffmpeg_process and ffmpeg_process.poll() is None:
@@ -782,28 +797,35 @@ class VideoRenderer:
                     ffmpeg_start_wait = time.time()
                     logger.info(f"等待FFmpeg完成最终编码 (最长等待{timeout}秒)...")
                     
-                    # 创建等待FFmpeg的独立进度条
-                    wait_bar = tqdm.tqdm(
-                        total=timeout, 
-                        desc="  └─ 等待FFmpeg编码", 
-                        unit="秒", 
-                        ncols=100, 
-                        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}秒 [{elapsed}<{remaining}]",
-                        position=1, # 尝试放在下一行
-                        leave=False # 完成后消失
-                    )
+                    # 创建等待FFmpeg的独立进度条 (移除 position 参数)
+                    logger.info("准备创建 FFmpeg 等待进度条...")
+                    try:
+                        wait_bar = tqdm.tqdm(
+                            total=timeout, 
+                            desc="  └─ 等待FFmpeg编码", 
+                            unit="秒", 
+                            ncols=100, 
+                            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}秒 [{elapsed}<{remaining}]",
+                            # position=1, # 移除 position 参数，让tqdm自动处理
+                            leave=False
+                        )
+                        logger.info("FFmpeg 等待进度条已创建")
+                    except Exception as e:
+                        logger.error(f"创建 FFmpeg 等待进度条失败: {str(e)}")
+                        # 即使进度条失败，仍然继续等待，但没有可视化
+                        wait_bar = None # 标记进度条不可用
 
                     # 分段等待，实时更新进度
                     wait_complete = False
-                    progress_points = max(10, timeout // 5) # 每5秒更新一次，至少10个点
+                    progress_points = max(10, timeout // 5)
                     wait_interval = timeout / progress_points
                     
                     for i in range(progress_points):
                         if ffmpeg_process.poll() is not None:
                             wait_complete = True
-                            # 更新等待进度条到100%
-                            wait_bar.n = timeout
-                            wait_bar.refresh()
+                            if wait_bar: # 仅当进度条创建成功时更新
+                                wait_bar.n = timeout
+                                wait_bar.refresh()
                             logger.info(f"FFmpeg进程在等待{i+1}/{progress_points}段后自行结束")
                             break
                             
@@ -815,13 +837,16 @@ class VideoRenderer:
                         )
 
                         # 更新等待进度条
-                        wait_bar.update(wait_interval)
+                        if wait_bar: # 仅当进度条创建成功时更新
+                            wait_bar.update(wait_interval)
                         
                         # 等待一个间隔
                         time.sleep(wait_interval)
                     
                     # 关闭等待进度条
-                    wait_bar.close()
+                    if wait_bar: # 仅当进度条创建成功时关闭
+                        wait_bar.close()
+                        logger.info("FFmpeg 等待进度条已关闭")
 
                     # 如果FFmpeg仍在运行，但已达到超时时间，强制终止
                     if not wait_complete:
@@ -861,7 +886,7 @@ class VideoRenderer:
                         else:
                             logger.info("FFmpeg进程成功完成")
                             
-                post_progress.update(1)
+                post_progress.update(1) # 完成步骤2
             except Exception as e:
                 logger.error(f"等待FFmpeg完成时出错: {str(e)}")
                 if ffmpeg_process and ffmpeg_process.poll() is None:
@@ -872,9 +897,10 @@ class VideoRenderer:
                             ffmpeg_process.kill()
                     except:
                         pass
-                post_progress.update(1)
+                post_progress.update(1) # 即使出错也标记步骤2完成
             
             # 3. 最终清理
+            logger.info("准备执行最终清理 (步骤 3/3)")
             post_progress.set_description(f"【第3步/共3步】{post_steps[2]}")
             try:
                 # 强制执行一次GC，确保释放资源
