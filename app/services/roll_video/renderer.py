@@ -19,6 +19,8 @@ import re
 import time
 import uuid
 import ctypes
+import gc
+import psutil
 
 logger = logging.getLogger(__name__)
 
@@ -299,8 +301,25 @@ class VideoRenderer:
                         # 记录调试信息，但降低频率避免日志过多
                         if frame_index % 100 == 0:
                             logger.debug(f"线程处理完成帧 {frame_index}")
+                except BrokenPipeError as e:
+                    error_msg = f"帧 {frame_index} 生成错误: 管道已断开 - {str(e)}"
+                    logger.error(error_msg)
+                    if self.error_callback:
+                        self.error_callback(error_msg)
+                except MemoryError as e:
+                    error_msg = f"帧 {frame_index} 生成错误: 内存不足 - {str(e)}"
+                    logger.error(error_msg)
+                    if self.error_callback:
+                        self.error_callback(error_msg)
+                except queue.Full as e:
+                    error_msg = f"帧 {frame_index} 生成错误: 帧队列已满，无法添加 - {str(e)}"
+                    logger.error(error_msg)
+                    # 重新放入任务队列，稍后再试
+                    if not self.stop_threads:
+                        task_queue.put(frame_index)
                 except Exception as e:
-                    error_msg = f"帧 {frame_index} 生成错误: {str(e)}"
+                    import traceback
+                    error_msg = f"帧 {frame_index} 生成错误: {str(e)}\n{traceback.format_exc()}"
                     logger.error(error_msg)
                     if self.error_callback:
                         self.error_callback(error_msg)
@@ -310,7 +329,8 @@ class VideoRenderer:
                 # 队列为空，继续等待
                 continue
             except Exception as e:
-                logger.error(f"帧生成线程错误: {str(e)}")
+                import traceback
+                logger.error(f"帧生成线程错误: {str(e)}\n{traceback.format_exc()}")
                 # 继续运行，不中断渲染
                 continue
     
@@ -528,6 +548,18 @@ class VideoRenderer:
         self.total_frames = total_frames
         self.stop_threads = False
         
+        # 开始时强制进行一次完整垃圾回收
+        gc.collect()
+        
+        # 内存监控初始设置
+        process = psutil.Process(os.getpid())
+        initial_memory = process.memory_info().rss / 1024 / 1024  # MB
+        peak_memory = initial_memory
+        last_memory_check = time.time()
+        memory_check_interval = 5.0  # 每5秒检查一次内存
+        
+        logger.info(f"初始内存使用: {initial_memory:.2f} MB")
+        
         # 准备FFmpeg命令
         command = self._prepare_ffmpeg_command()
         
@@ -621,6 +653,22 @@ class VideoRenderer:
             
             while frame_index < total_frames and not self.stop_threads:
                 try:
+                    # 定期检查内存使用情况
+                    now = time.time()
+                    if now - last_memory_check > memory_check_interval:
+                        current_memory = process.memory_info().rss / 1024 / 1024  # MB
+                        peak_memory = max(peak_memory, current_memory)
+                        memory_growth = current_memory - initial_memory
+                        
+                        logger.info(f"内存使用: {current_memory:.2f} MB (增长: {memory_growth:.2f} MB, 峰值: {peak_memory:.2f} MB)")
+                        
+                        # 如果内存增长超过一定阈值，强制垃圾回收
+                        if memory_growth > 500:  # 增长超过500MB
+                            logger.warning(f"内存使用增长较多，执行强制垃圾回收...")
+                            gc.collect()
+                            
+                        last_memory_check = now
+                    
                     # 智能任务分配：队列半满时添加更多任务
                     queue_size = task_queue.qsize()
                     queue_capacity = self.num_threads * 3  # 减少队列容量，避免过多未处理任务
@@ -668,6 +716,10 @@ class VideoRenderer:
             if error_thread.is_alive():
                 error_thread.join(timeout=2.0)
                 
+            # 最终内存使用报告
+            final_memory = process.memory_info().rss / 1024 / 1024  # MB
+            logger.info(f"最终内存使用: {final_memory:.2f} MB (增长: {final_memory-initial_memory:.2f} MB, 峰值: {peak_memory:.2f} MB)")
+            
             logger.info("所有帧已渲染完成，等待FFmpeg完成编码...")
             
         except KeyboardInterrupt:
@@ -712,6 +764,8 @@ class VideoRenderer:
                 except Exception as e:
                     logger.error(f"关闭FFmpeg进程时出错: {str(e)}")
             
+            # 最终垃圾回收
+            gc.collect()
             logger.info(f"视频渲染完成: {self.output_path}")
             
             # 检查输出文件是否存在

@@ -304,33 +304,63 @@ class RollVideoService:
             
             # 创建帧生成函数
             def frame_generator(frame_index):
-                # 计算当前滚动位置
-                scroll_pos = frame_index * render_scroll_speed
-                
-                # 创建视频帧
-                if should_be_transparent:
-                    # 透明背景
-                    frame = Image.new("RGBA", (render_width, render_height), (0, 0, 0, 0))
-                else:
-                    # 使用指定背景色
-                    frame = Image.new("RGB", (render_width, render_height), bg_color_final[:3])
-                
-                # 计算文本位置 (从底部向上滚动)
-                text_y = render_height - scroll_pos
-                
-                # 将文本图像粘贴到当前帧
-                frame.paste(text_image, (0, text_y), text_image if text_image.mode == "RGBA" else None)
-                
-                # 转换为字节流
-                buffer = io.BytesIO()
-                frame_format = "raw"
-                if should_be_transparent:
-                    frame.save(buffer, format="PNG")
-                    frame_bytes = buffer.getvalue()
-                else:
-                    frame_bytes = frame.tobytes()
-                
-                return frame_bytes
+                try:
+                    # 计算当前滚动位置
+                    scroll_pos = frame_index * render_scroll_speed
+                    
+                    # 创建视频帧
+                    if should_be_transparent:
+                        # 透明背景
+                        frame = Image.new("RGBA", (render_width, render_height), (0, 0, 0, 0))
+                    else:
+                        # 使用指定背景色
+                        frame = Image.new("RGB", (render_width, render_height), bg_color_final[:3])
+                    
+                    # 计算文本位置 (从底部向上滚动)
+                    text_y = render_height - scroll_pos
+                    
+                    # 只取需要的文本部分，避免复制整个大图像
+                    visible_region_top = max(0, scroll_pos - render_height)
+                    visible_region_bottom = min(text_image.height, scroll_pos)
+                    
+                    if text_y < render_height and abs(text_y) < text_image.height:
+                        # 将文本图像粘贴到当前帧
+                        # 只复制屏幕可见区域的文本，减少内存使用
+                        visible_crop = text_image.crop((
+                            0,                                # 左
+                            visible_region_top,               # 上
+                            render_width,                     # 右
+                            visible_region_bottom             # 下
+                        ))
+                        
+                        paste_y = max(0, text_y)
+                        frame.paste(visible_crop, (0, paste_y), visible_crop if visible_crop.mode == "RGBA" else None)
+                    
+                    # 转换为字节流
+                    buffer = io.BytesIO()
+                    if should_be_transparent:
+                        frame.save(buffer, format="PNG")
+                        frame_bytes = buffer.getvalue()
+                    else:
+                        frame_bytes = frame.tobytes()
+                    
+                    # 清理以释放内存
+                    buffer.close()
+                    del frame
+                    
+                    return frame_bytes
+                except Exception as e:
+                    import traceback
+                    logger.error(f"生成帧 {frame_index} 时出错: {str(e)}\n{traceback.format_exc()}")
+                    # 遇到错误时，返回一个空帧或默认帧而不是None，确保流程能继续
+                    if should_be_transparent:
+                        default_frame = Image.new("RGBA", (render_width, render_height), (0, 0, 0, 0))
+                        buffer = io.BytesIO()
+                        default_frame.save(buffer, format="PNG")
+                        return buffer.getvalue()
+                    else:
+                        default_frame = Image.new("RGB", (render_width, render_height), bg_color_final[:3])
+                        return default_frame.tobytes()
             
             # 开始渲染视频
             logger.info(f"开始渲染滚动视频，总帧数: {total_frames}...")
