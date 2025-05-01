@@ -335,40 +335,57 @@ class RollVideoService:
         # 返回帧生成函数
         def frame_generator(frame_index):
             try:
-                # 计算当前滚动位置
+                # 计算当前滚动位置 (像素)
                 scroll_pos = frame_index * scroll_speed
                 
                 # 创建视频帧
                 if should_be_transparent:
-                    # 透明背景
                     frame = Image.new("RGBA", (render_width, render_height), (0, 0, 0, 0))
                 else:
-                    # 使用指定背景色
                     frame = Image.new("RGB", (render_width, render_height), bg_color)
                 
-                # 计算文本位置 (从底部向上滚动)
+                # 计算文本图像顶部应该在当前帧的哪个 Y 坐标
+                # 当 scroll_pos = 0, text_y = render_height (文本在屏幕正下方)
+                # 当 scroll_pos = render_height, text_y = 0 (文本顶部到达屏幕顶部)
+                # 当 scroll_pos = render_height + img.height, text_y = -img.height (文本底部离开屏幕顶部)
                 text_y = render_height - scroll_pos
                 
-                # 性能优化：根据滚动位置只处理当前可见区域
-                if text_y < render_height and abs(text_y) < img.height:
-                    # 计算可见区域
-                    visible_region_top = max(0, scroll_pos - render_height)
-                    visible_region_bottom = min(img.height, scroll_pos)
-                    
-                    # 只复制屏幕可见区域的文本，减少内存使用
+                # --- Corrected Cropping and Pasting Logic --- 
+                # 确定需要从源文本图像 (img) 上裁剪的 Y 范围
+                src_y_start = max(0, -text_y) # 源图像裁剪起始 Y
+                src_y_end = min(img.height, render_height - text_y) # 源图像裁剪结束 Y
+                
+                # 计算实际裁剪高度
+                crop_height = src_y_end - src_y_start
+
+                # 确定在目标帧 (frame) 上粘贴的起始 Y 坐标
+                paste_y = max(0, text_y) # 目标帧粘贴起始 Y
+
+                # 只有当实际裁剪高度大于0时才进行裁剪和粘贴
+                if crop_height > 0:
                     try:
+                        # 从源图像裁剪
                         visible_crop = img.crop((
-                            0,                                # 左
-                            visible_region_top,               # 上
-                            render_width,                     # 右
-                            visible_region_bottom             # 下
+                            0,             # left
+                            src_y_start,   # top
+                            render_width,  # right
+                            src_y_end      # bottom
                         ))
                         
-                        paste_y = max(0, text_y)
-                        frame.paste(visible_crop, (0, paste_y), visible_crop if visible_crop.mode == "RGBA" else None)
+                        # 粘贴到目标帧的正确位置
+                        # 如果源图像是 RGBA，使用其 alpha 通道作为 mask
+                        mask = visible_crop if visible_crop.mode == 'RGBA' else None
+                        frame.paste(visible_crop, (0, paste_y), mask=mask)
+                        
+                        # 显式删除裁剪对象释放内存
+                        del visible_crop
+                        
                     except Exception as e:
-                        logger.error(f"裁剪图像错误: {e}, 尺寸={img.width}x{img.height}, 裁剪区域=(0,{visible_region_top},{render_width},{visible_region_bottom})")
-                
+                        logger.error(f"裁剪或粘贴帧 {frame_index} 时出错: {e}, text_y={text_y}, src_y=({src_y_start},{src_y_end}), paste_y={paste_y}", exc_info=True)
+                # else: # crop_height <= 0，表示文本完全在屏幕外，不需要粘贴
+                #    logger.debug(f"Frame {frame_index}: Text out of view (text_y={text_y}, crop_height={crop_height})")
+                # --- End of Corrected Logic --- 
+
                 # 转换为字节流
                 buffer = io.BytesIO()
                 if should_be_transparent:

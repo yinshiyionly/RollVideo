@@ -538,25 +538,29 @@ class VideoRenderer:
             logger.debug(f"Initial state before loop: Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}")
 
             while not self._event_stop.is_set() or not self._frame_queue.empty():
-                # Log as the VERY FIRST action inside the loop - Use INFO for testing
-                logger.info(f"---> Loop {loop_counter + 1}: Entered loop top.") # Changed to INFO
+                # Comment out verbose loop logs, revert to DEBUG or remove if not needed
+                # logger.info(f"---> Loop {loop_counter + 1}: Entered loop top.") # Changed to INFO
+                logger.debug(f"---> Loop {loop_counter + 1}: Entered loop top.") # Reverted to DEBUG
                 
                 loop_counter += 1
                 frame_data = None # Initialize frame_data for this iteration
                 try:
-                    # Log before getting from queue - Use INFO for testing
-                    logger.info(f"Loop {loop_counter}: Attempting to get frame from queue. Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}") # Changed to INFO
+                    # Comment out verbose loop logs
+                    # logger.info(f"Loop {loop_counter}: Attempting to get frame from queue. Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}") # Changed to INFO
+                    logger.debug(f"Loop {loop_counter}: Attempting to get frame from queue. Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}") # Reverted to DEBUG
                     
                     # Try getting from queue with specific exception handling
                     try:
                         frame_data = self._frame_queue.get(timeout=0.1)
-                        # Log after getting from queue - Use INFO for testing
-                        logger.info(f"Loop {loop_counter}: Got frame data from queue.") # Changed to INFO
+                        # Comment out verbose loop logs
+                        # logger.info(f"Loop {loop_counter}: Got frame data from queue.") # Changed to INFO
+                        logger.debug(f"Loop {loop_counter}: Got frame data from queue.") # Reverted to DEBUG
                     except queue.Empty:
                         # Use DEBUG here as it's less critical and frequent
                         logger.debug(f"Loop {loop_counter}: Queue empty, continuing loop.")
                         if self._event_stop.is_set():
-                            logger.info(f"Loop {loop_counter}: Stop event set and queue empty, breaking loop.")
+                            # Keep this INFO log as it signifies loop exit reason
+                            logger.info(f"Loop {loop_counter}: Stop event set and queue empty, breaking loop.") 
                             break # Exit loop condition met
                         continue # Continue loop to check stop event again or wait for frames
                     except Exception as e:
@@ -708,8 +712,9 @@ class VideoRenderer:
                         frame_buffer = []
                         logger.debug(f"Loop {loop_counter}: Processed frame buffer.")
 
-                    # Log at the end of a successful loop iteration - Use INFO for testing
-                    logger.info(f"Loop {loop_counter}: End of iteration. Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}") # Changed to INFO
+                    # Comment out verbose loop logs
+                    # logger.info(f"Loop {loop_counter}: End of iteration. Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}") # Changed to INFO
+                    logger.debug(f"Loop {loop_counter}: End of iteration. Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}") # Reverted to DEBUG
 
                 except Exception as loop_e:
                     # Catch any unexpected error within the main try block of the loop
@@ -718,7 +723,7 @@ class VideoRenderer:
                     self._event_stop.set() # Signal stop
                     break # Exit loop
             
-            # --- Code after the while loop --- 
+            # Keep this summary log
             logger.info(f"帧写入主循环已结束. Final loop count: {loop_counter}. Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}")
 
             # Try closing the main progress bar here
@@ -1524,21 +1529,28 @@ class VideoRenderer:
 
     def calculate_total_frames(self, text_height, scroll_speed):
         """计算视频需要的总帧数"""
-        # 需要滚动的总距离 = 文本高度 + 视频高度 + 底部填充
-        bottom_padding = int(self.height * self.bottom_padding_ratio)
-        self.scroll_distance = text_height + self.height + bottom_padding
+        # 需要滚动的总距离 = 文本高度 + 视频高度 (确保最后一行滚出屏幕顶部)
+        # 移除之前的 bottom_padding，以减少短文本视频的不必要长度
+        # bottom_padding = int(self.height * self.bottom_padding_ratio)
+        self.scroll_distance = text_height + self.height 
         
-        # 计算所需的总帧数，使用实际滚动速度
-        total_frames = self.scroll_distance // scroll_speed
-        if self.scroll_distance % scroll_speed != 0:
-            total_frames += 1
-            
-        # 考虑跳帧
+        # 确保滚动速度至少为1像素/帧
+        actual_scroll_speed = max(1, scroll_speed)
+        logger.info(f"使用实际滚动速度: {actual_scroll_speed}px/帧 (原始: {scroll_speed})")
+
+        # 计算所需的总帧数
+        # total_frames = self.scroll_distance // actual_scroll_speed
+        # if self.scroll_distance % actual_scroll_speed != 0:
+        #     total_frames += 1
+        # 使用 ceil 方式计算，确保包含最后一帧
+        total_frames = int(np.ceil(self.scroll_distance / actual_scroll_speed))
+
+        # 考虑跳帧 (frame_skip)
         if self.actual_frame_skip > 1:
             # 确保总帧数是实际跳帧的倍数，保证完整的视频
             if total_frames % self.actual_frame_skip != 0:
                 total_frames += self.actual_frame_skip - (total_frames % self.actual_frame_skip)
                 
         logger.info(f"文本高度: {text_height}px, 滚动距离: {self.scroll_distance}px, "
-                   f"滚动速度: {scroll_speed}px/帧, 计算总帧数: {total_frames}")
-        return total_frames 
+                   f"滚动速度: {actual_scroll_speed}px/帧, 计算总帧数: {total_frames}")
+        return total_frames
