@@ -517,7 +517,7 @@ class VideoRenderer:
             # 创建进度条
             progress_bar = tqdm.tqdm(
                 total=self.total_frames,
-                desc="渲染进度",
+                desc="帧渲染进度",
                 unit="帧",
                 unit_scale=False,
                 ncols=100,
@@ -721,19 +721,25 @@ class VideoRenderer:
                     except Exception as e:
                         logger.error(f"写入最后帧时出错: {str(e)}")
             
-            # 关闭进度条
+            # 关闭帧渲染进度条
             progress_bar.close()
             
-            # 创建后处理进度条，显示完成后的步骤
+            # 创建后处理进度条并立即显示
+            print("\n正在完成视频编码和文件处理...")
+            post_steps = [
+                "关闭帧输入管道",
+                "等待FFmpeg完成视频编码",
+                "执行最终资源清理"
+            ]
+            
             post_progress = tqdm.tqdm(
-                total=3,
+                total=len(post_steps),
                 desc="视频后处理",
                 unit="步骤",
                 ncols=100,
-                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}] {desc}",
-                position=0
+                position=0,
+                leave=True
             )
-            post_progress.set_description_str("视频后处理: 等待FFmpeg编码完成")
             
             # 记录总结信息
             if frames_written > 0:
@@ -741,78 +747,141 @@ class VideoRenderer:
                 logger.info(f"帧写入完成: 已写入 {frames_written} 帧, 耗时 {total_time:.2f} 秒, 平均速度 {frames_written/total_time:.2f} 帧/秒")
                 if skipped_frames > 0:
                     logger.warning(f"跳过了 {skipped_frames} 帧由于错误")
-        
-        finally:
-            # 确保关闭进度条
+            
+            # 1. 关闭帧输入管道
+            post_progress.set_description(f"【第1步/共3步】{post_steps[0]}")
             try:
-                progress_bar.close()
-            except:
-                pass
-                
-            # 1. 关闭FFmpeg进程stdin并等待编码完成
-            try:
-                if 'post_progress' in locals():
-                    post_progress.set_description_str("视频后处理: 关闭帧输入管道")
-                
                 if ffmpeg_process and ffmpeg_process.poll() is None:
-                    logger.info("正常关闭FFmpeg进程...")
+                    logger.info("正常关闭FFmpeg输入管道...")
                     ffmpeg_process.stdin.close()
-                    
-                    if 'post_progress' in locals():
-                        post_progress.update(1)
-                        post_progress.set_description_str("视频后处理: 等待FFmpeg完成视频编码")
-                    
-                    # 等待FFmpeg处理完成
+                    post_progress.update(1)
+                    time.sleep(0.1)  # 短暂暂停使进度条可见
+            except Exception as e:
+                logger.error(f"关闭FFmpeg输入管道时出错: {str(e)}")
+                post_progress.update(1)
+            
+            # 2. 等待FFmpeg完成视频处理
+            post_progress.set_description(f"【第2步/共3步】{post_steps[1]}")
+            try:
+                if ffmpeg_process and ffmpeg_process.poll() is None:
+                    # 设置合理的超时时间，高端GPU使用更短时间
+                    is_high_end_gpu = False
                     try:
-                        return_code = ffmpeg_process.wait(timeout=60)  # 增加超时时间
-                        if return_code != 0:
+                        gpu_info = subprocess.check_output('nvidia-smi --query-gpu=name --format=csv,noheader', shell=True, text=True)
+                        is_high_end_gpu = any(x in gpu_info.lower() for x in ['a10', 'a100', 'v100', 'a30', 'a40', 'a6000'])
+                    except:
+                        pass
+                        
+                    # 设置超时时间 - 高端GPU最多等30秒，其他情况最多等90秒
+                    timeout = 30 if is_high_end_gpu else 90
+                    
+                    ffmpeg_start_wait = time.time()
+                    logger.info(f"等待FFmpeg完成最终编码 (最长等待{timeout}秒)...")
+                    
+                    try:
+                        # 使用poll + sleep代替wait，这样可以在等待过程中更新进度
+                        wait_complete = False
+                        progress_points = 20  # 将等待时间分为20个点来显示进度
+                        for i in range(progress_points):
+                            if ffmpeg_process.poll() is not None:
+                                wait_complete = True
+                                break
+                            post_progress.set_description(
+                                f"【第2步/共3步】{post_steps[1]} - {int((i+1)/progress_points*100)}% "
+                                f"[{int(time.time()-ffmpeg_start_wait)}秒]"
+                            )
+                            time.sleep(timeout / progress_points)
+                        
+                        # 如果还没完成，最后等待剩余时间
+                        if not wait_complete:
+                            remaining = timeout - (time.time() - ffmpeg_start_wait)
+                            if remaining > 0:
+                                ffmpeg_process.wait(timeout=remaining)
+                            else:
+                                # 超时，强制终止
+                                raise subprocess.TimeoutExpired(cmd=command, timeout=timeout)
+                            
+                        return_code = ffmpeg_process.poll()
+                        if return_code is None:
+                            # 仍在运行，超时了
+                            raise subprocess.TimeoutExpired(cmd=command, timeout=timeout)
+                        elif return_code != 0:
                             stderr_output = ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
                             logger.error(f"FFmpeg进程异常退出，返回值: {return_code}, 错误信息: {stderr_output}")
                             if self._error.value == 0:
                                 self._error.value = return_code if return_code != 0 else 1
                         else:
                             logger.info("FFmpeg进程成功完成")
-                        
-                        if 'post_progress' in locals():
-                            post_progress.update(1)
-                            post_progress.set_description_str("视频后处理: 执行最终资源清理")
                     except subprocess.TimeoutExpired:
-                        logger.error("等待FFmpeg进程完成超时，强制终止")
-                        ffmpeg_process.kill()
+                        logger.error(f"等待FFmpeg进程完成超时(超过{timeout}秒)，强制终止")
+                        ffmpeg_process.terminate()
+                        try:
+                            ffmpeg_process.wait(timeout=5)
+                        except:
+                            ffmpeg_process.kill()
+                        
                         if self._error.value == 0:
                             self._error.value = 1
-                        
-                        if 'post_progress' in locals():
-                            post_progress.update(1)
+                post_progress.update(1)
             except Exception as e:
-                logger.error(f"关闭FFmpeg进程时出错: {str(e)}")
-                if self._error.value == 0:
-                    self._error.value = 1
+                logger.error(f"等待FFmpeg完成时出错: {str(e)}")
+                post_progress.update(1)
             
-            # 2. 最终资源清理
+            # 3. a最终清理
+            post_progress.set_description(f"【第3步/共3步】{post_steps[2]}")
             try:
                 # 强制执行一次GC，确保释放资源
                 import gc
                 gc.collect()
-                logger.info("执行最终资源清理完成")
-                
-                if 'post_progress' in locals():
-                    post_progress.update(1)
-                    post_progress.set_description_str("视频后处理: 完成")
-                    post_progress.close()
-                
-                # 显示最终结果
-                if self._error.value == 0:
-                    print(f"\n✅ 视频渲染成功! 输出文件: {self.output_path}")
-                else:
-                    print(f"\n❌ 视频渲染失败! 错误码: {self._error.value}")
+                logger.info("最终资源清理完成")
+                post_progress.update(1)
+                time.sleep(0.2)  # 短暂暂停使进度条可见
             except Exception as e:
                 logger.error(f"最终清理时出错: {str(e)}")
+                post_progress.update(1)
+            
+            # 完成后处理
+            post_progress.set_description("视频后处理完成！")
+            
+            # 显示最终结果
+            if self._error.value == 0:
+                print(f"\n✅ 视频渲染成功! 输出文件: {self.output_path}")
+            else:
+                print(f"\n❌ 视频渲染失败! 错误码: {self._error.value}")
+        
+        finally:
+            # 确保关闭进度条
+            try:
+                if 'progress_bar' in locals():
+                    progress_bar.close()
+            except:
+                pass
+                
+            try:
                 if 'post_progress' in locals():
+                    post_progress.close()
+            except:
+                pass
+                
+            # 无论如何都要关闭FFmpeg进程
+            try:
+                if ffmpeg_process and ffmpeg_process.poll() is None:
+                    logger.info("确保FFmpeg进程完全关闭...")
                     try:
-                        post_progress.close()
+                        ffmpeg_process.stdin.close()
                     except:
                         pass
+                        
+                    ffmpeg_process.terminate()
+                    try:
+                        ffmpeg_process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        ffmpeg_process.kill()
+                        logger.warning("强制终止FFmpeg进程")
+            except Exception as e:
+                logger.error(f"关闭FFmpeg进程时出错: {str(e)}")
+                if self._error.value == 0:
+                    self._error.value = 1
             
             # 设置完成事件
             self._event_complete.set()
@@ -861,17 +930,42 @@ class VideoRenderer:
                     logger.info("检测到NVIDIA GPU，使用硬件加速编码(h264_nvenc)")
                     codec = 'h264_nvenc'
                     
+                    # 检测是否为高端GPU (如A10, A100等)
+                    high_end_gpu = False
+                    try:
+                        gpu_info = subprocess.check_output('nvidia-smi --query-gpu=name --format=csv,noheader', shell=True, text=True)
+                        high_end_gpu = any(x in gpu_info.lower() for x in ['a10', 'a100', 'v100', 'a30', 'a40', 'a6000', 'rtx'])
+                        if high_end_gpu:
+                            logger.info(f"检测到高端NVIDIA GPU: {gpu_info.strip()}")
+                    except:
+                        pass
+                    
                     # 根据操作系统调整NVIDIA加速参数
                     if system == 'Linux':
                         # 在Linux上使用更简单的硬件加速参数
                         hwaccel = 'cuda'
-                        # 移除hwaccel_output_format，避免Linux上的兼容性问题
-                        extra_params.extend([
-                            '-preset', 'p1',       # 最快速模式
-                            '-b:v', '5M',          # 比特率
-                            '-maxrate', '10M',     # 最大比特率
-                            '-g', '60',            # 关键帧间隔
-                        ])
+                        
+                        if high_end_gpu:
+                            # 高端GPU使用优化参数
+                            extra_params.extend([
+                                '-init_hw_device', 'cuda=0',  # 显式指定CUDA设备
+                                '-preset', 'p1',              # 最快速模式
+                                '-rc', 'vbr',                 # 可变比特率模式
+                                '-b:v', '8M',                 # 较高比特率
+                                '-maxrate', '16M',            # 较高最大比特率
+                                '-bufsize', '16M',            # 更大缓冲区
+                                '-g', '90',                   # GOP大小
+                                '-spatial-aq', '1',           # 空间自适应量化
+                                '-temporal-aq', '1',          # 时间自适应量化
+                            ])
+                        else:
+                            # 普通GPU使用基本参数
+                            extra_params.extend([
+                                '-preset', 'p1',       # 最快速模式
+                                '-b:v', '5M',          # 比特率
+                                '-maxrate', '10M',     # 最大比特率
+                                '-g', '60',            # 关键帧间隔
+                            ])
                     else:
                         # Windows或macOS上使用完整硬件加速
                         hwaccel = 'cuda'
