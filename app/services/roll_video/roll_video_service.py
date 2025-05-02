@@ -288,9 +288,11 @@ class RollVideoService:
         logger.info(f"文本图片已生成，尺寸: {text_img.size}, 文本高度: {text_height}")
 
         # --- 计算滚动结束帧 --- 
-        # 在调用 calculate_total_frames 之前计算，因为需要传递给 frame_generator
-        scroll_frames_needed = int(np.ceil(text_height / scaled_scroll_speed))
-        logger.info(f"计算得到文本滚出所需帧数: {scroll_frames_needed}")
+        # 由于起始位置调整为 -target_height，需要计算文本完全滚出屏幕的帧数
+        # 总滚动距离 = 文本高度 + 屏幕高度 (文本从屏幕底部完全进入到屏幕顶部完全离开)
+        total_scroll_distance = text_height + scaled_height
+        scroll_frames_needed = int(np.ceil(total_scroll_distance / scaled_scroll_speed))
+        logger.info(f"计算得到文本滚出所需帧数: {scroll_frames_needed} (总滚动距离={total_scroll_distance}px)")
         # ---------------------
 
         # 初始化 VideoRenderer
@@ -403,7 +405,7 @@ class RollVideoService:
             """生成指定索引的视频帧"""
             nonlocal frame_cache
             
-            # --- 添加判断：滚动结束后直接返回背景帧 ---
+            # --- 滚动结束后直接返回背景帧（确保不再滚动）---
             if frame_index >= scroll_frames_needed:
                 logger.debug(f"帧 {frame_index}: 滚动已结束 (>{scroll_frames_needed})，生成静态背景帧")
                 frame_data = background_frame.copy()
@@ -416,9 +418,11 @@ class RollVideoService:
             if video_renderer.use_frame_cache and frame_index in frame_cache:
                 return frame_cache[frame_index]
             
-            # --- 滚动阶段计算逻辑 (不变) --- 
-            # 计算当前帧文本图像的起始y坐标 (从顶部向下滚动源图像)
-            y_start = frame_index * scroll_speed
+            # --- 滚动阶段计算逻辑（修改起始位置）--- 
+            # 计算当前帧文本图像的起始y坐标
+            # 修改：设置初始位置为负值，使文本从第一帧就显示顶部内容
+            y_start = frame_index * scroll_speed - target_height
+            # 注意：这里减去target_height是为了让文本一开始就完全进入视野
             
             # 计算需要从文本图像中截取的区域的结束y坐标
             y_end = y_start + target_height
