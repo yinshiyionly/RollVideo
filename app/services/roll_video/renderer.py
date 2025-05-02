@@ -712,18 +712,44 @@ class VideoRenderer:
                                 consecutive_errors += 1
                                 
                                 if consecutive_errors < max_consecutive_errors:
+                                    # 睡眠一小段时间，给系统一些时间恢复
+                                    time.sleep(0.2)
+                                    
                                     # 尝试重启FFmpeg进程
                                     try:
                                         logger.info("检测到管道中断，尝试重启FFmpeg进程...")
-                                        # 关闭旧进程
-                                        try:
-                                            if ffmpeg_process and ffmpeg_process.poll() is None:
-                                                ffmpeg_process.stdin.close()
-                                                ffmpeg_process.kill()
-                                                ffmpeg_process.wait(timeout=1)
-                                        except:
-                                            pass
+                                        
+                                        # 关闭旧进程（安全方式）
+                                        if ffmpeg_process:
+                                            # 安全关闭标准输入
+                                            try:
+                                                if not ffmpeg_process.stdin.closed:
+                                                    ffmpeg_process.stdin.close()
+                                            except:
+                                                pass
+                                                
+                                            # 尝试终止进程
+                                            try:
+                                                if ffmpeg_process.poll() is None:
+                                                    ffmpeg_process.terminate()
+                                                    ffmpeg_process.wait(timeout=1)
+                                            except:
+                                                pass
                                             
+                                            # 如果进程还在运行，强制终止
+                                            try:
+                                                if ffmpeg_process.poll() is None:
+                                                    ffmpeg_process.kill()
+                                                    ffmpeg_process.wait(timeout=1)
+                                            except:
+                                                pass
+                                        
+                                        # 等待系统释放资源
+                                        time.sleep(0.5)
+                                        
+                                        # 重新生成FFmpeg命令，确保每次使用最新配置
+                                        command = self._prepare_ffmpeg_command()
+                                                
                                         # 创建新的进程
                                         ffmpeg_process = subprocess.Popen(
                                             command,
@@ -733,17 +759,69 @@ class VideoRenderer:
                                             bufsize=10 * 1024 * 1024
                                         )
                                         logger.info("FFmpeg进程已重启")
+                                        
+                                        # 跳出当前帧的处理，从下一帧开始重试
+                                        break
                                     except Exception as e:
                                         logger.error(f"重启FFmpeg进程失败: {str(e)}")
                                         self._error.value = 1
                                         self._event_stop.set()
                                         break
                                 else:
-                                    # 连续错误过多，放弃
-                                    logger.error(f"连续{max_consecutive_errors}次重启FFmpeg失败，放弃处理")
-                                    self._error.value = 1
-                                    self._event_stop.set()
-                                    break
+                                    # 连续错误过多，切换到简单模式进行一次最终尝试
+                                    try:
+                                        logger.warning(f"连续{max_consecutive_errors}次重启FFmpeg失败，尝试简单模式...")
+                                        
+                                        # 关闭所有现有进程
+                                        if ffmpeg_process:
+                                            try:
+                                                if not ffmpeg_process.stdin.closed:
+                                                    ffmpeg_process.stdin.close()
+                                                if ffmpeg_process.poll() is None:
+                                                    ffmpeg_process.terminate()
+                                                    time.sleep(0.5)
+                                                    if ffmpeg_process.poll() is None:
+                                                        ffmpeg_process.kill()
+                                            except:
+                                                pass
+                                        
+                                        # 等待系统资源释放
+                                        time.sleep(1.0)
+                                        
+                                        # 构建最简单的命令
+                                        simple_command = [
+                                            'ffmpeg', '-y',
+                                            '-f', 'rawvideo',
+                                            '-vcodec', 'rawvideo',
+                                            '-s', f'{self.width}x{self.height}',
+                                            '-pix_fmt', 'rgb24',
+                                            '-r', str(self.fps),
+                                            '-i', 'pipe:',
+                                            '-c:v', 'libx264',
+                                            '-preset', 'ultrafast',
+                                            '-crf', '30',
+                                            '-y',
+                                            self.output_path
+                                        ]
+                                        
+                                        logger.info(f"尝试最简单的命令: {' '.join(simple_command)}")
+                                        
+                                        ffmpeg_process = subprocess.Popen(
+                                            simple_command,
+                                            stdin=subprocess.PIPE,
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.PIPE,
+                                            bufsize=10 * 1024 * 1024
+                                        )
+                                        logger.info("已启动最简单的FFmpeg进程进行最后尝试")
+                                        
+                                        # 继续处理
+                                        consecutive_errors = 0
+                                    except Exception as e:
+                                        logger.error(f"最终FFmpeg启动尝试也失败: {str(e)}")
+                                        self._error.value = 1
+                                        self._event_stop.set()
+                                        break
                             except Exception as e:
                                 # 其他写入错误
                                 logger.error(f"写入帧{idx}时出错: {str(e)}")
@@ -959,241 +1037,20 @@ class VideoRenderer:
             self._event_complete.set()
 
     def _prepare_ffmpeg_command(self):
-        """准备FFmpeg命令行，针对GPU/CPU选择最佳编码策略"""
+        """准备FFmpeg命令行，尽量简化以避免参数冲突"""
         
-        # 关闭强制软件编码，改用GPU优先策略
-        force_software_encoding = False
-        
-        # 确定视频编码器和硬件加速选项
-        codec = None
-        hwaccel = None
-        extra_params = []
-        
-        # 获取文件扩展名，为临时文件设置正确的格式
+        # 获取文件扩展名
         output_ext = os.path.splitext(self.output_path)[1].lower()
         if not output_ext or output_ext == '.tmp':
-            # 根据透明度选择合适的容器格式
-            if self.transparent:
-                output_ext = '.mov'  # 透明视频使用MOV容器
-            else:
-                output_ext = '.mp4'  # 不透明视频使用MP4容器
+            output_ext = '.mp4' if not self.transparent else '.mov'
             
-        # 检测系统类型
-        system = platform.system()
-        
-        # 根据透明度选择不同的编码策略
-        if self.transparent:
-            # 透明视频 - 使用ProRes编码器和MOV容器
-            logger.info("透明视频使用ProRes 4444编码 (CPU)")
-            codec = 'prores_ks'
-            extra_params.extend([
-                '-profile:v', '4444',      # ProRes 4444支持Alpha通道
-                '-vendor', 'ap10',         # Apple标识
-                '-pix_fmt', 'yuva444p10le' # 支持Alpha通道的10位像素格式
-            ])
-            # 确保扩展名是.mov
-            if not output_ext.endswith('.mov'):
-                output_ext = '.mov'
-        else:
-            # 不透明视频 - 尝试使用GPU加速，失败时回退到CPU，追求极致速度
-            try:
-                # 首先尝试使用NVIDIA GPU
-                if self._is_nvidia_available():
-                    logger.info("检测到NVIDIA GPU，使用硬件加速编码(h264_nvenc)")
-                    codec = 'h264_nvenc'
-                    
-                    # 检测是否为高端GPU (如A10, A100等)
-                    high_end_gpu = False
-                    try:
-                        gpu_info = subprocess.check_output('nvidia-smi --query-gpu=name --format=csv,noheader', shell=True, text=True)
-                        high_end_gpu = any(x in gpu_info.lower() for x in ['a10', 'a100', 'v100', 'a30', 'a40', 'a6000', 'rtx'])
-                        if high_end_gpu:
-                            logger.info(f"检测到高端NVIDIA GPU: {gpu_info.strip()}")
-                    except:
-                        pass
-                    
-                    # 根据操作系统调整NVIDIA加速参数
-                    if system == 'Linux':
-                        # 在Linux上使用更简单的硬件加速参数
-                        hwaccel = 'cuda'
-                        
-                        if high_end_gpu:
-                            # 高端GPU使用优化参数 - 不再重复指定init_hw_device
-                            extra_params.extend([
-                                '-preset', 'p1',              # 最快速模式
-                                '-rc', 'vbr',                 # 可变比特率模式
-                                '-b:v', '8M',                 # 较高比特率
-                                '-maxrate', '16M',            # 较高最大比特率
-                                '-bufsize', '16M',            # 更大缓冲区
-                                '-g', '90',                   # GOP大小
-                                '-spatial-aq', '1',           # 空间自适应量化
-                                '-temporal-aq', '1',          # 时间自适应量化
-                            ])
-                        else:
-                            # 普通GPU使用基本参数
-                            extra_params.extend([
-                                '-preset', 'p1',       # 最快速模式
-                                '-b:v', '5M',          # 比特率
-                                '-maxrate', '10M',     # 最大比特率
-                                '-g', '30',            # 关键帧间隔 (修改为 30)
-                            ])
-                    else:
-                        # Windows或macOS上使用完整硬件加速
-                        hwaccel = 'cuda'
-                        # 只在非Linux系统上使用hwaccel_output_format
-                        if system in ['Windows']:
-                            extra_params.extend([
-                                '-hwaccel_output_format', 'cuda',
-                                '-preset', 'p1',          # 最快速模式
-                                '-tune', 'fastdecode',    # 快速解码
-                                '-qp', '30',              # 质量参数
-                                '-b:v', '5M',             # 比特率
-                                '-g', '30',               # 关键帧间隔 (修改为 30)
-                            ])
-                        else:
-                            # macOS或其他系统
-                            extra_params.extend([
-                                '-preset', 'p1',          # 最快速模式
-                                '-qp', '30',              # 质量参数
-                                '-b:v', '5M',             # 比特率
-                                '-g', '30',               # 关键帧间隔 (修改为 30)
-                            ])
-                # 然后检查AMD GPU
-                elif self._is_amd_available():
-                    logger.info("检测到AMD GPU，使用硬件加速编码(h264_amf)")
-                    codec = 'h264_amf'
-                    hwaccel = 'amf'
-                    extra_params.extend([
-                        '-quality', 'speed',       # 速度优先
-                        '-rc', 'cqp',              # 恒定质量模式
-                        '-qp', '30'                # 质量参数(较低质量但超快)
-                    ])
-                # 最后检查Intel GPU
-                elif self._is_intel_available() and self._test_qsv_support():
-                    logger.info("检测到Intel GPU，使用硬件加速编码(h264_qsv)")
-                    codec = 'h264_qsv'
-                    hwaccel = 'qsv'
-                    extra_params.extend([
-                        '-preset', 'veryfast',     # 速度优先预设
-                        '-global_quality', '30'    # 质量水平(较低质量但超快)
-                    ])
-                else:
-                    # 没有检测到支持的GPU或GPU检测失败，使用CPU编码
-                    raise Exception("未检测到支持的GPU或GPU检测失败")
-            except Exception as e:
-                # 任何GPU相关错误都回退到CPU超快速编码
-                logger.warning(f"GPU编码不可用({str(e)})，回退到CPU极速编码(libx264)")
-                codec = 'libx264'
-                hwaccel = None
-                # 追求极致速度的CPU参数
-                extra_params.extend([
-                    '-preset', 'ultrafast',  # 极速编码
-                    '-tune', 'fastdecode',   # 快速解码
-                    '-crf', '30',            # 较低质量但更快
-                    '-x264opts', 'no-deblock:no-cabac:no-scenecut', # 禁用耗时选项
-                    '-level', '4.0',         # 兼容性级别
-                    '-g', '30',              # 关键帧间隔 (修改为 30)
-                ])
-        
-        # 如果没有选择编码器，使用libx264作为最终回退
-        if not codec:
-            logger.warning("未能选择合适的编码器，使用libx264极速配置")
-            codec = 'libx264'
-            extra_params.extend(['-preset', 'ultrafast', '-crf', '30', '-g', '30']) # 添加 -g 30
-            
-        # 准备基本FFmpeg命令
-        command = [
-            'ffmpeg',
-            '-y',  # 覆盖输出文件
-            '-f', 'rawvideo',
-            '-vcodec', 'rawvideo',
-            '-s', f'{self.width}x{self.height}',  # 视频尺寸
-            '-pix_fmt', 'rgba' if self.transparent else 'rgb24',  # 选择合适的像素格式
-            '-r', str(self.fps),  # 输入帧率
-            '-i', 'pipe:',  # 从管道读取输入
-        ]
-        
-        # 添加音频输入 (如果需要)
-        if self.with_audio and self.audio_path and os.path.exists(self.audio_path):
-            command.extend([
-                '-i', self.audio_path  # 加载音频文件
-            ])
-        
-        # 添加硬件加速，但不重复使用init_hw_device，避免冲突
-        if hwaccel:
-            command.extend(['-hwaccel', hwaccel])
-            
-            # 如果使用CUDA并且是Linux系统，只添加一次init_hw_device
-            if hwaccel == 'cuda' and system == 'Linux' and high_end_gpu:
-                # 检查extra_params中是否已经有init_hw_device
-                has_init_hw_device = any('init_hw_device' in param for param in extra_params)
-                if not has_init_hw_device:
-                    command.extend(['-init_hw_device', 'cuda=0'])
-        
-        # 添加视频编码器
-        command.extend(['-c:v', codec])
-        
-        # 添加额外参数
-        # 过滤可能导致冲突的参数
-        filtered_params = []
-        skip_next = False
-        for i, param in enumerate(extra_params):
-            if skip_next:
-                skip_next = False
-                continue
-            # 跳过init_hw_device参数，避免重复
-            if param == '-init_hw_device':
-                skip_next = True
-                continue
-            filtered_params.append(param)
-        command.extend(filtered_params)
-        
-        # 确保输出像素格式兼容
-        if not self.transparent:
-            # 检查是否已经有pix_fmt参数
-            has_pix_fmt = any(param == '-pix_fmt' for param in command)
-            if not has_pix_fmt:
-                command.extend(['-pix_fmt', 'yuv420p'])  # H.264/AVC需要
-        
-        # 添加音频相关参数
-        if self.with_audio and self.audio_path and os.path.exists(self.audio_path):
-            command.extend([
-                '-c:a', 'aac',            # 音频编码器
-                '-b:a', '192k',           # 音频比特率
-                '-shortest',              # 使用最短输入的长度
-                '-map', '0:v',            # 从第一个输入获取视频
-                '-map', '1:a'             # 从第二个输入获取音频
-            ])
-        
-        # 添加MP4优化选项
-        if output_ext == '.mp4':
-            # 检查是否已经有movflags参数
-            has_movflags = any(param == '-movflags' for param in command)
-            if not has_movflags:
-                command.extend(['-movflags', '+faststart'])  # 优化MP4文件结构
-        
-        # 添加显式帧数量限制，避免循环
-        if hasattr(self, 'total_frames') and self.total_frames:
-            # 检查是否已经有frames:v参数
-            has_frames = any(param == '-frames:v' for param in command)
-            if not has_frames:
-                command.extend([
-                    '-frames:v', str(self.total_frames),  # 限制帧数
-                    '-t', str(self.total_frames / self.fps)  # 明确设置时长
-                ])
-                logger.info(f"设置明确的帧数限制: {self.total_frames} 帧, 时长: {self.total_frames / self.fps:.2f}s")
-        
-        # 确保输出文件有正确的扩展名
+        # 确保输出路径具有正确的扩展名
         output_path = self.output_path
         if output_path.endswith('.tmp') or os.path.splitext(output_path)[1] != output_ext:
-            # 修改临时文件扩展名为正确的视频格式
             output_path = os.path.splitext(output_path)[0] + output_ext
             logger.info(f"修正文件扩展名: {self.output_path} -> {output_path}")
             self.output_path = output_path
             
-        # 添加输出文件路径
-        command.append(output_path)
-        
         # 确保输出目录存在
         output_dir = os.path.dirname(output_path)
         if output_dir and not os.path.exists(output_dir):
@@ -1203,7 +1060,47 @@ class VideoRenderer:
             except Exception as e:
                 logger.error(f"创建输出目录失败: {str(e)}")
         
-        logger.info(f"FFmpeg极速命令: {' '.join(command)}")
+        # 极简化的命令，避免任何复杂参数和硬件加速
+        command = [
+            'ffmpeg',
+            '-y',                              # 覆盖输出文件
+            '-f', 'rawvideo',                  # 输入格式
+            '-vcodec', 'rawvideo',             # 输入编解码器
+            '-s', f'{self.width}x{self.height}', # 视频尺寸
+            '-pix_fmt', 'rgba' if self.transparent else 'rgb24', # 像素格式
+            '-r', str(self.fps),               # 帧率
+            '-i', 'pipe:',                     # 从管道读取
+        ]
+        
+        # 设置帧数限制
+        if hasattr(self, 'total_frames') and self.total_frames > 0:
+            command.extend([
+                '-frames:v', str(self.total_frames),  # 明确帧数
+                '-t', str(self.total_frames / self.fps)  # 明确时长
+            ])
+        
+        # 根据透明度选择不同的编码配置
+        if self.transparent:
+            # 透明视频使用 ProRes
+            command.extend([
+                '-c:v', 'prores_ks',
+                '-profile:v', '4444',
+                '-pix_fmt', 'yuva444p10le'
+            ])
+        else:
+            # 非透明视频使用 libx264 - 使用CPU编码，更加稳定
+            command.extend([
+                '-c:v', 'libx264',
+                '-preset', 'ultrafast',
+                '-crf', '23',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart'
+            ])
+        
+        # 添加输出文件路径
+        command.append(output_path)
+        
+        logger.info(f"简化的FFmpeg命令: {' '.join(command)}")
         return command
 
     def _is_nvidia_available(self):
