@@ -324,6 +324,8 @@ class RollVideoService:
         render_width = video_renderer.width
         render_height = video_renderer.height
         should_be_transparent = video_renderer.transparent
+        total_frames = video_renderer.total_frames
+        fps = video_renderer.fps
         
         # 获取背景色，防止透明视频的背景也是透明的
         if hasattr(img, 'info') and 'background' in img.info:
@@ -332,8 +334,22 @@ class RollVideoService:
             # 默认白色背景
             bg_color = (255, 255, 255)
         
-        # 计算最大滚动距离 - 确保文字完全滚出屏幕
-        max_scroll_distance = img.height + render_height
+        # 计算三个阶段的帧数
+        # 阶段1：文字滚动阶段 - 计算滚动所需的帧数
+        scroll_frames = (img.height + render_height) // scroll_speed
+        if (img.height + render_height) % scroll_speed != 0:
+            scroll_frames += 1
+            
+        # 阶段3：定格结束阶段 - 3秒的定格时间
+        ending_frames = fps * 3  # 3秒 * fps
+        
+        # 如果计算的总帧数超过了预设的总帧数，调整各阶段帧数
+        if scroll_frames + ending_frames > total_frames:
+            if ending_frames > total_frames // 3:
+                ending_frames = total_frames // 3  # 最多占1/3的帧数
+            scroll_frames = total_frames - ending_frames
+        
+        logger.info(f"阶段1(滚动): {scroll_frames}帧, 阶段3(定格): {ending_frames}帧, 总帧数: {total_frames}")
         
         # 返回帧生成函数
         def frame_generator(frame_index):
@@ -344,53 +360,56 @@ class RollVideoService:
                 else:
                     frame = Image.new("RGB", (render_width, render_height), bg_color)
                 
-                # 计算当前滚动距离
-                current_scroll = frame_index * scroll_speed
-                
-                # 防止超过最大滚动距离（避免重复滚动）
-                if current_scroll > max_scroll_distance:
-                    current_scroll = max_scroll_distance
-                
-                # 计算文本在这一帧的Y坐标
-                text_y = 0 - current_scroll
-                
-                # 记录日志用于调试(每100帧记录一次)
-                if frame_index % 100 == 0 or frame_index < 10:
-                    logger.info(f"Frame {frame_index}: text_y={text_y}, current_scroll={current_scroll}, max_distance={max_scroll_distance}")
-                
-                # --- Cropping and Pasting Logic --- 
-                # 确定需要从源文本图像 (img) 上裁剪的 Y 范围
-                src_y_start = max(0, -text_y) # 源图像裁剪起始 Y
-                src_y_end = min(img.height, render_height - text_y) # 源图像裁剪结束 Y
-                
-                # 计算实际裁剪高度
-                crop_height = src_y_end - src_y_start
+                # 确定当前帧属于哪个阶段
+                if frame_index < scroll_frames:
+                    # 阶段1：文字滚动阶段
+                    # 计算当前滚动距离
+                    current_scroll = frame_index * scroll_speed
+                    
+                    # 计算文本Y坐标
+                    text_y = 0 - current_scroll
+                    
+                    # 记录日志
+                    if frame_index % 100 == 0 or frame_index < 10:
+                        logger.info(f"阶段1-滚动: 帧{frame_index}/{scroll_frames}, 位置={text_y}")
+                    
+                    # 裁剪并粘贴文本
+                    # 确定需要从源文本图像 (img) 上裁剪的 Y 范围
+                    src_y_start = max(0, -text_y) # 源图像裁剪起始 Y
+                    src_y_end = min(img.height, render_height - text_y) # 源图像裁剪结束 Y
+                    
+                    # 计算实际裁剪高度
+                    crop_height = src_y_end - src_y_start
 
-                # 确定在目标帧 (frame) 上粘贴的起始 Y 坐标
-                paste_y = max(0, text_y) # 目标帧粘贴起始 Y
+                    # 确定在目标帧 (frame) 上粘贴的起始 Y 坐标
+                    paste_y = max(0, text_y) # 目标帧粘贴起始 Y
 
-                # 只有当实际裁剪高度大于0时才进行裁剪和粘贴
-                if crop_height > 0:
-                    try:
-                        # 从源图像裁剪
-                        visible_crop = img.crop((
-                            0,             # left
-                            src_y_start,   # top
-                            render_width,  # right
-                            src_y_end      # bottom
-                        ))
-                        
-                        # 粘贴到目标帧的正确位置
-                        # 如果源图像是 RGBA，使用其 alpha 通道作为 mask
-                        mask = visible_crop if visible_crop.mode == 'RGBA' else None
-                        frame.paste(visible_crop, (0, paste_y), mask=mask)
-                        
-                        # 显式删除裁剪对象释放内存
-                        del visible_crop
-                        
-                    except Exception as e:
-                        logger.error(f"裁剪或粘贴帧 {frame_index} 时出错: {e}, text_y={text_y}, src_y=({src_y_start},{src_y_end}), paste_y={paste_y}", exc_info=True)
-
+                    # 只有当实际裁剪高度大于0时才进行裁剪和粘贴
+                    if crop_height > 0:
+                        try:
+                            # 从源图像裁剪
+                            visible_crop = img.crop((
+                                0,             # left
+                                src_y_start,   # top
+                                render_width,  # right
+                                src_y_end      # bottom
+                            ))
+                            
+                            # 粘贴到目标帧的正确位置
+                            # 如果源图像是 RGBA，使用其 alpha 通道作为 mask
+                            mask = visible_crop if visible_crop.mode == 'RGBA' else None
+                            frame.paste(visible_crop, (0, paste_y), mask=mask)
+                            
+                            # 显式删除裁剪对象释放内存
+                            del visible_crop
+                            
+                        except Exception as e:
+                            logger.error(f"裁剪或粘贴帧 {frame_index} 时出错: {e}")
+                else:
+                    # 阶段3：定格结束阶段 - 只显示背景图，不需要其他操作
+                    if frame_index % 100 == 0:
+                        logger.info(f"阶段3-定格: 帧{frame_index-scroll_frames}/{ending_frames}")
+                
                 # 转换为字节流
                 buffer = io.BytesIO()
                 if should_be_transparent:
