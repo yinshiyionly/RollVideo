@@ -6,7 +6,7 @@ from PIL import Image, ImageFont
 import io
 import numpy as np
 
-from renderer import TextRenderer, VideoRenderer
+from renderer import TextRenderer, VideoRenderer, blend_alpha_fast
 
 # 配置日志
 logger = logging.getLogger(__name__)
