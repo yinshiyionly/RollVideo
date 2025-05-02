@@ -39,20 +39,24 @@ logger = logging.getLogger(__name__)
 
 # 设置NumPy以使用多线程加速计算
 try:
-    # 尝试设置NumPy使用更多线程以提高性能
+    # 针对性能优化的环境变量
     if 'OMP_NUM_THREADS' not in os.environ:
-        os.environ['OMP_NUM_THREADS'] = '8'  # 增加OpenMP线程数到8
+        os.environ['OMP_NUM_THREADS'] = '8'  # 使用全部8核心
     if 'MKL_NUM_THREADS' not in os.environ:
-        os.environ['MKL_NUM_THREADS'] = '8'  # 增加MKL线程数到8
+        os.environ['MKL_NUM_THREADS'] = '8'  # 使用全部8核心
     if 'NUMEXPR_NUM_THREADS' not in os.environ:
-        os.environ['NUMEXPR_NUM_THREADS'] = '8'  # 设置numexpr线程数
+        os.environ['NUMEXPR_NUM_THREADS'] = '8'  # 使用全部8核心
     if 'OPENBLAS_NUM_THREADS' not in os.environ:
-        os.environ['OPENBLAS_NUM_THREADS'] = '8'  # 设置OpenBLAS线程数
+        os.environ['OPENBLAS_NUM_THREADS'] = '8'  # 使用全部8核心
     
-    # 尝试优化NumPy性能
+    # 高级线程优化 - 如果系统支持则启用
     try:
-        np.seterr(all='ignore')  # 忽略NumPy警告，提高性能
-        # 对于某些情况，将NumPy设置为最高性能模式
+        os.environ['OMP_WAIT_POLICY'] = 'ACTIVE'  # 主动等待，减少线程唤醒延迟
+        os.environ['OMP_PROC_BIND'] = 'spread'    # 优化线程绑定
+        os.environ['OMP_SCHEDULE'] = 'dynamic,16' # 动态调度，减少线程不平衡
+        
+        # 尝试开启NumPy高级优化
+        np.seterr(all='ignore')                   # 忽略NumPy警告提高性能
         np.set_printoptions(precision=3, suppress=True)
     except:
         pass
@@ -209,25 +213,35 @@ def _process_frame(args):
         source_section = _g_img_array[img_h_slice, img_w_slice]
         target_area = frame[frame_h_slice, frame_w_slice]
         
+        # 数据局部性优化 - 确保数据连续布局，加速内存访问
+        source_section = np.ascontiguousarray(source_section)
+        
         if is_transparent:
             # 透明背景 - 直接整块复制，避免逐像素操作
             if target_area.shape[:2] == source_section.shape[:2]:
-                target_area[:] = source_section  # 使用切片赋值，效率更高
+                # 使用内存层面的快速复制
+                np.copyto(target_area, source_section)
             else:
                 # 处理大小不匹配的情况
                 copy_height = min(target_area.shape[0], source_section.shape[0])
                 copy_width = min(target_area.shape[1], source_section.shape[1])
                 if copy_height > 0 and copy_width > 0:
-                    target_area[:copy_height, :copy_width] = source_section[:copy_height, :copy_width]
+                    # 使用预先计算的切片提高性能
+                    src_view = source_section[:copy_height, :copy_width]
+                    dst_view = target_area[:copy_height, :copy_width]
+                    np.copyto(dst_view, src_view)
         else:
             # 不透明背景 - 使用向量化的alpha混合
             if target_area.shape[:2] == source_section.shape[:2]:
-                # 向量化操作，避免循环
+                # 向量化操作，一次计算所有像素
                 alpha = source_section[:, :, 3:4].astype(np.float32) / 255.0
                 alpha_inv = 1.0 - alpha
-                # 同时处理所有像素的向量化运算
-                blend = (source_section[:, :, :3] * alpha + target_area * alpha_inv).astype(np.uint8)
-                target_area[:] = blend
+                # 预分配输出数组，减少临时内存分配
+                blended = np.empty_like(target_area)
+                # 内联计算提高性能
+                np.multiply(source_section[:, :, :3], alpha, out=blended)
+                np.add(blended, target_area * alpha_inv, out=blended, casting='unsafe')
+                np.copyto(target_area, blended.astype(np.uint8))
             else:
                 # 处理大小不匹配的情况
                 copy_height = min(target_area.shape[0], source_section.shape[0])
@@ -235,16 +249,22 @@ def _process_frame(args):
                 if copy_height > 0 and copy_width > 0:
                     src_crop = source_section[:copy_height, :copy_width]
                     dst_crop = target_area[:copy_height, :copy_width]
-                    # 向量化操作，避免循环
+                    # 使用连续数组提高性能
+                    src_crop = np.ascontiguousarray(src_crop)
+                    dst_crop = np.ascontiguousarray(dst_crop)
                     alpha = src_crop[:, :, 3:4].astype(np.float32) / 255.0
                     alpha_inv = 1.0 - alpha
-                    # 同时处理所有像素的向量化运算
-                    blend = (src_crop[:, :, :3] * alpha + dst_crop * alpha_inv).astype(np.uint8)
-                    target_area[:copy_height, :copy_width] = blend
+                    # 预分配输出数组，减少临时内存分配
+                    blended = np.empty_like(dst_crop)
+                    # 内联计算提高性能
+                    np.multiply(src_crop[:, :, :3], alpha, out=blended)
+                    np.add(blended, dst_crop * alpha_inv, out=blended, casting='unsafe')
+                    np.copyto(target_area[:copy_height, :copy_width], blended.astype(np.uint8))
     except Exception as e:
         logger.error(f"处理帧 {frame_idx} 时出错: {e}")
     
-    return frame_idx, frame
+    # 确保返回连续内存布局
+    return frame_idx, np.ascontiguousarray(frame)
 
 # 添加JIT编译支持（如果可用）
 try:
@@ -529,8 +549,11 @@ class VideoRenderer:
         """构造基础的ffmpeg命令"""
         command = [
             "ffmpeg", "-y",
-            # 移除可能不兼容的内存参数
-            # "-max_muxing_queue_size", "1024", # 减少缓冲区大小
+            # I/O优化参数
+            "-probesize", "10M",       # 增加探测缓冲区大小
+            "-analyzeduration", "10M", # 增加分析时间
+            "-thread_queue_size", "1024", # 增加线程队列大小
+            # 输入格式参数
             "-f", "rawvideo",
             "-vcodec", "rawvideo",
             "-s", f"{self.width}x{self.height}",
@@ -711,14 +734,22 @@ class VideoRenderer:
                 # 根据图像尺寸调整批处理大小，确保不会占用过多内存
                 # 假设单帧RGBA图像内存 = 宽*高*4字节
                 frame_memory_mb = (self.width * self.height * 4) / (1024*1024)
-                # 设置最大内存使用量（提高到20GB以支持超大批处理）
-                max_batch_memory_mb = 20 * 1024  # 20GB
-                # 计算适合的批处理大小
-                adaptive_batch_size = max(1, min(120, int(max_batch_memory_mb / frame_memory_mb)))
-                logger.info(f"单帧内存估算: {frame_memory_mb:.2f}MB, 自适应批处理大小: {adaptive_batch_size}")
+                # 设置最大内存使用量（受限于30GB系统内存上限）
+                max_batch_memory_mb = 25 * 1024  # 25GB，保留5GB系统内存空间
+                # 计算适合的批处理大小，同时平衡I/O和CPU处理能力
+                adaptive_batch_size = max(1, min(100, int(max_batch_memory_mb / frame_memory_mb)))
+                # 根据分辨率优化批处理大小
+                if self.width * self.height > 2073600: # 大于1080p
+                    optimal_batch_size = min(adaptive_batch_size, 60)  # 高分辨率限制批大小
+                elif self.width * self.height < 921600: # 小于720p
+                    optimal_batch_size = min(adaptive_batch_size, 150) # 低分辨率允许更大批处理
+                else:
+                    optimal_batch_size = min(adaptive_batch_size, 90)  # 默认平衡点
                 
-                # 使用自适应批处理大小
-                batch_size = adaptive_batch_size
+                logger.info(f"单帧内存估算: {frame_memory_mb:.2f}MB, 优化批处理大小: {optimal_batch_size}")
+                
+                # 使用优化的批处理大小
+                batch_size = optimal_batch_size
                 num_batches = (total_frames + batch_size - 1) // batch_size
                 
                 # 决定使用多少个进程进行渲染
@@ -727,18 +758,47 @@ class VideoRenderer:
                     # 使用可用CPU核心数，但限制在8核以内
                     num_processes = min(8, max(1, cpu_count - 1))  # 限制最多使用8核，留出一个核心给系统和主进程
                     
-                    # 如果检测到当前批处理量较大，减少进程数量以提高每个进程的负载和利用率
-                    if adaptive_batch_size >= 60 and num_processes > 4:
-                        # 对于大批处理，可以使用更少的进程，每个进程处理更多帧
-                        balanced_processes = max(4, min(6, num_processes))
-                        logger.info(f"检测到大批处理模式({adaptive_batch_size}帧/批)，优化进程数: {num_processes} -> {balanced_processes}")
-                        num_processes = balanced_processes
+                    # 分析系统负载状态，优化进程数
+                    cpu_usage_factor = 1.0
+                    try:
+                        import psutil
+                        # 获取当前系统CPU使用率
+                        current_cpu_usage = psutil.cpu_percent(interval=0.1)
+                        if current_cpu_usage > 70:
+                            # 如果系统已经很忙，稍微减少进程数
+                            cpu_usage_factor = 0.75
+                        elif current_cpu_usage < 30:
+                            # 如果系统很空闲，稍微增加进程数
+                            cpu_usage_factor = 1.25
+                    except ImportError:
+                        # 无法进行系统监控，使用固定优化策略
+                        logger.info("psutil未安装，使用静态优化策略")
+                        # 高度优化策略 - 根据批处理大小选择合适的进程数
+                        if batch_size <= 60:
+                            cpu_usage_factor = 1.0  # 小批处理使用全部核心
+                        elif batch_size <= 90:
+                            cpu_usage_factor = 0.9  # 中型批处理略微减少
+                        else:
+                            cpu_usage_factor = 0.8  # 大批处理进一步减少核心数
                     
-                    logger.info(f"检测到{cpu_count}个CPU核心，将使用{num_processes}个进程进行渲染，批处理大小:{adaptive_batch_size}")
-                except:
+                    # 根据批处理大小和系统负载调整进程数
+                    if batch_size >= 60 and num_processes > 3:
+                        # 对于大批处理，使用较少但效率更高的进程
+                        balanced_processes = max(3, min(num_processes - 2, int(num_processes * cpu_usage_factor)))
+                        logger.info(f"检测到大批处理模式({batch_size}帧/批)，优化进程数: {num_processes} -> {balanced_processes}")
+                        num_processes = balanced_processes
+                    else:
+                        # 适当优化进程数以匹配系统负载
+                        adjusted_processes = max(2, min(num_processes, int(num_processes * cpu_usage_factor)))
+                        if adjusted_processes != num_processes:
+                            logger.info(f"根据系统负载调整进程数: {num_processes} -> {adjusted_processes}")
+                            num_processes = adjusted_processes
+                    
+                    logger.info(f"检测到{cpu_count}个CPU核心，将使用{num_processes}个进程进行渲染，批处理大小:{batch_size}")
+                except Exception as e:
                     # 如果无法检测CPU数量，默认使用4个进程
                     num_processes = 4
-                    logger.info(f"无法检测CPU核心数，默认使用{num_processes}个进程")
+                    logger.info(f"无法检测CPU核心数，默认使用{num_processes}个进程: {e}")
                 
                 # 准备背景色参数（为了多进程）
                 if not transparency_required and bg_color and len(bg_color) >= 3:
@@ -786,26 +846,74 @@ class VideoRenderer:
                 # 创建一个事件来指示生产者已完成
                 producer_done = threading.Event()
                 
-                # 创建一个函数来异步向ffmpeg发送帧数据
+                # 创建一个函数来异步向ffmpeg发送帧数据，优化I/O操作
                 def frame_sender():
+                    # 批量写入缓冲区，减少系统调用
+                    write_buffer = bytearray(self.width * self.height * (4 if transparency_required else 3) * 10)
+                    write_buffer_view = memoryview(write_buffer)
+                    current_pos = 0
+                    max_buffer_size = len(write_buffer)
+                    
                     while not (producer_done.is_set() and not frame_buffer):
-                        frame_to_send = None
+                        # 尝试从缓冲区获取一批帧
+                        frames_to_write = []
                         with frame_buffer_lock:
-                            if frame_buffer:
-                                frame_to_send = frame_buffer.popleft()
+                            # 一次获取多个帧减少锁竞争
+                            while frame_buffer and len(frames_to_write) < 5:
+                                frames_to_write.append(frame_buffer.popleft())
                         
-                        if frame_to_send:
-                            frame_idx, frame = frame_to_send
+                        if frames_to_write:
                             try:
-                                if frame is not None:
-                                    process.stdin.write(frame.tobytes())
-                                    perf_monitor.record_frame()
+                                # 批量处理帧
+                                for frame_idx, frame in frames_to_write:
+                                    if frame is not None:
+                                        # 获取帧数据大小
+                                        frame_data = frame.tobytes()
+                                        frame_size = len(frame_data)
+                                        
+                                        # 如果当前缓冲区不足，先刷新缓冲区
+                                        if current_pos + frame_size > max_buffer_size:
+                                            if current_pos > 0:
+                                                # 刷新已缓冲数据
+                                                process.stdin.write(write_buffer_view[:current_pos])
+                                                current_pos = 0
+                                        
+                                        # 复制帧数据到缓冲区
+                                        if frame_size <= max_buffer_size:
+                                            # 使用memoryview高效复制
+                                            write_buffer_view[current_pos:current_pos+frame_size] = frame_data
+                                            current_pos += frame_size
+                                        else:
+                                            # 对于超大帧，直接写入
+                                            process.stdin.write(frame_data)
+                                        
+                                        # 记录帧处理
+                                        perf_monitor.record_frame()
+                                
+                                # 如果缓冲区有数据，定期刷新
+                                if current_pos > 0 and (len(frames_to_write) < 5 or current_pos > max_buffer_size // 2):
+                                    process.stdin.write(write_buffer_view[:current_pos])
+                                    current_pos = 0
+                                    
                             except (IOError, BrokenPipeError) as e:
-                                logger.error(f"发送帧 {frame_idx} 时出错: {e}")
+                                logger.error(f"发送帧数据时出错: {e}")
                                 return
                         else:
-                            # 如果没有帧可发送，短暂等待
+                            # 如果没有帧可发送，短暂等待但刷新已有数据
+                            if current_pos > 0:
+                                try:
+                                    process.stdin.write(write_buffer_view[:current_pos])
+                                    current_pos = 0
+                                except (IOError, BrokenPipeError):
+                                    return
                             time.sleep(0.001)
+                    
+                    # 最终刷新缓冲区
+                    if current_pos > 0:
+                        try:
+                            process.stdin.write(write_buffer_view[:current_pos])
+                        except (IOError, BrokenPipeError):
+                            pass
                 
                 # 启动发送者线程
                 sender_thread = threading.Thread(target=frame_sender, daemon=True)
@@ -973,6 +1081,46 @@ class VideoRenderer:
         # --- 结束 run_ffmpeg_with_pipe 函数定义 ---
 
         # --- 执行编码 --- 
+        # 为了获得最佳性能，提前创建输出目录并确保磁盘空间
+        output_dir = os.path.dirname(os.path.abspath(output_path))
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+            
+        # 尝试预热磁盘缓存
+        try:
+            with open(output_dir + "/.cache_warmup", "wb") as f:
+                # 写入一个4MB的文件来预热缓存
+                f.write(b'\0' * 4 * 1024 * 1024)
+                f.flush()
+                os.fsync(f.fileno())
+            os.remove(output_dir + "/.cache_warmup")
+        except:
+            pass
+        
+        # 尝试进行内存优化
+        try:
+            # 尝试强制垃圾回收
+            gc.collect(generation=2)
+            
+            # 在macOS上尝试释放内存
+            if sys.platform == 'darwin':
+                try:
+                    import resource
+                    resource.setrlimit(resource.RLIMIT_DATA, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+                except:
+                    pass
+                    
+            # 在Linux上尝试释放内存
+            if sys.platform.startswith('linux'):
+                try:
+                    with open('/proc/self/oom_score_adj', 'w') as f:
+                        f.write('-500')  # 降低OOM杀死此进程的概率
+                except:
+                    pass
+        except:
+            pass
+        
+        # 执行编码
         success = run_ffmpeg_with_pipe(video_codec_and_output_params, is_gpu_attempt=(not transparency_required))
         if not success and not transparency_required and cpu_fallback_codec_and_output_params:
             logger.info(f"GPU ({preferred_codec}) 编码失败，尝试回退到 CPU ({cpu_fallback_codec_and_output_params[1]})...")
