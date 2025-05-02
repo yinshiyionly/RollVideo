@@ -1543,26 +1543,37 @@ class VideoRenderer:
         actual_scroll_speed = max(1, scroll_speed)
         logger.info(f"使用实际滚动速度: {actual_scroll_speed}px/帧 (原始: {scroll_speed})")
         
-        # 简化计算逻辑：始终使用文本高度 + 屏幕高度 作为滚动距离
-        # text_height 是渲染后的文本实际高度 (来自 TextRenderer)
-        # self.height 是目标视频的高度
-        # 源图像 img 的总高度是 text_height + self.height (因为 TextRenderer 加了底部空白)
-        # 滚动距离需要覆盖整个源图像的高度，让其完全移出屏幕
-        self.scroll_distance = text_height + self.height 
-        total_frames = int(np.ceil(self.scroll_distance / actual_scroll_speed))
-
-        # --- 添加 3 秒停留帧 --- 
+        # --- 修改计算逻辑 --- 
+        # 计算文本完全滚出屏幕所需的帧数
+        # 只需要滚动 text_height 的距离即可让文本完全离开
+        scroll_frames_needed = int(np.ceil(text_height / actual_scroll_speed))
+        logger.info(f"文本完全滚出屏幕需要 {scroll_frames_needed} 帧 (文本高度={text_height}px)")
+        
+        # 添加 3 秒停留帧
         pause_frames = self.fps * 3
-        total_frames += pause_frames
         logger.info(f"添加 {pause_frames} 帧 ({3} 秒) 用于滚动结束后的停留")
+        
+        # 总帧数 = 滚动帧数 + 停留帧数
+        total_frames = scroll_frames_needed + pause_frames
         # -----------------------
 
         # 考虑跳帧 (frame_skip)
+        # 注意：这里的跳帧计算可能需要重新审视，因为它基于总帧数。
+        # 如果跳帧导致总时长变化过大，可能需要调整。
+        # 目前保持原样，但标记为潜在优化点。
         if self.actual_frame_skip > 1:
             # 确保总帧数是实际跳帧的倍数，保证完整的视频
+            # (这可能会略微增加总时长)
             if total_frames % self.actual_frame_skip != 0:
+                original_total_frames = total_frames
                 total_frames += self.actual_frame_skip - (total_frames % self.actual_frame_skip)
+                logger.info(f"应用跳帧 ({self.actual_frame_skip}) 后，总帧数从 {original_total_frames} 调整为 {total_frames}")
                 
-        logger.info(f"文本高度: {text_height}px, 滚动距离: {self.scroll_distance}px, "
-                   f"滚动速度: {actual_scroll_speed}px/帧, 计算总帧数: {total_frames}")
+        logger.info(f"文本高度: {text_height}px, 滚动速度: {actual_scroll_speed}px/帧, "
+                   f"计算总帧数: {total_frames} (滚动: {scroll_frames_needed}, 停留: {pause_frames})")
+                   
+        # 更新 self.scroll_distance (虽然在此计算逻辑下其意义减弱，但保留以防其他地方用到)
+        # 设置为刚好滚完文本所需的距离
+        self.scroll_distance = scroll_frames_needed * actual_scroll_speed 
+                   
         return total_frames
