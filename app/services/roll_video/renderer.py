@@ -1098,21 +1098,60 @@ class VideoRenderer:
         # 准备基本FFmpeg命令
         command = [
             'ffmpeg',
-            '-nostdin',         # 禁用交互模式
-            '-y',               # 自动覆盖输出文件
-            '-framerate', str(self.fps),  # 设置帧率
+            '-y',  # 覆盖输出文件
+            '-f', 'rawvideo',
+            '-vcodec', 'rawvideo',
+            '-s', f'{self.width}x{self.height}',  # 视频尺寸
+            '-pix_fmt', 'rgb24' if not self.transparent else 'rgba',  # 选择合适的像素格式
+            '-r', str(self.fps),  # 输入帧率
+            '-i', '-',  # 从管道读取输入
         ]
         
-        # 只有在有硬件加速选项并且不是透明视频时添加硬件加速参数
-        if hwaccel and not self.transparent and not force_software_encoding:
-            # 添加基本硬件加速参数
+        # 添加显式帧数量限制，避免循环
+        if hasattr(self, 'total_frames') and self.total_frames:
+            # 将total_frames参数添加到命令行，明确帧数量限制
+            command.extend([
+                '-frames:v', str(self.total_frames),  # 限制帧数
+                '-t', str(self.total_frames / self.fps)  # 明确设置时长
+            ])
+            logger.info(f"设置明确的帧数限制: {self.total_frames} 帧, 时长: {self.total_frames / self.fps:.2f}s")
+        
+        # 添加音频输入 (如果需要)
+        if self.with_audio and self.audio_path and os.path.exists(self.audio_path):
+            command.extend([
+                '-i', self.audio_path  # 加载音频文件
+            ])
+        
+        # 添加硬件加速和编码器选项
+        if hwaccel:
             command.extend(['-hwaccel', hwaccel])
             
-            # 视情况添加hwaccel_output_format
-            # 在Linux上不添加hwaccel_output_format，避免兼容性问题
-            if hwaccel == 'cuda' and system in ['Windows'] and '-hwaccel_output_format' in extra_params:
-                # hwaccel_output_format 已经在extra_params中处理
-                pass
+        # 添加视频编码器选项    
+        command.extend(['-c:v', codec])
+        
+        # 添加额外参数
+        if extra_params:
+            command.extend(extra_params)
+            
+        # 确保输出像素格式兼容
+        if not self.transparent and '-pix_fmt' not in extra_params:
+            command.extend(['-pix_fmt', 'yuv420p'])  # H.264/AVC需要
+        
+        # 添加音频相关参数
+        if self.with_audio and self.audio_path and os.path.exists(self.audio_path):
+            command.extend([
+                '-c:a', 'aac',            # 音频编码器
+                '-b:a', '192k',           # 音频比特率
+                '-shortest',              # 使用最短输入的长度
+                '-map', '0:v',            # 从第一个输入获取视频
+                '-map', '1:a'             # 从第二个输入获取音频
+            ])
+        
+        # 添加常见的MP4优化选项
+        if output_ext == '.mp4':
+            command.extend([
+                '-movflags', '+faststart'  # 优化MP4文件结构
+            ])
         
         # 配置输入格式
         command.extend([
