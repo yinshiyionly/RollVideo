@@ -721,6 +721,59 @@ class VideoRenderer:
                 batch_size = adaptive_batch_size
                 num_batches = (total_frames + batch_size - 1) // batch_size
                 
+                # 决定使用多少个进程进行渲染
+                try:
+                    cpu_count = mp.cpu_count()
+                    # 使用可用CPU核心数，但限制在8核以内
+                    num_processes = min(8, max(1, cpu_count - 1))  # 限制最多使用8核，留出一个核心给系统和主进程
+                    
+                    # 如果检测到当前批处理量较大，减少进程数量以提高每个进程的负载和利用率
+                    if adaptive_batch_size >= 60 and num_processes > 4:
+                        # 对于大批处理，可以使用更少的进程，每个进程处理更多帧
+                        balanced_processes = max(4, min(6, num_processes))
+                        logger.info(f"检测到大批处理模式({adaptive_batch_size}帧/批)，优化进程数: {num_processes} -> {balanced_processes}")
+                        num_processes = balanced_processes
+                    
+                    logger.info(f"检测到{cpu_count}个CPU核心，将使用{num_processes}个进程进行渲染，批处理大小:{adaptive_batch_size}")
+                except:
+                    # 如果无法检测CPU数量，默认使用4个进程
+                    num_processes = 4
+                    logger.info(f"无法检测CPU核心数，默认使用{num_processes}个进程")
+                
+                # 准备背景色参数（为了多进程）
+                if not transparency_required and bg_color and len(bg_color) >= 3:
+                    bg_color_rgb = bg_color[:3]
+                else:
+                    bg_color_rgb = (0, 0, 0)  # 默认黑色
+                
+                # 设置全局共享图像数组，用于多进程渲染
+                global _g_img_array
+                _g_img_array = img_array
+                
+                # 添加一个开始时间记录
+                start_time = time.time()
+                
+                # 使用进度条显示编码进度
+                frame_iterator = tqdm.tqdm(range(num_batches), desc=f"编码 ({codec_name}) ")
+                
+                # 周期性垃圾回收计数器
+                gc_counter = 0
+                
+                # 提前准备批帧参数以提高性能
+                frame_batch_params = []
+                for batch_idx in range(num_batches):
+                    start_frame = batch_idx * batch_size
+                    end_frame = min(start_frame + batch_size, total_frames)
+                    batch_frames = []
+                    
+                    for frame_idx in range(start_frame, end_frame):
+                        img_start_y = frame_positions[frame_idx]
+                        # 将参数保存为元组，避免在循环中重复计算
+                        frame_params = (frame_idx, img_start_y, img_height, img_width, self.height, self.width, frame_positions, transparency_required, bg_color_rgb)
+                        batch_frames.append(frame_params)
+                    
+                    frame_batch_params.append(batch_frames)
+                
                 # 添加性能监控
                 perf_monitor = PerformanceMonitor()
                 perf_monitor.start()
@@ -760,7 +813,8 @@ class VideoRenderer:
                 
                 # 使用多进程处理帧
                 with mp.Pool(processes=num_processes) as pool:
-                    for batch_idx in range(num_batches):
+                    # 逐批次处理所有帧
+                    for batch_idx in frame_iterator:
                         batch_start_time = time.time()
                         batch_frames = frame_batch_params[batch_idx]
                         
