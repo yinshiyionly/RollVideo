@@ -105,14 +105,12 @@ class RollVideoService:
                 if os.path.exists(font_path):
                     logger.info(f"将使用自定义字体: {chinese_font}")
                     return font_path
-                    
             # 如果没有中文字体，使用任何可用字体
             font_files = [f for f in os.listdir(font_dir) if f.endswith(('.ttf', '.otf'))]
             if font_files:
                 font_path = os.path.join(font_dir, font_files[0])
                 logger.info(f"将使用自定义字体: {font_files[0]}")
                 return font_path
-                
         # 如果内置字体目录不存在或没有找到字体，尝试系统字体
         try:
             system = platform.system()
@@ -132,10 +130,16 @@ class RollVideoService:
                         return font
         except Exception as e:
             logger.warning(f"查找系统字体时出错: {str(e)}")
-            
-        # 最终回退：使用PIL默认字体
+        
+        # 最终回退：使用Pillow默认字体，并返回空字符串让上层回退
         logger.warning("未找到合适的字体，将使用Pillow默认字体")
-        return ImageFont.load_default().path
+        try:
+            ImageFont.load_default()
+            logger.info("已加载Pillow内置默认字体")
+        except Exception:
+            logger.warning("加载Pillow默认字体失败")
+        # 返回空字符串，上层TextRenderer会在加载失败时回退到内置字体
+        return ""
 
     def get_font_path(self, font_path: Optional[str] = None) -> str:
         """
@@ -312,12 +316,13 @@ class RollVideoService:
         )
         logger.info(f"计算得到的总帧数: {total_frames}")
 
-        # 创建帧生成器
+        # 创建帧生成器，传递用户指定的背景色
         frame_generator = self._create_frame_generator(
-            img=text_img,               # 传递渲染好的文本图片
-            video_renderer=video_renderer, # 传递VideoRenderer实例
-            scroll_speed=scaled_scroll_speed, # 传递渲染分辨率下的滚动速度
-            scroll_frames_needed=scroll_frames_needed # <--- 传递滚动结束帧
+            img=text_img,                # 渲染好的文本图片
+            video_renderer=video_renderer,# VideoRenderer实例
+            scroll_speed=scaled_scroll_speed,# 渲染分辨率下的滚动速度
+            scroll_frames_needed=scroll_frames_needed,# 滚动结束帧
+            bg_color=bg_color           # 用户指定的背景色RGBA
         )
 
         # 开始渲染视频帧
@@ -335,7 +340,13 @@ class RollVideoService:
         logger.info(f"滚动视频已成功创建: {output_path}")
         return output_path
 
-    def _create_frame_generator(self, img: Image.Image, video_renderer: VideoRenderer, scroll_speed: int, scroll_frames_needed: int) -> Callable[[int], Optional[np.ndarray]]:
+    def _create_frame_generator(self,
+                                 img: Image.Image,
+                                 video_renderer: VideoRenderer,
+                                 scroll_speed: int,
+                                 scroll_frames_needed: int,
+                                 bg_color: Tuple[int, int, int, int]
+    ) -> Callable[[int], Optional[np.ndarray]]:
         """
         创建用于生成视频帧的函数 (闭包)
         
@@ -344,6 +355,7 @@ class RollVideoService:
             video_renderer: VideoRenderer实例，用于获取参数
             scroll_speed: 每帧滚动的像素数 (在渲染分辨率下)
             scroll_frames_needed: 滚动结束帧数
+            bg_color: 用户指定的背景色RGBA
             
         Returns:
             一个函数，接收帧索引，返回该帧的Numpy数组 (H, W, C) 或 None
@@ -375,21 +387,27 @@ class RollVideoService:
         target_dtype = np.uint8 if not transparent_bg else np.float32 
 
         logger.info(f"帧生成器设置: img_size=({img_width},{img_height}), target_size=({target_width},{target_height}), scroll_speed={scroll_speed}, transparent={transparent_bg}, scroll_end_frame={scroll_frames_needed}")
+        # 使用用户指定的背景色创建背景帧模板
+        bg_color_arr = np.array(bg_color, dtype=np.uint8)
+        if transparent_bg:
+            # RGBA背景模板
+            background_frame = np.ones((target_height, target_width, 4), dtype=np.uint8) * bg_color_arr
+            # 预转换为浮点用于混合，仅RGB通道
+            background_float = background_frame[..., :3].astype(np.float32) / 255.0
+        else:
+            # RGB背景模板
+            background_frame = np.ones((target_height, target_width, 3), dtype=np.uint8) * bg_color_arr[:3]
+            background_float = background_frame.astype(np.float32) / 255.0
 
         def frame_generator(frame_index: int) -> Optional[np.ndarray]:
             """生成指定索引的视频帧"""
             nonlocal frame_cache
             
-            # --- 添加判断：滚动结束后直接返回空白帧 --- 
+            # --- 添加判断：滚动结束后直接返回背景帧 ---
             if frame_index >= scroll_frames_needed:
-                logger.debug(f"帧 {frame_index}: 滚动已结束 (>{scroll_frames_needed})，生成静态空白帧")
-                if transparent_bg:
-                    frame_data = np.zeros((target_height, target_width, 4), dtype=np.uint8) # uint8 for transparent
-                else:
-                    # TODO: 使用 bg_color
-                    frame_data = np.zeros((target_height, target_width, 3), dtype=np.uint8) # uint8 for solid
-                # 缓存空白帧 (如果启用)
-                if video_renderer.use_frame_cache and frame_index not in frame_cache: # 避免重复缓存
+                logger.debug(f"帧 {frame_index}: 滚动已结束 (>{scroll_frames_needed})，生成静态背景帧")
+                frame_data = background_frame.copy()
+                if video_renderer.use_frame_cache and frame_index not in frame_cache:
                     frame_cache[frame_index] = frame_data
                 return frame_data
             # ---------------------------------------------
@@ -412,14 +430,8 @@ class RollVideoService:
             # 如果截取区域无效 (完全在图像下方)，则生成空白帧
             # (y_start 已经超出了 img_height)
             if slice_y_start >= img_height:
-                if transparent_bg:
-                    # 返回全透明帧 (RGBA)
-                    frame_data = np.zeros((target_height, target_width, 4), dtype=target_dtype)
-                else:
-                    # 返回纯色背景帧 (RGB) - TODO: 使用bg_color
-                    frame_data = np.zeros((target_height, target_width, 3), dtype=target_dtype)
-                
-                # 缓存空白帧 (如果启用)
+                # 返回背景帧
+                frame_data = background_frame.copy()
                 if video_renderer.use_frame_cache:
                     frame_cache[frame_index] = frame_data
                 return frame_data
@@ -427,13 +439,10 @@ class RollVideoService:
             # 确保 slice_y_end > slice_y_start
             # (防止因浮点误差或极端情况导致无效切片)
             if slice_y_end <= slice_y_start:
-                # 理论上不应发生在此处，因为上面有检查，但作为安全措施添加
-                if transparent_bg:
-                     frame_data = np.zeros((target_height, target_width, 4), dtype=target_dtype)
-                else:
-                     frame_data = np.zeros((target_height, target_width, 3), dtype=target_dtype)
+                # 理论上不应发生，返回背景帧
+                frame_data = background_frame.copy()
                 if video_renderer.use_frame_cache:
-                     frame_cache[frame_index] = frame_data
+                    frame_cache[frame_index] = frame_data
                 return frame_data
 
             # 从Numpy数组中截取对应帧的图像部分
@@ -454,14 +463,11 @@ class RollVideoService:
             # 更新实际粘贴的高度
             paste_height = target_y_end - target_y_start 
             if paste_height <= 0:
-                 # 如果粘贴高度无效，返回空白帧
-                 if transparent_bg:
-                     frame_data = np.zeros((target_height, target_width, 4), dtype=target_dtype)
-                 else:
-                     frame_data = np.zeros((target_height, target_width, 3), dtype=target_dtype)
-                 if video_renderer.use_frame_cache:
-                     frame_cache[frame_index] = frame_data
-                 return frame_data
+                # 如果粘贴高度无效，返回背景帧
+                frame_data = background_frame.copy()
+                if video_renderer.use_frame_cache:
+                    frame_cache[frame_index] = frame_data
+                return frame_data
                  
             # 如果粘贴高度小于截取高度，需要调整源数据的截取范围
             if paste_height < source_rgb.shape[0]:
@@ -470,15 +476,14 @@ class RollVideoService:
 
             # 创建目标帧画布
             if transparent_bg:
-                # RGBA画布，初始为全透明
-                frame_canvas = np.zeros((target_height, target_width, 4), dtype=target_dtype)
+                # RGBA画布，以背景模板为基础
+                frame_canvas = background_frame.copy()
                 # 直接将带Alpha通道的RGB数据复制到画布对应位置
-                frame_canvas[target_y_start:target_y_end, :, :3] = (source_rgb * 255).astype(np.uint8) # 确保是 uint8
-                frame_canvas[target_y_start:target_y_end, :, 3:4] = (source_alpha * 255).astype(np.uint8) # 确保是 uint8
+                frame_canvas[target_y_start:target_y_end, :, :3] = (source_rgb * 255).astype(np.uint8)
+                frame_canvas[target_y_start:target_y_end, :, 3:4] = (source_alpha * 255).astype(np.uint8)
             else:
-                # RGB画布，初始为黑色 (或其他背景色?)
-                # TODO: 需要获取原始bg_color参数才能正确设置背景
-                frame_canvas = np.zeros((target_height, target_width, 3), dtype=np.float32) # 使用float32进行混合
+                # RGB画布，以背景模板为基础（float32）
+                frame_canvas = background_float.copy()
                 
                 # 获取目标区域的视图
                 target_section = frame_canvas[target_y_start:target_y_end, :, :]

@@ -114,16 +114,17 @@ class TextRenderer:
             char_spacing: 字符间距
         """
         self.width = width
-        # Wrap font loading in try-except
+        # 尝试加载指定字体，失败时回退到Pillow默认字体
         try:
-            self.font = ImageFont.truetype(font_path, font_size)
-        except IOError as e:
-            logger.error(f"Error loading font file '{font_path}': {e}", exc_info=True)
-            # Re-raise the specific error for clarity
-            raise IOError(f"无法加载字体文件 '{font_path}': {e}") from e
+            if isinstance(font_path, str) and os.path.isfile(font_path):
+                self.font = ImageFont.truetype(font_path, font_size)
+            else:
+                # 如果font_path不是文件路径，尝试直接用Pillow加载
+                self.font = ImageFont.truetype(font_path, font_size)
         except Exception as e:
-            logger.error(f"An unexpected error occurred while loading font '{font_path}': {e}", exc_info=True)
-            raise  # Re-raise other unexpected errors
+            logger.warning(f"加载字体失败 ('{font_path}'), 使用Pillow默认字体: {e}", exc_info=True)
+            # 回退到Pillow内置字体
+            self.font = ImageFont.load_default()
 
         self.font_size = font_size
         
@@ -255,23 +256,23 @@ class TextRenderer:
         
         # 文本从图像顶部开始绘制
         y_position = 0
-        
-        # 使用指定的字体颜色（包括透明度）绘制文本
+        # 手动逐字符绘制，确保字符间距生效
         for line in lines:
-            # 如果需要手动添加字符间距（Pillow >= 9.2.0支持在draw.text中设置）
-            if hasattr(draw, 'text') and PIL_VERSION >= '9.2.0':
-                 draw.text((0, y_position), line, font=self.font, fill=self.font_color, spacing=self.char_spacing)
-            else:
-                 # 对于旧版Pillow，手动添加字符间距
-                 x_pos = 0
-                 for char in line:
-                      draw.text((x_pos, y_position), char, font=self.font, fill=self.font_color)
-                      try:
-                           char_width = self.font.getlength(char)
-                      except AttributeError:
-                           char_width = self.font.getbbox(char)[2] if char != ' ' else self.font.getbbox('a')[2] # 估算空格宽度
-                      x_pos += char_width + self.char_spacing
-
+            x_pos = 0
+            for char in line:
+                draw.text((x_pos, y_position), char, font=self.font, fill=self.font_color)
+                # 测量字符宽度
+                try:
+                    char_width = self.font.getlength(char)
+                except Exception:
+                    # 回退到getbbox或mask测量
+                    if hasattr(self.font, 'getbbox'):
+                        bbox = self.font.getbbox(char)
+                        char_width = bbox[2] - bbox[0]
+                    else:
+                        mask_bbox = self.font.getmask(char).getbbox()
+                        char_width = (mask_bbox[2] - mask_bbox[0]) if mask_bbox else self.font_size
+                x_pos += char_width + self.char_spacing
             y_position += line_height
         
         # 记录渲染尺寸和背景色
