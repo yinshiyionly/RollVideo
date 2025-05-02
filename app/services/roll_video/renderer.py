@@ -547,11 +547,20 @@ class VideoRenderer:
             # 添加帧计数器确保不超过总帧数
             expected_frames_to_process = self.total_frames
             
+            # 强制设置最大可处理帧数
+            max_frames_allowed = self.total_frames
+            
             # Log just before entering the loop
             logger.info("Entering main frame writing loop...")
             logger.debug(f"Initial state before loop: Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}")
 
             while (not self._event_stop.is_set() or not self._frame_queue.empty()) and frames_written < expected_frames_to_process:
+                # 尽早检查是否达到最大帧数
+                if frames_written >= max_frames_allowed:
+                    logger.info(f"已达到最大允许帧数 {max_frames_allowed}，强制停止处理")
+                    self._event_stop.set()
+                    break
+                
                 # Comment out verbose loop logs, revert to DEBUG or remove if not needed
                 # logger.info(f"---> Loop {loop_counter + 1}: Entered loop top.") # Changed to INFO
                 logger.debug(f"---> Loop {loop_counter + 1}: Entered loop top. Frames written so far: {frames_written}/{expected_frames_to_process}")
@@ -565,13 +574,18 @@ class VideoRenderer:
                     
                     # Try getting from queue with specific exception handling
                     try:
-                        frame_data = self._frame_queue.get(timeout=0.1)
+                        # 设置较短的超时时间以便更频繁地检查帧数限制
+                        frame_data = self._frame_queue.get(timeout=0.05)
                         # Comment out verbose loop logs
                         # logger.info(f"Loop {loop_counter}: Got frame data from queue.") # Changed to INFO
                         logger.debug(f"Loop {loop_counter}: Got frame data from queue.") # Reverted to DEBUG
                     except queue.Empty:
                         # Use DEBUG here as it's less critical and frequent
                         logger.debug(f"Loop {loop_counter}: Queue empty, continuing loop.")
+                        # 再次检查是否达到帧数限制
+                        if frames_written >= expected_frames_to_process:
+                            logger.info(f"已处理完所有预期帧 ({frames_written}/{expected_frames_to_process})，退出循环")
+                            break
                         if self._event_stop.is_set():
                             # Keep this INFO log as it signifies loop exit reason
                             logger.info(f"Loop {loop_counter}: Stop event set and queue empty, breaking loop.") 
@@ -591,6 +605,11 @@ class VideoRenderer:
                     # 解包帧数据
                     frame_idx, frame = frame_data
                     
+                    # 检查帧索引是否超出最大值
+                    if frame_idx >= max_frames_allowed:
+                        logger.warning(f"帧索引 {frame_idx} 超出最大允许值 {max_frames_allowed}，丢弃")
+                        continue
+                    
                     # 更新最后处理的帧索引
                     with self._last_frame_lock:
                         self._last_frame_processed = max(self._last_frame_processed, frame_idx)
@@ -599,7 +618,7 @@ class VideoRenderer:
                     frame_buffer.append((frame_idx, frame))
                     
                     # 当缓冲区达到阈值或是最后一批帧时进行批量写入
-                    if len(frame_buffer) >= buffer_size or (self._event_stop.is_set() and frame_buffer and self._frame_queue.empty()): # Check queue empty on stop
+                    if len(frame_buffer) >= buffer_size or (self._event_stop.is_set() and frame_buffer and self._frame_queue.empty()) or frames_written + len(frame_buffer) >= expected_frames_to_process: # 添加检查
                         # 按帧索引排序
                         frame_buffer.sort(key=lambda x: x[0])
                         
@@ -1190,6 +1209,17 @@ class VideoRenderer:
             # 为非透明视频（通常是MP4）添加 +faststart
             logger.info("为非透明视频添加 -movflags +faststart")
             command.extend(['-movflags', '+faststart'])
+        
+        # 明确限制视频时长和帧数，防止循环
+        # 添加精确的帧数限制参数，确保FFmpeg不会尝试读取超过total_frames的帧
+        if self.total_frames > 0:
+            logger.info(f"指定明确的帧数限制: {self.total_frames} 帧")
+            command.extend(['-frames:v', str(self.total_frames)])
+            
+            # 计算并设置精确的视频时长参数，确保视频不会循环
+            duration_seconds = self.total_frames / self.fps
+            logger.info(f"指定明确的视频时长: {duration_seconds:.2f} 秒 ({self.total_frames} 帧 / {self.fps} fps)")
+            command.extend(['-t', f"{duration_seconds:.6f}"])
 
         # 确保输出文件有正确的扩展名
         output_path = self.output_path
@@ -1384,6 +1414,7 @@ class VideoRenderer:
         Returns:
             bool: 渲染是否成功
         """
+        ffmpeg_process = None  # 在外部定义，以便在finally块中访问
         try:
             import psutil
             # 设置内存限制为28GB，避免内存耗尽
@@ -1525,6 +1556,38 @@ class VideoRenderer:
             logger.info("进入 render_frames 的 finally 块")
             self._event_stop.set()
             self.stop_threads = True
+            
+            # 确保FFmpeg进程被正确关闭
+            try:
+                # 尝试终止所有可能存在的ffmpeg进程
+                import psutil
+                current_process = psutil.Process()
+                for proc in current_process.children(recursive=True):
+                    try:
+                        if 'ffmpeg' in proc.name().lower():
+                            logger.info(f"正在终止子进程: {proc.name()} (PID: {proc.pid})")
+                            proc.terminate()
+                            # 给进程一些时间正常退出
+                            proc.wait(timeout=2)
+                            if proc.is_running():
+                                logger.warning(f"进程未响应终止信号，强制结束: {proc.pid}")
+                                proc.kill()
+                    except Exception as proc_e:
+                        logger.warning(f"终止子进程时出错: {proc_e}")
+            except Exception as ps_e:
+                logger.warning(f"处理子进程时出错: {ps_e}")
+            
+            # 强制清空帧队列避免内存泄漏
+            try:
+                while not self._frame_queue.empty():
+                    try:
+                        self._frame_queue.get_nowait()
+                    except:
+                        break
+                logger.info("强制清空帧队列完成")
+            except Exception as q_e:
+                logger.warning(f"清空帧队列时出错: {q_e}")
+            
             # Restore GC threshold if not already done
             try:
                 if 'old_threshold' in locals():
@@ -1536,9 +1599,15 @@ class VideoRenderer:
                  pass # old_threshold might not be defined if error happened early
             except Exception as gc_e:
                  logger.warning(f"恢复GC阈值时出错: {gc_e}")
-                 
-            # Attempt to clean up queue?
-            # ... (Queue cleanup logic remains the same) ...
+            
+            # 主动触发一次垃圾回收
+            try:
+                import gc
+                gc.collect()
+                logger.info("已触发额外的垃圾回收")
+            except Exception as gc_e:
+                logger.warning(f"触发额外垃圾回收时出错: {gc_e}")
+            
             logger.info("render_frames 方法即将结束")
 
     def calculate_total_frames(self, text_height, scroll_speed):

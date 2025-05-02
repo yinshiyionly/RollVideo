@@ -240,15 +240,12 @@ class RollVideoService:
         if respect_original_newlines:
             # 保留原始文本中的换行符，转换为内部换行标记
             text = text.replace('\n', '\\n')
-            logger.info("尊重原始文本换行")
         else:
             # 移除所有原始换行，依赖排版系统自动换行
             text = text.replace('\n', ' ')
-            logger.info("忽略原始文本换行，使用自动换行")
         
         # 查找并确认最终字体路径
         final_font_path = self.get_font_path(font_path)
-        logger.info(f"最终使用的字体路径: {final_font_path}")
 
         # 记录传递给 TextRenderer 的参数
         logger.info(f"TextRenderer 参数: width={scaled_width}, font_path={final_font_path}, font_size={scaled_font_size}, "
@@ -403,11 +400,19 @@ class RollVideoService:
             background_float = background_frame.astype(np.float32) / 255.0
 
         # 记录最大有效帧索引以防止循环
-        max_valid_frame_index = scroll_frames_needed + video_renderer.fps * 3  # 加上3秒额外停留时间
+        max_valid_frame_index = min(scroll_frames_needed + video_renderer.fps * 3, video_renderer.total_frames - 1)  # 确保不超过总帧数
+        
+        # 记录总帧数和滚动所需帧数的关系
+        logger.info(f"最大有效帧索引: {max_valid_frame_index}, 总帧数: {video_renderer.total_frames}, 滚动结束帧: {scroll_frames_needed}")
 
         def frame_generator(frame_index: int) -> Optional[np.ndarray]:
             """生成指定索引的视频帧"""
             nonlocal frame_cache
+            
+            # --- 预检查帧索引是否超出预期范围 ---
+            if frame_index < 0 or frame_index >= video_renderer.total_frames:
+                logger.warning(f"帧索引 {frame_index} 超出有效范围 [0, {video_renderer.total_frames-1}]，返回背景帧")
+                return background_frame.copy()
             
             # --- 滚动结束后直接返回背景帧（确保不再滚动）---
             # 严格判断滚动是否结束：要么明确超过最大有效帧，要么已经滚动到图像底部，要么超过计算的滚动帧
