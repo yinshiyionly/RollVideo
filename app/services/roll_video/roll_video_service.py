@@ -1,12 +1,10 @@
 import os
 import logging
 import platform
-from typing import Dict, Tuple, List, Optional, Union, Callable
-from PIL import Image, ImageFont
-import io
-import numpy as np
+from typing import Dict, Tuple, List, Optional, Union
+from PIL import Image
 
-from renderer import TextRenderer, VideoRenderer, blend_alpha_fast
+from renderer import TextRenderer, VideoRenderer
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -95,51 +93,26 @@ class RollVideoService:
         return fonts
 
     def get_system_default_font(self) -> str:
-        """获取系统默认字体"""
-        # 尝试寻找内置字体
-        font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
-        if os.path.exists(font_dir):
-            # 首先尝试查找中文字体
-            for chinese_font in ['方正黑体简体.ttf', 'MicroSoftYaHei.ttf', 'SimHei.ttf', 'NotoSansSC-Regular.otf']:
-                font_path = os.path.join(font_dir, chinese_font)
-                if os.path.exists(font_path):
-                    logger.info(f"将使用自定义字体: {chinese_font}")
-                    return font_path
-            # 如果没有中文字体，使用任何可用字体
-            font_files = [f for f in os.listdir(font_dir) if f.endswith(('.ttf', '.otf'))]
-            if font_files:
-                font_path = os.path.join(font_dir, font_files[0])
-                logger.info(f"将使用自定义字体: {font_files[0]}")
-                return font_path
-        # 如果内置字体目录不存在或没有找到字体，尝试系统字体
-        try:
-            system = platform.system()
-            if system == 'Windows':
-                return os.path.join(os.environ.get('SystemRoot', 'C:\\Windows'), 'Fonts', 'arial.ttf')
-            elif system == 'Darwin':  # macOS
-                return '/System/Library/Fonts/STHeiti Light.ttc'
-            else:  # Linux
-                # 尝试常见的Linux字体路径
-                common_fonts = [
-                    '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
-                    '/usr/share/fonts/TTF/DejaVuSans.ttf',
-                    '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf'
-                ]
-                for font in common_fonts:
-                    if os.path.exists(font):
-                        return font
-        except Exception as e:
-            logger.warning(f"查找系统字体时出错: {str(e)}")
-        
-        # 最终回退：使用Pillow默认字体，并返回空字符串让上层回退
-        logger.warning("未找到合适的字体，将使用Pillow默认字体")
-        try:
-            ImageFont.load_default()
-            logger.info("已加载Pillow内置默认字体")
-        except Exception:
-            logger.warning("加载Pillow默认字体失败")
-        # 返回空字符串，上层TextRenderer会在加载失败时回退到内置字体
-        return ""
+        """根据不同操作系统获取默认字体路径"""
+        system = platform.system()
+
+        if system == "Darwin":  # macOS
+            return "/System/Library/Fonts/PingFang.ttc"
+        elif system == "Windows":
+            return "C:\\Windows\\Fonts\\msyh.ttc"  # 微软雅黑
+        elif system == "Linux":
+            # 尝试常见的Linux字体路径
+            font_paths = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            ]
+            for path in font_paths:
+                if os.path.exists(path):
+                    return path
+            return "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"  # 默认返回
+        else:
+            logger.warning(f"未知操作系统: {system}，使用备用字体")
+            return "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
     def get_font_path(self, font_path: Optional[str] = None) -> str:
         """
@@ -174,350 +147,130 @@ class RollVideoService:
         self,
         text: str,
         output_path: str,
-        width: int = 720,
-        height: int = 1280,
+        width: int = 1080,
+        height: int = 1920,
         font_path: Optional[str] = None,
-        font_size: int = 24,
-        font_color: Tuple[int, int, int] = (0, 0, 0),
-        bg_color: Tuple[int, int, int, int] = (255, 255, 255, 255),
+        font_size: int = 40,
+        font_color: Tuple[int, int, int] = (255, 255, 255),
+        bg_color: Union[Tuple[int, int, int], Tuple[int, int, int, Union[int, float]]] = (
+            0, # 默认黑色背景，不透明
+            0,
+            0,
+            255,
+        ),
+        line_spacing: int = 20,
+        char_spacing: int = 0,
         fps: int = 30,
-        scroll_speed: int = 1,
-        with_audio: bool = False,
+        scroll_speed: int = 2,
         audio_path: Optional[str] = None,
-        scale_factor: float = 1.0,
-        frame_skip: int = 1,
-        transparent: bool = False,
-        line_spacing: int = 10,  # 添加行间距参数
-        char_spacing: int = 0,   # 添加字符间距参数
-        respect_original_newlines: bool = True,  # 添加是否尊重原始换行参数
-        error_callback: Optional[Callable[[str], None]] = None,
-    ) -> str:
+    ) -> Dict[str, Union[str, bool]]:
         """
-        创建滚动视频，将文本从下向上滚动
+        创建滚动视频，自动根据透明度选择CPU/GPU和格式。
+        透明: CPU + prores_ks + mov
+        不透明: 尝试 GPU (h264_nvenc) 回退 CPU (libx264) + mp4
         
         Args:
-            text: 要显示的文本内容
-            output_path: 输出视频路径
-            width: 视频宽度，默认720
-            height: 视频高度，默认1280
-            font_path: 字体路径，默认使用系统默认字体
-            font_size: 字体大小，默认24
-            font_color: 字体颜色RGB元组，默认黑色
-            bg_color: 背景颜色RGBA元组，默认白色不透明
-            fps: 视频帧率，默认30fps
-            scroll_speed: 滚动速度，单位像素/帧，默认1
-            with_audio: 是否添加音频，默认False
-            audio_path: 音频文件路径，仅当with_audio=True时有效
-            scale_factor: 缩放因子，用于减少处理分辨率以提高性能，默认1.0
-            frame_skip: 帧间隔，跳过的帧数，默认1（不跳过）
-            transparent: 是否透明背景，默认False
-            line_spacing: 行间距(像素)，默认10
-            char_spacing: 字符间距(像素)，默认0
-            respect_original_newlines: 是否尊重原始文本中的换行符，默认True
-            error_callback: 错误回调函数，默认None
-        
+            text: 要展示的文本内容
+            output_path: 期望的输出视频路径（扩展名会被自动调整）
+            width: 视频宽度
+            height: 视频高度
+            font_path: 字体文件路径，不指定则使用默认字体
+            font_size: 字体大小
+            font_color: 字体颜色 (R,G,B)
+            bg_color: 背景颜色，可以是RGB元组(r,g,b)或RGBA元组(r,g,b,a)，a为透明度，0完全透明，255完全不透明，支持float类型的alpha值
+            line_spacing: 行间距
+            char_spacing: 字符间距
+            fps: 视频帧率
+            scroll_speed: 滚动速度(像素/帧)
+            audio_path: 可选的音频文件路径
+            
         Returns:
-            输出视频路径
+            包含处理结果的字典
         """
-        logger.info(f"使用缩放因子: {scale_factor}，降低处理分辨率以提高速度")
-        # 应用缩放因子调整渲染分辨率
-        scaled_width = int(width * scale_factor)
-        scaled_height = int(height * scale_factor)
-        scaled_font_size = int(font_size * scale_factor)
-        
-        # 修改：精确计算滚动速度，保留小数精度，避免速度过快
-        # 原来是取整，可能导致慢速滚动被向上取整为更快速度
-        if scroll_speed < 5:  # 对于慢速滚动特别注意精度
-            scaled_scroll_speed = max(0.5, scroll_speed * scale_factor)  # 最小速度不低于0.5像素/帧
-            logger.info(f"使用精确滚动速度: {scaled_scroll_speed}px/帧 (小数精度)")
-        else:
-            # 较快滚动可以取整，影响较小
-            scaled_scroll_speed = max(1, int(scroll_speed * scale_factor))
-            logger.info(f"使用整数滚动速度: {scaled_scroll_speed}px/帧")
-        
-        logger.info(f"原始分辨率: {width}x{height}, 渲染分辨率: {scaled_width}x{scaled_height}")
-        logger.info(f"原始字体大小: {font_size}, 渲染字体大小: {scaled_font_size}")
-        logger.info(f"原始滚动速度: {scroll_speed}, 渲染滚动速度: {scaled_scroll_speed}")
-        
-        # 设置文本样式参数
-        scaled_line_spacing = int(line_spacing * scale_factor)
-        scaled_char_spacing = int(char_spacing * scale_factor)
-        logger.info(f"原始行间距: {line_spacing}px, 渲染行间距: {scaled_line_spacing}px")
-        logger.info(f"原始字符间距: {char_spacing}px, 渲染字符间距: {scaled_char_spacing}px")
-        
-        # 处理文本的换行符
-        if respect_original_newlines:
-            # 保留原始文本中的换行符，转换为内部换行标记
-            text = text.replace('\n', '\\n')
-        else:
-            # 移除所有原始换行，依赖排版系统自动换行
-            text = text.replace('\n', ' ')
-        
-        # 查找并确认最终字体路径
-        final_font_path = self.get_font_path(font_path)
-
-        # 记录传递给 TextRenderer 的参数
-        logger.info(f"TextRenderer 参数: width={scaled_width}, font_path={final_font_path}, font_size={scaled_font_size}, "
-                    f"font_color={font_color}, bg_color={bg_color}, line_spacing={scaled_line_spacing}, "
-                    f"char_spacing={scaled_char_spacing}")
-
-        # 初始化 TextRenderer
         try:
+            # --- 决定透明度需求和编码策略 --- 
+            normalized_bg_color = list(bg_color)
+            if len(normalized_bg_color) == 3:
+                normalized_bg_color.append(255) # RGB 转 RGBA，默认不透明
+            elif len(normalized_bg_color) == 4 and isinstance(normalized_bg_color[3], float):
+                 # 将 float alpha (0.0-1.0) 转为 int (0-255)
+                if 0 <= normalized_bg_color[3] <= 1:
+                    normalized_bg_color[3] = int(normalized_bg_color[3] * 255)
+                else:
+                    normalized_bg_color[3] = int(normalized_bg_color[3]) # 超出范围直接取整
+            # 确保 alpha 值在 0-255 范围内
+            normalized_bg_color[3] = max(0, min(255, normalized_bg_color[3])) 
+            bg_color_final = tuple(normalized_bg_color)
+
+            transparency_required = bg_color_final[3] < 255
+            
+            # 根据透明度需求确定输出格式和编码器
+            output_dir = os.path.dirname(os.path.abspath(output_path))
+            base_name = os.path.splitext(os.path.basename(output_path))[0]
+            
+            if transparency_required:
+                preferred_codec = "prores_ks" # 高质量透明编码（CPU）
+                actual_output_path = os.path.join(output_dir, f"{base_name}.mov")
+                logger.info("检测到透明背景需求，将使用 CPU (prores_ks) 输出 .mov 文件。")
+            else:
+                preferred_codec = "h264_nvenc" # 优先尝试 GPU H.264 编码
+                actual_output_path = os.path.join(output_dir, f"{base_name}.mp4")
+                logger.info("无透明背景需求，将优先尝试 GPU (h264_nvenc) 输出 .mp4 文件。")
+            # --- 结束决策 --- 
+
+            logger.info(f"开始创建滚动视频，实际输出路径: {actual_output_path}")
+            
+            # 确保输出目录存在
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 获取有效的字体路径
+            font_path = self.get_font_path(font_path)
+            
+            # 创建文字渲染器 (使用最终确定的bg_color)
             text_renderer = TextRenderer(
-                width=scaled_width,
-                font_path=final_font_path,  # 使用确认后的路径
-                font_size=scaled_font_size,
+                width=width,
+                font_path=font_path,
+                font_size=font_size,
                 font_color=font_color,
-                bg_color=bg_color,
-                line_spacing=scaled_line_spacing,
-                char_spacing=scaled_char_spacing,
+                bg_color=bg_color_final, 
+                line_spacing=line_spacing,
+                char_spacing=char_spacing,
             )
-        except Exception as e:
-            logger.error(f"初始化 TextRenderer 失败，字体: {final_font_path}, 错误: {e}", exc_info=True)
-            if error_callback:
-                error_callback(f"字体加载或渲染器初始化失败: {os.path.basename(final_font_path)} - {e}")
-            # 可以根据需要决定是抛出异常还是返回错误信息
-            raise  # 重新抛出异常，以便上层捕获
 
-        # 使用 TextRenderer 渲染文本为图片
-        try:
-            text_img, text_height = text_renderer.render_text_to_image(
-                text,
-                min_height=scaled_height # 传递缩放后的高度作为最小高度参考
+            # 将文本渲染为图片，并获取文本实际高度
+            logger.info("将文本渲染为图片...")
+            text_image, text_actual_height = text_renderer.render_text_to_image(text, min_height=height)
+            logger.info(f"文本实际高度: {text_actual_height}px, 渲染图像总高度: {text_image.height}px")
+
+            # 创建视频渲染器
+            video_renderer = VideoRenderer(
+                width=width, height=height, fps=fps, scroll_speed=scroll_speed
             )
-        except Exception as e:
-            logger.error(f"文本渲染为图片时出错: {e}", exc_info=True)
-            if error_callback:
-                error_callback(f"文本渲染失败: {e}")
-            raise # 重新抛出异常
-            
-        logger.info(f"文本图片已生成，尺寸: {text_img.size}, 文本高度: {text_height}")
 
-        # --- 计算滚动结束帧 --- 
-        # 注意：render_text_to_image已经创建了一个高度为(text_height + screen_height)的图像
-        # 所以图像本身已经包含了所需的空白区域，不需要再加屏幕高度
-        # 只需要滚动整个图像的高度即可
-        img_height = text_img.size[1]  # 获取图像实际高度
-        scroll_frames_needed = int(np.ceil(img_height / scaled_scroll_speed))
-        logger.info(f"计算得到文本滚出所需帧数: {scroll_frames_needed} (图像总高度={img_height}px, 文本实际高度={text_height}px)")
-        # ---------------------
-
-        # 初始化 VideoRenderer
-        video_renderer = VideoRenderer(
-            width=width, # 使用原始宽度
-            height=height, # 使用原始高度
-            fps=fps,
-            output_path=output_path,
-            frame_skip=frame_skip,
-            scale_factor=1.0, # VideoRenderer 内部不再处理缩放，TextRenderer已处理
-            with_audio=with_audio,
-            audio_path=audio_path,
-            transparent=transparent, # 传递透明背景选项
-            error_callback=error_callback,
-        )
-
-        # 计算总帧数
-        # 注意：这里使用原始的滚动速度和缩放后的文本高度
-        # 因为滚动是在最终分辨率下进行的，但文本内容的高度是在渲染分辨率下确定的
-        total_frames = video_renderer.calculate_total_frames(
-            text_height=text_height, # 使用渲染后的文本高度
-            scroll_speed=scaled_scroll_speed # 使用渲染分辨率下的滚动速度
-        )
-        logger.info(f"计算得到的总帧数: {total_frames}")
-        
-        # 确认最终关键帧参数
-        logger.info(f"【重要参数确认】滚动帧数: {scroll_frames_needed}, 总帧数: {total_frames}")
-        if total_frames != scroll_frames_needed:
-            logger.warning(f"【警告】总帧数 ({total_frames}) 与滚动所需帧数 ({scroll_frames_needed}) 不一致，这可能导致视频结尾出现循环或黑屏")
-            logger.info(f"总帧数与滚动帧数应该相等，只有滚动帧被渲染为有意义内容，超出部分将渲染为背景色")
-            # 使滚动帧数与总帧数一致，避免问题
-            if total_frames > scroll_frames_needed:
-                logger.info(f"调整滚动帧数以匹配总帧数：{scroll_frames_needed} -> {total_frames}")
-                scroll_frames_needed = total_frames
-            else:
-                logger.info(f"调整总帧数以匹配滚动帧数：{total_frames} -> {scroll_frames_needed}")
-                total_frames = scroll_frames_needed
-                video_renderer.total_frames = total_frames
-
-        # 创建帧生成器，传递用户指定的背景色
-        frame_generator = self._create_frame_generator(
-            img=text_img,                # 渲染好的文本图片
-            video_renderer=video_renderer,# VideoRenderer实例
-            scroll_speed=scaled_scroll_speed,# 渲染分辨率下的滚动速度
-            scroll_frames_needed=scroll_frames_needed,# 滚动结束帧
-            bg_color=bg_color           # 用户指定的背景色RGBA
-        )
-
-        # 开始渲染视频帧
-        try:
-            video_renderer.render_frames(
-                total_frames=total_frames,
-                frame_generator=frame_generator
+            # 创建滚动视频，传递决策结果
+            logger.info("开始创建滚动视频...")
+            final_output_path = video_renderer.create_scrolling_video(
+                image=text_image,
+                output_path=actual_output_path, # 使用自动调整后的路径
+                text_actual_height=text_actual_height,
+                transparency_required=transparency_required, # 传递透明度需求
+                preferred_codec=preferred_codec, # 传递首选编码器
+                audio_path=audio_path,
+                bg_color=bg_color_final # 传递最终的bg_color供非透明路径使用
             )
+
+            logger.info(f"滚动视频创建完成: {final_output_path}")
+
+            return {
+                "status": "success",
+                "message": "滚动视频创建成功",
+                "output_path": final_output_path,
+            }
+
         except Exception as e:
-            logger.error(f"视频帧渲染过程中出错: {e}", exc_info=True)
-            if error_callback:
-                error_callback(f"视频渲染失败: {e}")
-            raise # 重新抛出异常
-
-        logger.info(f"滚动视频已成功创建: {output_path}")
-        return output_path
-
-    def _create_frame_generator(self,
-                                 img: Image.Image,
-                                 video_renderer: VideoRenderer,
-                                 scroll_speed: int,
-                                 scroll_frames_needed: int,
-                                 bg_color: Tuple[int, int, int, int]
-    ) -> Callable[[int], Optional[np.ndarray]]:
-        """
-        创建用于生成视频帧的函数 (闭包)
-        
-        Args:
-            img: 包含渲染文本的PIL Image对象 (RGBA格式)
-            video_renderer: VideoRenderer实例，用于获取参数
-            scroll_speed: 每帧滚动的像素数 (在渲染分辨率下)
-            scroll_frames_needed: 滚动结束帧数
-            bg_color: 用户指定的背景色RGBA
-            
-        Returns:
-            一个函数，接收帧索引，返回该帧的Numpy数组 (H, W, C) 或 None
-        """
-        img_width, img_height = img.size
-        target_width = video_renderer.original_width # 目标视频宽度
-        target_height = video_renderer.original_height # 目标视频高度
-        scale_factor = video_renderer.scale_factor # 获取原始缩放因子
-        transparent_bg = video_renderer.transparent # 是否需要透明背景
-        
-        # 将Pillow图像转换为Numpy数组以便快速切片 (预转换为浮点数用于潜在的混合操作)
-        # 确保图像是RGBA格式
-        if img.mode != 'RGBA':
-            logger.warning(f"文本图像模式为 {img.mode}, 正在转换为 RGBA")
-            img = img.convert('RGBA')
-        img_np = np.array(img).astype(np.float32) / 255.0
-        
-        # 提取Alpha通道
-        alpha_channel = img_np[:, :, 3:4] # 保持维度 (H, W, 1)
-        # 提取RGB通道
-        rgb_channel = img_np[:, :, :3]
-
-        # 缓存帧数据，避免重复创建
-        frame_cache = {}
-
-        # 确认目标缓冲区的数据类型
-        # 如果背景不透明，可以直接使用uint8
-        # 如果背景透明，可能需要保持float32进行混合，或根据FFmpeg要求调整
-        target_dtype = np.uint8 if not transparent_bg else np.float32 
-
-        logger.info(f"帧生成器设置: img_size=({img_width},{img_height}), target_size=({target_width},{target_height}), scroll_speed={scroll_speed}, transparent={transparent_bg}, scroll_end_frame={scroll_frames_needed}")
-        # 使用用户指定的背景色创建背景帧模板
-        bg_color_arr = np.array(bg_color, dtype=np.uint8)
-        if transparent_bg:
-            # RGBA背景模板
-            background_frame = np.ones((target_height, target_width, 4), dtype=np.uint8) * bg_color_arr
-            # 预转换为浮点用于混合，仅RGB通道
-            background_float = background_frame[..., :3].astype(np.float32) / 255.0
-        else:
-            # RGB背景模板
-            background_frame = np.ones((target_height, target_width, 3), dtype=np.uint8) * bg_color_arr[:3]
-            background_float = background_frame.astype(np.float32) / 255.0
-
-        # 明确划分两个帧索引区间：滚动区间和结束区间
-        # 滚动区间: [0, scroll_frames_needed - 1]
-        # 结束区间: [scroll_frames_needed, infinity)
-        logger.info(f"关键帧范围划分: 滚动区间[0-{scroll_frames_needed-1}], 结束区间[{scroll_frames_needed}+]")
-        
-        # 创建一个纯背景帧的缓存，避免重复创建
-        end_frame = background_frame.copy()
-        
-        # 创建浮点数位置累加器，精确计算滚动位置
-        position_accumulator = 0.0
-        
-        def frame_generator(frame_index: int) -> Optional[np.ndarray]:
-            """生成指定索引的视频帧，严格区分滚动阶段和结束阶段"""
-            nonlocal frame_cache, position_accumulator
-            
-            # 如果启用了帧缓存且已缓存，直接返回
-            if video_renderer.use_frame_cache and frame_index in frame_cache:
-                return frame_cache[frame_index]
-            
-            # === 关键分支点：根据帧索引确定阶段 ===
-            
-            # 结束阶段：如果帧索引超过或等于滚动所需帧数，直接返回背景帧
-            if frame_index >= scroll_frames_needed:
-                logger.debug(f"帧索引 {frame_index} 已进入结束阶段 (滚动结束帧={scroll_frames_needed})，返回背景帧")
-                if video_renderer.use_frame_cache and frame_index not in frame_cache:
-                    frame_cache[frame_index] = end_frame
-                return end_frame
-                
-            # === 滚动阶段 ===
-            
-            # 精确计算滚动位置 - 使用浮点数位置累加器而不是简单乘法，提高精度
-            # 尤其适用于滚动速度为小数的情况(如：0.5像素/帧)
-            if frame_index == 0:
-                # 第一帧重置累加器
-                position_accumulator = 0.0
-            else:
-                # 非第一帧，累加滚动位置
-                position_accumulator += scroll_speed
-                
-            # 这里保留浮点数精度，只在实际切片时再取整
-            current_position = position_accumulator
-            
-            # 如果需要调试浮点精度，取消下面的注释
-            # if frame_index % 30 == 0:  # 每30帧记录一次
-            #     logger.debug(f"帧 {frame_index}: 精确位置={current_position:.2f}px, 累加器={position_accumulator:.2f}")
-            
-            # 边界检查：如果已超出图像高度，返回背景帧（内部安全检查）
-            if current_position >= img_height:
-                logger.debug(f"帧 {frame_index}: 位置 {current_position:.2f}px 超出图像高度 {img_height}px")
-                if video_renderer.use_frame_cache and frame_index not in frame_cache:
-                    frame_cache[frame_index] = end_frame
-                return end_frame
-                
-            # 计算切片区域 - 此处转为整数用于切片
-            slice_start = int(current_position)  
-            slice_end = slice_start + target_height
-            
-            # 边界检查
-            if slice_start >= img_height or slice_start >= slice_end:
-                logger.debug(f"帧 {frame_index}: 切片范围无效 ({slice_start}:{slice_end})")
-                if video_renderer.use_frame_cache and frame_index not in frame_cache:
-                    frame_cache[frame_index] = end_frame
-                return end_frame
-                
-            # 限制切片范围
-            slice_end = min(slice_end, img_height)
-            slice_height = slice_end - slice_start
-            
-            # 获取源数据
-            source_rgb = rgb_channel[slice_start:slice_end, :, :]
-            source_alpha = alpha_channel[slice_start:slice_end, :, :]
-            
-            # 创建输出帧
-            if transparent_bg:
-                # 透明背景
-                frame_canvas = background_frame.copy()
-                frame_canvas[0:slice_height, :, :3] = (source_rgb * 255).astype(np.uint8)
-                frame_canvas[0:slice_height, :, 3:4] = (source_alpha * 255).astype(np.uint8)
-            else:
-                # 不透明背景
-                frame_canvas = background_float.copy()
-                # Alpha混合
-                target_section = frame_canvas[0:slice_height, :, :]
-                blended_section = blend_alpha_fast(source_rgb, target_section, source_alpha)
-                frame_canvas[0:slice_height, :, :] = blended_section
-                # 转换回uint8
-                frame_canvas = (frame_canvas * 255).astype(np.uint8)
-                
-            # 缓存帧
-            if video_renderer.use_frame_cache:
-                frame_cache[frame_index] = frame_canvas
-                
-            # 每500帧记录一次进度
-            if frame_index % 500 == 0:
-                logger.debug(f"生成滚动帧: {frame_index}/{scroll_frames_needed}, 位置={current_position:.2f}px")
-                
-            return frame_canvas
-            
-        return frame_generator
+            logger.error(f"创建滚动视频失败: {str(e)}", exc_info=True)
+            return {
+                "status": "error",
+                "message": f"创建滚动视频失败: {str(e)}",
+                "output_path": None,
+            }
