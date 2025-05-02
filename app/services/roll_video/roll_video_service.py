@@ -4,6 +4,7 @@ import platform
 from typing import Dict, Tuple, List, Optional, Union, Callable
 from PIL import Image, ImageFont
 import io
+import numpy as np
 
 from renderer import TextRenderer, VideoRenderer
 
@@ -241,203 +242,218 @@ class RollVideoService:
             text = text.replace('\n', ' ')
             logger.info("忽略原始文本换行，使用自动换行")
         
-        # 查找字体文件
-        if font_path:
-            # 如果提供了具体的字体路径，直接使用
-            if not os.path.exists(font_path):
-                # 尝试在字体目录中查找
-                font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
-                font_path_in_dir = os.path.join(font_dir, os.path.basename(font_path))
-                if os.path.exists(font_path_in_dir):
-                    font_path = font_path_in_dir
-                    logger.info(f"找到精确匹配字体: {font_path}")
-                else:
-                    logger.warning(f"找不到字体文件: {font_path}，尝试使用默认字体")
-                    font_path = self.get_system_default_font()
-        else:
-            # 如果没有提供字体路径，使用默认字体
-            font_path = self.get_system_default_font()
+        # 查找并确认最终字体路径
+        final_font_path = self.get_font_path(font_path)
+        logger.info(f"最终使用的字体路径: {final_font_path}")
+
+        # 记录传递给 TextRenderer 的参数
+        logger.info(f"TextRenderer 参数: width={scaled_width}, font_path={final_font_path}, font_size={scaled_font_size}, "
+                    f"font_color={font_color}, bg_color={bg_color}, line_spacing={scaled_line_spacing}, "
+                    f"char_spacing={scaled_char_spacing}")
+
+        # 初始化 TextRenderer
+        try:
+            text_renderer = TextRenderer(
+                width=scaled_width,
+                font_path=final_font_path,  # 使用确认后的路径
+                font_size=scaled_font_size,
+                font_color=font_color,
+                bg_color=bg_color,
+                line_spacing=scaled_line_spacing,
+                char_spacing=scaled_char_spacing,
+            )
+        except Exception as e:
+            logger.error(f"初始化 TextRenderer 失败，字体: {final_font_path}, 错误: {e}", exc_info=True)
+            if error_callback:
+                error_callback(f"字体加载或渲染器初始化失败: {os.path.basename(final_font_path)} - {e}")
+            # 可以根据需要决定是抛出异常还是返回错误信息
+            raise  # 重新抛出异常，以便上层捕获
+
+        # 使用 TextRenderer 渲染文本为图片
+        try:
+            text_img, text_height = text_renderer.render_text_to_image(
+                text,
+                min_height=scaled_height # 传递缩放后的高度作为最小高度参考
+            )
+        except Exception as e:
+            logger.error(f"文本渲染为图片时出错: {e}", exc_info=True)
+            if error_callback:
+                error_callback(f"文本渲染失败: {e}")
+            raise # 重新抛出异常
             
-        # 初始化渲染器
-        text_renderer = TextRenderer(
-            width=scaled_width,
-            font_path=font_path,
-            font_size=scaled_font_size,
-            font_color=font_color,
-            bg_color=bg_color,
-            line_spacing=scaled_line_spacing,  # 使用缩放后的行间距
-            char_spacing=scaled_char_spacing   # 使用缩放后的字符间距
-        )
-        
-        # 渲染文本为图片
-        logger.info("将文本渲染为图片...")
-        img, text_height = text_renderer.render_text_to_image(text, scaled_height)
-        
-        # 创建视频渲染器
+        logger.info(f"文本图片已生成，尺寸: {text_img.size}, 文本高度: {text_height}")
+
+        # 初始化 VideoRenderer
         video_renderer = VideoRenderer(
-            width=scaled_width,
-            height=scaled_height,
+            width=width, # 使用原始宽度
+            height=height, # 使用原始高度
             fps=fps,
             output_path=output_path,
             frame_skip=frame_skip,
-            scale_factor=1.0,  # 这里已经应用了外部缩放，所以内部不再缩放
+            scale_factor=1.0, # VideoRenderer 内部不再处理缩放，TextRenderer已处理
             with_audio=with_audio,
             audio_path=audio_path,
-            transparent=transparent,
-            error_callback=error_callback
+            transparent=transparent, # 传递透明背景选项
+            error_callback=error_callback,
         )
-        
-        # 计算总帧数
-        total_frames = video_renderer.calculate_total_frames(text_height, scaled_scroll_speed)
-        
-        # 开始渲染视频
-        logger.info(f"开始渲染滚动视频，总帧数: {total_frames}...")
-        
-        # 创建帧生成器
-        frame_generator = self._create_frame_generator(img, video_renderer, scaled_scroll_speed)
-        
-        # 渲染视频
-        success = video_renderer.render_frames(total_frames, frame_generator)
-        
-        if success:
-            logger.info(f"滚动视频创建成功: {output_path}")
-            return output_path
-        else:
-            error_message = f"创建滚动视频失败: {output_path}"
-            logger.error(error_message)
-            if error_callback:
-                error_callback(error_message)
-            return ""
 
-    def _create_frame_generator(self, img, video_renderer, scroll_speed):
+        # 计算总帧数
+        # 注意：这里使用原始的滚动速度和缩放后的文本高度
+        # 因为滚动是在最终分辨率下进行的，但文本内容的高度是在渲染分辨率下确定的
+        total_frames = video_renderer.calculate_total_frames(
+            text_height=text_height, # 使用渲染后的文本高度
+            scroll_speed=scaled_scroll_speed # 使用渲染分辨率下的滚动速度
+        )
+        logger.info(f"计算得到的总帧数: {total_frames}")
+
+        # 创建帧生成器
+        frame_generator = self._create_frame_generator(
+            img=text_img,               # 传递渲染好的文本图片
+            video_renderer=video_renderer, # 传递VideoRenderer实例
+            scroll_speed=scaled_scroll_speed # 传递渲染分辨率下的滚动速度
+        )
+
+        # 开始渲染视频帧
+        try:
+            video_renderer.render_frames(
+                total_frames=total_frames,
+                frame_generator=frame_generator
+            )
+        except Exception as e:
+            logger.error(f"视频帧渲染过程中出错: {e}", exc_info=True)
+            if error_callback:
+                error_callback(f"视频渲染失败: {e}")
+            raise # 重新抛出异常
+
+        logger.info(f"滚动视频已成功创建: {output_path}")
+        return output_path
+
+    def _create_frame_generator(self, img: Image.Image, video_renderer: VideoRenderer, scroll_speed: int) -> Callable[[int], Optional[np.ndarray]]:
         """
-        创建帧生成器函数
+        创建用于生成视频帧的函数 (闭包)
         
         Args:
-            img: 渲染的文本图像
-            video_renderer: 视频渲染器实例
-            scroll_speed: 滚动速度
+            img: 包含渲染文本的PIL Image对象 (RGBA格式)
+            video_renderer: VideoRenderer实例，用于获取参数
+            scroll_speed: 每帧滚动的像素数 (在渲染分辨率下)
             
         Returns:
-            帧生成器函数
+            一个函数，接收帧索引，返回该帧的Numpy数组 (H, W, C) 或 None
         """
-        render_width = video_renderer.width
-        render_height = video_renderer.height
-        should_be_transparent = video_renderer.transparent
-        total_frames = video_renderer.total_frames
-        fps = video_renderer.fps
+        img_width, img_height = img.size
+        target_width = video_renderer.original_width # 目标视频宽度
+        target_height = video_renderer.original_height # 目标视频高度
+        scale_factor = video_renderer.scale_factor # 获取原始缩放因子
+        transparent_bg = video_renderer.transparent # 是否需要透明背景
         
-        # 获取背景色，防止透明视频的背景也是透明的
-        if hasattr(img, 'info') and 'background' in img.info:
-            bg_color = img.info['background'][:3]
-        else:
-            # 默认白色背景
-            bg_color = (255, 255, 255)
+        # 将Pillow图像转换为Numpy数组以便快速切片 (预转换为浮点数用于潜在的混合操作)
+        # 确保图像是RGBA格式
+        if img.mode != 'RGBA':
+            logger.warning(f"文本图像模式为 {img.mode}, 正在转换为 RGBA")
+            img = img.convert('RGBA')
+        img_np = np.array(img).astype(np.float32) / 255.0
         
-        # 计算文本信息
-        text_height = img.height
-        
-        # 计算滚动阶段帧数 - 文本从底部滚动到完全离开顶部
-        scroll_distance = text_height + render_height  # 总滚动距离=文本高度+屏幕高度
-        scroll_frames = (scroll_distance // scroll_speed) + (1 if scroll_distance % scroll_speed != 0 else 0)
-        
-        # 定格阶段 - 保持3秒
-        ending_frames = fps * 3
-        
-        # 确保不超过总帧数
-        if scroll_frames + ending_frames > total_frames:
-            scroll_frames = total_frames - min(ending_frames, total_frames // 4)
-            if scroll_frames <= 0:
-                scroll_frames = total_frames
-                ending_frames = 0
-                
-        logger.info(f"文本高度={text_height}, 滚动距离={scroll_distance}, 滚动阶段={scroll_frames}帧, 定格阶段={ending_frames}帧")
-        
-        def frame_generator(frame_index):
-            try:
-                # 创建视频帧
-                if should_be_transparent:
-                    frame = Image.new("RGBA", (render_width, render_height), (0, 0, 0, 0))
-                else:
-                    frame = Image.new("RGB", (render_width, render_height), bg_color)
-                
-                if frame_index < scroll_frames:
-                    # 关键改变：文字从底部开始滚动，而不是从顶部
-                    # frame_index=0时，文字应该在屏幕底部
-                    
-                    # 计算文本相对于屏幕底部的位置
-                    # 从底部向上滚动，scroll_pos从0开始增加
-                    scroll_pos = frame_index * scroll_speed
-                    
-                    # 文本的Y坐标 (text_y)：
-                    # - 当frame_index=0时，text_y = render_height - scroll_pos = render_height
-                    #   文本顶部与屏幕底部对齐，即文本刚开始要进入屏幕
-                    # - 随着frame_index增加，text_y减小，文本向上滚动
-                    text_y = render_height - scroll_pos
-                    
-                    # 记录日志
-                    if frame_index == 0 or frame_index % 100 == 0:
-                        logger.info(f"滚动阶段: 帧{frame_index}/{scroll_frames}, scroll_pos={scroll_pos}, text_y={text_y}")
+        # 提取Alpha通道
+        alpha_channel = img_np[:, :, 3:4] # 保持维度 (H, W, 1)
+        # 提取RGB通道
+        rgb_channel = img_np[:, :, :3]
 
-                    # --- 裁剪和粘贴逻辑 ---
-                    # 计算源图像(img)裁剪区域
-                    src_y_start = max(0, -text_y)  # 如果文本Y是负数，从源图像的|text_y|位置开始裁剪
-                    src_y_end = min(img.height, render_height - text_y)  # 到最低点或图像高度结束
-                    
-                    # 计算目标位置
-                    paste_y = max(0, text_y)  # 如果text_y小于0，贴图位置从屏幕顶部(0)开始
-                    
-                    # 计算裁剪高度
-                    crop_height = src_y_end - src_y_start
-                    
-                    # 只有当裁剪高度>0时才进行裁剪和粘贴
-                    if crop_height > 0:
-                        try:
-                            # 从源图像裁剪可见部分
-                            visible_crop = img.crop((
-                                0,             # left
-                                src_y_start,   # top
-                                render_width,  # right (限制在渲染宽度内)
-                                src_y_end      # bottom
-                            ))
-                            
-                            # 粘贴到帧上
-                            mask = visible_crop if visible_crop.mode == 'RGBA' else None
-                            frame.paste(visible_crop, (0, paste_y), mask=mask)
-                            
-                            del visible_crop
-                            
-                        except Exception as e:
-                            logger.error(f"裁剪或粘贴帧 {frame_index} 时出错: {e}")
-                            
+        # 缓存帧数据，避免重复创建
+        frame_cache = {}
+
+        # 确认目标缓冲区的数据类型
+        # 如果背景不透明，可以直接使用uint8
+        # 如果背景透明，可能需要保持float32进行混合，或根据FFmpeg要求调整
+        target_dtype = np.uint8 if not transparent_bg else np.float32 
+
+        logger.info(f"帧生成器设置: img_size=({img_width},{img_height}), target_size=({target_width},{target_height}), scroll_speed={scroll_speed}, transparent={transparent_bg}")
+
+        def frame_generator(frame_index: int) -> Optional[np.ndarray]:
+            """生成指定索引的视频帧"""
+            nonlocal frame_cache
+            
+            # 如果启用了帧缓存且已缓存，直接返回
+            if video_renderer.use_frame_cache and frame_index in frame_cache:
+                return frame_cache[frame_index]
+            
+            # 计算当前帧文本图像的起始y坐标 (从底部向上滚动)
+            # 初始位置让文本底部在视频底部之下一个屏幕高度处
+            # 随着frame_index增加，y_start减小，图像向上移动
+            y_start = img_height - (frame_index * scroll_speed) - target_height
+
+            # 计算需要从文本图像中截取的区域
+            y_end = y_start + target_height
+            
+            # 边界检查 (确保截取范围在图像内)
+            slice_y_start = max(0, y_start)
+            slice_y_end = min(img_height, y_end)
+            
+            # 如果截取区域无效 (完全在图像上方或下方)，则生成空白帧
+            if slice_y_end <= slice_y_start or slice_y_start >= img_height:
+                if transparent_bg:
+                    # 返回全透明帧 (RGBA)
+                    frame_data = np.zeros((target_height, target_width, 4), dtype=target_dtype)
                 else:
-                    # 定格阶段 - 只显示背景，文字已经完全滚出
-                    if frame_index % fps == 0:  # 每秒记录一次日志
-                        logger.info(f"定格阶段: 帧{frame_index-scroll_frames}/{ending_frames}")
+                    # 返回纯色背景帧 (RGB)，颜色来自VideoRenderer的预期？
+                    # TODO: 应该使用传入的bg_color参数，但这里不易获取，暂时用黑色
+                    frame_data = np.zeros((target_height, target_width, 3), dtype=target_dtype)
                 
-                # 转换为字节流
-                buffer = io.BytesIO()
-                if should_be_transparent:
-                    frame.save(buffer, format="PNG")
-                    frame_bytes = buffer.getvalue()
-                else:
-                    frame_bytes = frame.tobytes()
+                # 缓存空白帧
+                if video_renderer.use_frame_cache:
+                    frame_cache[frame_index] = frame_data
+                return frame_data
+
+            # 从Numpy数组中截取对应帧的图像部分
+            source_rgb = rgb_channel[slice_y_start:slice_y_end, :, :]
+            source_alpha = alpha_channel[slice_y_start:slice_y_end, :, :]
+            
+            # 计算截取部分在目标帧中的起始y坐标
+            target_y_start = max(0, -y_start)
+            target_y_end = target_y_start + (slice_y_end - slice_y_start)
+            
+            # 确保目标坐标在范围内
+            target_y_end = min(target_height, target_y_end)
+            if target_y_start >= target_height:
+                # 这种情况理论上不应发生，因为前面有检查，但也处理一下
+                 if transparent_bg:
+                    frame_data = np.zeros((target_height, target_width, 4), dtype=target_dtype)
+                 else:
+                    frame_data = np.zeros((target_height, target_width, 3), dtype=target_dtype)
+                 if video_renderer.use_frame_cache:
+                     frame_cache[frame_index] = frame_data
+                 return frame_data
+
+            # 创建目标帧画布
+            if transparent_bg:
+                # RGBA画布，初始为全透明
+                frame_canvas = np.zeros((target_height, target_width, 4), dtype=target_dtype)
+                # 直接将带Alpha通道的RGB数据复制到画布对应位置
+                # 注意：这里假设FFmpeg能处理带Alpha的输入
+                frame_canvas[target_y_start:target_y_end, :, :3] = (source_rgb * 255).astype(target_dtype)
+                frame_canvas[target_y_start:target_y_end, :, 3:4] = (source_alpha * 255).astype(target_dtype)
+            else:
+                # RGB画布，初始为黑色 (或其他背景色?)
+                # TODO: 需要获取原始bg_color参数才能正确设置背景
+                # 暂时使用黑色背景
+                frame_canvas = np.zeros((target_height, target_width, 3), dtype=np.float32) # 使用float32进行混合
                 
-                buffer.close()
-                del frame
+                # 获取目标区域的视图
+                target_section = frame_canvas[target_y_start:target_y_end, :, :]
                 
-                return frame_bytes
+                # 使用Alpha混合将文字混合到黑色背景上
+                # target = background * (1-alpha) + foreground * alpha
+                # background 是黑色 (0), 所以 target = foreground * alpha
+                blended_section = blend_alpha_fast(source_rgb, target_section, source_alpha)
                 
-            except Exception as e:
-                logger.error(f"生成帧 {frame_index} 时出错: {str(e)}")
-                # 返回默认帧
-                if should_be_transparent:
-                    default_frame = Image.new("RGBA", (render_width, render_height), (0, 0, 0, 0))
-                    buffer = io.BytesIO()
-                    default_frame.save(buffer, format="PNG")
-                    return buffer.getvalue()
-                else:
-                    default_frame = Image.new("RGB", (render_width, render_height), bg_color)
-                    return default_frame.tobytes()
-        
+                # 将混合结果放回画布
+                frame_canvas[target_y_start:target_y_end, :, :] = blended_section
+                # 转换回 uint8
+                frame_canvas = (frame_canvas * 255).astype(np.uint8)
+
+            # 如果启用了帧缓存，则缓存结果
+            if video_renderer.use_frame_cache:
+                frame_cache[frame_index] = frame_canvas
+            
+            return frame_canvas
+
         return frame_generator

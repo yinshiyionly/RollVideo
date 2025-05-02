@@ -114,7 +114,17 @@ class TextRenderer:
             char_spacing: 字符间距
         """
         self.width = width
-        self.font = ImageFont.truetype(font_path, font_size)
+        # Wrap font loading in try-except
+        try:
+            self.font = ImageFont.truetype(font_path, font_size)
+        except IOError as e:
+            logger.error(f"Error loading font file '{font_path}': {e}", exc_info=True)
+            # Re-raise the specific error for clarity
+            raise IOError(f"无法加载字体文件 '{font_path}': {e}") from e
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while loading font '{font_path}': {e}", exc_info=True)
+            raise  # Re-raise other unexpected errors
+
         self.font_size = font_size
         
         # 将传入的参数转换为列表，以便统一处理
@@ -264,8 +274,8 @@ class TextRenderer:
 
             y_position += line_height
         
-        # 记录渲染尺寸
-        logger.info(f"文本渲染结果: 总行数={len(lines)}, 文本高度={text_actual_height}px, 总图像高度={total_height}px")
+        # 记录渲染尺寸和背景色
+        logger.info(f"Text rendered: lines={len(lines)}, text_height={text_actual_height}px, img_size={img.size}, bg_color={self.bg_color}")
         
         return img, text_actual_height # 返回图像和文本实际高度
 
