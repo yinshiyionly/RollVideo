@@ -548,7 +548,7 @@ class VideoRenderer:
             expected_frames_to_process = self.total_frames
             
             # 强制设置最大可处理帧数，预留一些余量
-            max_frames_allowed = self.total_frames * 2 if self.total_frames > 0 else 100000
+            max_frames_allowed = self.total_frames if self.total_frames > 0 else 100000
             logger.info(f"设置最大允许帧数: {max_frames_allowed}, 预期处理帧数: {expected_frames_to_process}")
             
             # Log just before entering the loop
@@ -557,7 +557,7 @@ class VideoRenderer:
 
             while (not self._event_stop.is_set() or not self._frame_queue.empty()):
                 # 仅在明确超出限制时中止
-                if frames_written > max_frames_allowed:
+                if frames_written >= max_frames_allowed:
                     logger.warning(f"已达到最大允许帧数 {max_frames_allowed}，强制停止处理")
                     self._event_stop.set()
                     break
@@ -607,9 +607,10 @@ class VideoRenderer:
                     frame_idx, frame = frame_data
                     
                     # 检查帧索引是否超出最大值，使用更宽松的检查
-                    if max_frames_allowed > 0 and frame_idx >= max_frames_allowed * 2:
+                    if max_frames_allowed > 0 and frame_idx >= max_frames_allowed:
                         if frame_idx % 100 == 0:  # 降低日志频率
-                            logger.warning(f"帧索引 {frame_idx} 超出最大允许值 {max_frames_allowed}，但仍继续处理")
+                            logger.warning(f"帧索引 {frame_idx} 超出最大允许值 {max_frames_allowed}，跳过此帧")
+                        continue  # 超出最大帧数的帧直接跳过
                     
                     # 更新最后处理的帧索引
                     with self._last_frame_lock:
@@ -624,7 +625,7 @@ class VideoRenderer:
                         frame_buffer.sort(key=lambda x: x[0])
                         
                         # 检查FFmpeg进程是否还活着
-                        if ffmpeg_process.poll() is not None:
+                        if ffmpeg_process and ffmpeg_process.poll() is not None:
                             error_output = ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
                             logger.error(f"FFmpeg进程已异常终止，错误信息: {error_output}")
                             
@@ -647,6 +648,12 @@ class VideoRenderer:
                         
                         # 批量写入帧
                         for idx, frame_data in frame_buffer:
+                            # 检查是否已经达到最大帧数限制
+                            if frames_written >= max_frames_allowed:
+                                logger.info(f"已写入最大允许帧数 {max_frames_allowed}，停止写入")
+                                self._event_stop.set()
+                                break
+                                
                             try:
                                 if frame_data is not None:
                                     # 处理不同类型的帧数据
@@ -667,7 +674,7 @@ class VideoRenderer:
                                         continue
                                     
                                     # 写入FFmpeg进程
-                                    if ffmpeg_process.poll() is None:  # 确保进程仍在运行
+                                    if ffmpeg_process and ffmpeg_process.poll() is None:  # 确保进程仍在运行
                                         ffmpeg_process.stdin.write(frame_bytes)
                                         ffmpeg_process.stdin.flush()
                                         frames_written += 1
@@ -1011,9 +1018,8 @@ class VideoRenderer:
                         hwaccel = 'cuda'
                         
                         if high_end_gpu:
-                            # 高端GPU使用优化参数
+                            # 高端GPU使用优化参数 - 不再重复指定init_hw_device
                             extra_params.extend([
-                                '-init_hw_device', 'cuda=0',  # 显式指定CUDA设备
                                 '-preset', 'p1',              # 最快速模式
                                 '-rc', 'vbr',                 # 可变比特率模式
                                 '-b:v', '8M',                 # 较高比特率
@@ -1102,19 +1108,10 @@ class VideoRenderer:
             '-f', 'rawvideo',
             '-vcodec', 'rawvideo',
             '-s', f'{self.width}x{self.height}',  # 视频尺寸
-            '-pix_fmt', 'rgb24' if not self.transparent else 'rgba',  # 选择合适的像素格式
+            '-pix_fmt', 'rgba' if self.transparent else 'rgb24',  # 选择合适的像素格式
             '-r', str(self.fps),  # 输入帧率
-            '-i', '-',  # 从管道读取输入
+            '-i', 'pipe:',  # 从管道读取输入
         ]
-        
-        # 添加显式帧数量限制，避免循环
-        if hasattr(self, 'total_frames') and self.total_frames:
-            # 将total_frames参数添加到命令行，明确帧数量限制
-            command.extend([
-                '-frames:v', str(self.total_frames),  # 限制帧数
-                '-t', str(self.total_frames / self.fps)  # 明确设置时长
-            ])
-            logger.info(f"设置明确的帧数限制: {self.total_frames} 帧, 时长: {self.total_frames / self.fps:.2f}s")
         
         # 添加音频输入 (如果需要)
         if self.with_audio and self.audio_path and os.path.exists(self.audio_path):
@@ -1122,20 +1119,41 @@ class VideoRenderer:
                 '-i', self.audio_path  # 加载音频文件
             ])
         
-        # 添加硬件加速和编码器选项
+        # 添加硬件加速，但不重复使用init_hw_device，避免冲突
         if hwaccel:
             command.extend(['-hwaccel', hwaccel])
             
-        # 添加视频编码器选项    
+            # 如果使用CUDA并且是Linux系统，只添加一次init_hw_device
+            if hwaccel == 'cuda' and system == 'Linux' and high_end_gpu:
+                # 检查extra_params中是否已经有init_hw_device
+                has_init_hw_device = any('init_hw_device' in param for param in extra_params)
+                if not has_init_hw_device:
+                    command.extend(['-init_hw_device', 'cuda=0'])
+        
+        # 添加视频编码器
         command.extend(['-c:v', codec])
         
         # 添加额外参数
-        if extra_params:
-            command.extend(extra_params)
-            
+        # 过滤可能导致冲突的参数
+        filtered_params = []
+        skip_next = False
+        for i, param in enumerate(extra_params):
+            if skip_next:
+                skip_next = False
+                continue
+            # 跳过init_hw_device参数，避免重复
+            if param == '-init_hw_device':
+                skip_next = True
+                continue
+            filtered_params.append(param)
+        command.extend(filtered_params)
+        
         # 确保输出像素格式兼容
-        if not self.transparent and '-pix_fmt' not in extra_params:
-            command.extend(['-pix_fmt', 'yuv420p'])  # H.264/AVC需要
+        if not self.transparent:
+            # 检查是否已经有pix_fmt参数
+            has_pix_fmt = any(param == '-pix_fmt' for param in command)
+            if not has_pix_fmt:
+                command.extend(['-pix_fmt', 'yuv420p'])  # H.264/AVC需要
         
         # 添加音频相关参数
         if self.with_audio and self.audio_path and os.path.exists(self.audio_path):
@@ -1147,122 +1165,24 @@ class VideoRenderer:
                 '-map', '1:a'             # 从第二个输入获取音频
             ])
         
-        # 添加常见的MP4优化选项
+        # 添加MP4优化选项
         if output_ext == '.mp4':
-            command.extend([
-                '-movflags', '+faststart'  # 优化MP4文件结构
-            ])
+            # 检查是否已经有movflags参数
+            has_movflags = any(param == '-movflags' for param in command)
+            if not has_movflags:
+                command.extend(['-movflags', '+faststart'])  # 优化MP4文件结构
         
-        # 配置输入格式
-        command.extend([
-            '-f', 'rawvideo',   # 使用原始视频格式
-            '-s', f'{self.width}x{self.height}',  # 视频尺寸
-            '-pix_fmt', 'rgba' if self.transparent else 'rgb24',  # 像素格式
-            '-i', 'pipe:',      # 从管道读取
-        ])
-        
-        # 优化FFmpeg性能参数
-        command.extend([
-            # 核心处理设置
-            '-threads', str(os.cpu_count()),  # 使用所有可用CPU核心
-            # 减小队列大小，避免某些环境中的溢出问题
-            '-thread_queue_size', '1024',  # 使用适中的队列大小提高稳定性
-            # 使用极速缩放算法
-            '-sws_flags', 'fast_bilinear',  # 最快的缩放算法
-            # 禁用音频
-            '-an',
-            # 使用适中的缓冲区大小
-            '-bufsize', '100M',  # 使用适中的缓冲区增加稳定性
-        ])
-        
-        # 添加前面确定的额外参数，但过滤掉hwaccel_output_format（在Linux上）
-        if extra_params:
-            if system == 'Linux' and hwaccel == 'cuda':
-                # 在Linux上过滤掉hwaccel_output_format参数
-                filtered_params = []
-                skip_next = False
-                for i, param in enumerate(extra_params):
-                    if skip_next:
-                        skip_next = False
-                        continue
-                    if param == '-hwaccel_output_format':
-                        skip_next = True
-                        continue
-                    filtered_params.append(param)
-                command.extend(filtered_params)
-            else:
-                command.extend(extra_params)
-            
-        # 根据透明度选择不同的编码配置
-        if self.transparent:
-            # 透明视频保持ProRes设置
-            pass  # 已经在前面设置了ProRes参数
-        else:
-            # 不透明视频配置
-            if codec.startswith('h264'):
+        # 添加显式帧数量限制，避免循环
+        if hasattr(self, 'total_frames') and self.total_frames:
+            # 检查是否已经有frames:v参数
+            has_frames = any(param == '-frames:v' for param in command)
+            if not has_frames:
                 command.extend([
-                    '-c:v', codec,
-                    '-pix_fmt', 'yuv420p',  # 兼容性像素格式
+                    '-frames:v', str(self.total_frames),  # 限制帧数
+                    '-t', str(self.total_frames / self.fps)  # 明确设置时长
                 ])
-
-                # 检查并添加 -g 30 (如果尚未添加)
-                g_present = any(cmd == '-g' for cmd in command + extra_params)
-                if not g_present:
-                   logger.info(f"为编码器 {codec} 添加 -g 30")
-                   command.extend(['-g', '30'])
-
-                # 对于Linux上的NVIDIA编码，使用简化参数集
-                if codec == 'h264_nvenc' and system == 'Linux':
-                    # Linux下NVENC的参数已在extra_params中设置，这里不需要额外添加比特率等
-                    pass
-                elif codec == 'h264_nvenc' and system != 'Linux':
-                    # 非Linux系统的NVENC额外参数 (如果尚未添加)
-                    b_present = any(cmd == '-b:v' for cmd in command + extra_params)
-                    if not b_present:
-                        command.extend([
-                            '-b:v', '5M',        # 设置比特率
-                            '-maxrate', '10M',   # 最大比特率
-                        ])
-                # 为其他硬件编码器添加通用参数 (如果尚未添加)
-                elif codec != 'h264_nvenc':
-                    bf_present = any(cmd == '-bf' for cmd in command + extra_params)
-                    if not bf_present:
-                       command.extend(['-bf', '0']) # 禁用B帧加速
-
-            else:
-                # 其他编码器(如libx264)的参数
-                command.extend([
-                    '-c:v', codec,
-                    '-pix_fmt', 'yuv420p',
-                ])
-
-                # 检查并添加 -g 30 (如果尚未添加)
-                g_present = any(cmd == '-g' for cmd in command + extra_params)
-                if not g_present:
-                   logger.info(f"为编码器 {codec} 添加 -g 30")
-                   command.extend(['-g', '30'])
-                # 检查并添加 -bf 0 (如果尚未添加)
-                bf_present = any(cmd == '-bf' for cmd in command + extra_params)
-                if not bf_present:
-                   command.extend(['-bf', '0']) # 禁用B帧加速
-
-            # 为非透明视频（通常是MP4）添加 +faststart
-            logger.info("为非透明视频添加 -movflags +faststart")
-            command.extend(['-movflags', '+faststart'])
+                logger.info(f"设置明确的帧数限制: {self.total_frames} 帧, 时长: {self.total_frames / self.fps:.2f}s")
         
-        # 明确限制视频时长和帧数，防止循环
-        # 添加精确的帧数限制参数，确保FFmpeg不会尝试读取超过total_frames的帧
-        if self.total_frames > 0:
-            # 为了确保所有帧都能处理，设置一个比实际帧数略大的限制
-            safe_frame_limit = int(self.total_frames * 1.1) + 60  # 增加10%并再加60帧的安全余量
-            logger.info(f"指定宽松的帧数限制: {safe_frame_limit} 帧 (实际帧数: {self.total_frames})")
-            command.extend(['-frames:v', str(safe_frame_limit)])
-            
-            # 计算并设置宽松的视频时长参数，确保视频不会过早结束
-            duration_seconds = (self.total_frames / self.fps) * 1.2  # 增加20%的时长余量
-            logger.info(f"指定宽松的视频时长: {duration_seconds:.2f} 秒 (实际预期: {self.total_frames / self.fps:.2f} 秒)")
-            command.extend(['-t', f"{duration_seconds:.6f}"])
-
         # 确保输出文件有正确的扩展名
         output_path = self.output_path
         if output_path.endswith('.tmp') or os.path.splitext(output_path)[1] != output_ext:
@@ -1272,10 +1192,10 @@ class VideoRenderer:
             self.output_path = output_path
             
         # 添加输出文件路径
-        command.append(self.output_path)
+        command.append(output_path)
         
         # 确保输出目录存在
-        output_dir = os.path.dirname(self.output_path)
+        output_dir = os.path.dirname(output_path)
         if output_dir and not os.path.exists(output_dir):
             try:
                 os.makedirs(output_dir, exist_ok=True)
