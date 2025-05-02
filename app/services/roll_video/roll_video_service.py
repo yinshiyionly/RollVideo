@@ -231,7 +231,7 @@ class RollVideoService:
                 width=width,
                 font_path=font_path,
                 font_size=font_size,
-                font_color=font_color,
+                font_color=tuple(font_color) if isinstance(font_color, list) else font_color,
                 bg_color=bg_color_final, 
                 line_spacing=line_spacing,
                 char_spacing=char_spacing,
