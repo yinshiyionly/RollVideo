@@ -419,25 +419,28 @@ class RollVideoService:
                     logger.warning(f"帧索引 {frame_index} 超出有效范围 [0, {video_renderer.total_frames-1}]，返回背景帧")
                     return background_frame.copy()
             
-            # --- 滚动结束后直接返回背景帧（确保不再滚动）---
-            # 严格判断滚动是否结束：要么明确超过最大有效帧，要么已经滚动到图像底部，要么超过计算的滚动帧
-            if frame_index >= max_valid_frame_index or frame_index >= scroll_frames_needed or (frame_index * scroll_speed) >= img_height:
-                logger.debug(f"帧 {frame_index}: 滚动已结束 (帧索引={frame_index}, 滚动结束帧={scroll_frames_needed}, 当前位置={frame_index * scroll_speed}px, 总高度={img_height}px)")
-                frame_data = background_frame.copy()
-                if video_renderer.use_frame_cache and frame_index not in frame_cache:
-                    frame_cache[frame_index] = frame_data
-                return frame_data
-            # ---------------------------------------------
+            # --- 重点修复：强制帧索引上限 ---
+            # 定义严格滚动界限：文本完全滚出屏幕所需的帧数
+            scroll_limit = scroll_frames_needed
+            
+            # 如果帧索引超过了滚动所需帧数，直接返回纯背景帧以结束滚动
+            if frame_index >= scroll_limit:
+                logger.debug(f"帧 {frame_index} 超过滚动限制 {scroll_limit}，返回纯背景帧")
+                # 返回纯背景帧
+                return background_frame.copy()
             
             # 如果启用了帧缓存且已缓存，直接返回 (滚动阶段)
             if video_renderer.use_frame_cache and frame_index in frame_cache:
                 return frame_cache[frame_index]
             
-            # --- 滚动阶段计算逻辑（修改起始位置）--- 
+            # --- 滚动阶段计算逻辑 --- 
             # 计算当前帧文本图像的起始y坐标
-            # 修改：第一帧就从图像顶部(0)开始，不需要任何偏移
             y_start = frame_index * scroll_speed
-            # 注意：不需要减去target_height，因为我们要直接显示文本顶部，而不是使整个文本进入视野
+            
+            # 如果当前位置已经超出图像高度，直接返回背景帧
+            if y_start >= img_height:
+                logger.debug(f"帧 {frame_index}: 滚动位置 {y_start}px 已超出图像高度 {img_height}px，返回背景帧")
+                return background_frame.copy()
             
             # 计算需要从文本图像中截取的区域的结束y坐标
             y_end = y_start + target_height
@@ -446,79 +449,69 @@ class RollVideoService:
             slice_y_start = max(0, y_start)
             slice_y_end = min(img_height, y_end)
             
-            # 如果截取区域无效 (完全在图像下方)，则生成空白帧
-            # (y_start 已经超出了 img_height)
-            if slice_y_start >= img_height:
-                # 返回背景帧
-                frame_data = background_frame.copy()
-                if video_renderer.use_frame_cache:
-                    frame_cache[frame_index] = frame_data
-                return frame_data
-            
-            # 确保 slice_y_end > slice_y_start
-            # (防止因浮点误差或极端情况导致无效切片)
+            # 确保截取范围有效
             if slice_y_end <= slice_y_start:
-                # 理论上不应发生，返回背景帧
-                frame_data = background_frame.copy()
+                # 无效区域，返回背景帧
+                logger.debug(f"帧 {frame_index}: 截取范围无效 ({slice_y_start}:{slice_y_end})，返回背景帧")
+                return background_frame.copy()
+                
+            # 检查是否已经完全滚到图像底部
+            remaining_height = img_height - slice_y_start
+            if remaining_height <= 0:
+                # 已完全滚出，返回背景帧
+                logger.debug(f"帧 {frame_index}: 已完全滚出图像 (剩余高度: {remaining_height}px)，返回背景帧")
+                return background_frame.copy()
+            
+            # 如果只剩一小部分图像，混合背景色处理
+            if remaining_height < target_height:
+                # 从图像中截取剩余部分
+                source_rgb = rgb_channel[slice_y_start:slice_y_end, :, :]
+                source_alpha = alpha_channel[slice_y_start:slice_y_end, :, :]
+                
+                # 创建背景画布
+                if transparent_bg:
+                    frame_canvas = background_frame.copy()
+                    # 复制到画布顶部
+                    frame_canvas[0:remaining_height, :, :3] = (source_rgb * 255).astype(np.uint8)
+                    frame_canvas[0:remaining_height, :, 3:4] = (source_alpha * 255).astype(np.uint8)
+                else:
+                    # RGB画布，以背景模板为基础
+                    frame_canvas = background_float.copy()
+                    
+                    # 获取目标区域并应用Alpha混合
+                    target_section = frame_canvas[0:remaining_height, :, :]
+                    blended_section = blend_alpha_fast(source_rgb, target_section, source_alpha)
+                    frame_canvas[0:remaining_height, :, :] = blended_section
+                    # 转换回 uint8
+                    frame_canvas = (frame_canvas * 255).astype(np.uint8)
+                
+                # 缓存并返回结果
                 if video_renderer.use_frame_cache:
-                    frame_cache[frame_index] = frame_data
-                return frame_data
-
-            # 从Numpy数组中截取对应帧的图像部分
+                    frame_cache[frame_index] = frame_canvas
+                return frame_canvas
+            
+            # 正常滚动情况 - 截取完整屏幕高度
             source_rgb = rgb_channel[slice_y_start:slice_y_end, :, :]
             source_alpha = alpha_channel[slice_y_start:slice_y_end, :, :]
             
-            # 计算截取部分在目标帧中的起始y坐标
-            # 由于滚动是通过移动源图像的截取窗口实现的，
-            # 截取到的内容总是粘贴到目标帧的顶部。
-            target_y_start = 0
-            
-            # 计算截取内容的高度
-            paste_height = slice_y_end - slice_y_start
-            target_y_end = target_y_start + paste_height
-            
-            # 确保目标坐标在范围内 (安全检查)
-            target_y_end = min(target_height, target_y_end)
-            # 更新实际粘贴的高度
-            paste_height = target_y_end - target_y_start 
-            if paste_height <= 0:
-                # 如果粘贴高度无效，返回背景帧
-                frame_data = background_frame.copy()
-                if video_renderer.use_frame_cache:
-                    frame_cache[frame_index] = frame_data
-                return frame_data
-                 
-            # 如果粘贴高度小于截取高度，需要调整源数据的截取范围
-            if paste_height < source_rgb.shape[0]:
-                 source_rgb = source_rgb[:paste_height, :, :]
-                 source_alpha = source_alpha[:paste_height, :, :]
-
-            # 创建目标帧画布
+            # 创建目标帧
             if transparent_bg:
-                # RGBA画布，以背景模板为基础
+                # RGBA画布
                 frame_canvas = background_frame.copy()
-                # 直接将带Alpha通道的RGB数据复制到画布对应位置
-                frame_canvas[target_y_start:target_y_end, :, :3] = (source_rgb * 255).astype(np.uint8)
-                frame_canvas[target_y_start:target_y_end, :, 3:4] = (source_alpha * 255).astype(np.uint8)
+                frame_canvas[0:slice_y_end-slice_y_start, :, :3] = (source_rgb * 255).astype(np.uint8)
+                frame_canvas[0:slice_y_end-slice_y_start, :, 3:4] = (source_alpha * 255).astype(np.uint8)
             else:
-                # RGB画布，以背景模板为基础（float32）
+                # RGB画布
                 frame_canvas = background_float.copy()
-                
-                # 获取目标区域的视图
-                target_section = frame_canvas[target_y_start:target_y_end, :, :]
-                
-                # Alpha混合
+                target_section = frame_canvas[0:slice_y_end-slice_y_start, :, :]
                 blended_section = blend_alpha_fast(source_rgb, target_section, source_alpha)
-                
-                # 将混合结果放回画布
-                frame_canvas[target_y_start:target_y_end, :, :] = blended_section
-                # 转换回 uint8
+                frame_canvas[0:slice_y_end-slice_y_start, :, :] = blended_section
                 frame_canvas = (frame_canvas * 255).astype(np.uint8)
-
-            # 如果启用了帧缓存，则缓存结果
+                
+            # 缓存结果
             if video_renderer.use_frame_cache:
                 frame_cache[frame_index] = frame_canvas
-            
+                
             return frame_canvas
 
         return frame_generator
