@@ -172,7 +172,7 @@ class VideoRenderer:
         width: int,
         height: int,
         fps: int = 30,
-        scroll_speed: int = 2  # 每帧滚动的像素数
+        scroll_speed: int = 5  # 每帧滚动的像素数（由service层基于行高和每秒滚动行数计算而来）
     ):
         """
         初始化视频渲染器
@@ -181,7 +181,7 @@ class VideoRenderer:
             width: 视频宽度
             height: 视频高度
             fps: 视频帧率
-            scroll_speed: 滚动速度(像素/帧)
+            scroll_speed: 每帧滚动的像素数（由service层基于行高和每秒滚动行数计算而来）
         """
         self.width = width
         self.height = height
@@ -247,10 +247,28 @@ class VideoRenderer:
              image = image.convert("RGBA")
              img_array = np.array(image)
              if img_array.shape[2] != 4: raise ValueError("无法转换图像为RGBA")
-        scroll_distance = max(0, text_actual_height - self.height)
+             
+        # 确保滚动距离至少是文本高度，这样能保证文本从底部完全滚动到顶部
+        # 注意：text_actual_height是实际文本内容高度，而不是图像高度
+        scroll_distance = max(text_actual_height, img_height - self.height)
+        
+        # 根据滚动速度计算所需的帧数
         scroll_frames = int(scroll_distance / self.scroll_speed) if self.scroll_speed > 0 else 0
-        padding_frames_start = int(self.fps * 0.5)
-        padding_frames_end = int(self.fps * 0.5)
+        
+        # 确保短文本也有合理的滚动时间
+        min_scroll_frames = self.fps * 8  # 至少8秒的纯滚动时间（不包括开头和结尾的静止帧）
+        if scroll_frames < min_scroll_frames and scroll_frames > 0:
+            # 计算需要的最小滚动速度
+            adjusted_speed = scroll_distance / min_scroll_frames
+            # 如果调整后的速度比当前速度慢，则使用调整后的速度
+            if adjusted_speed < self.scroll_speed:
+                logger.info(f"文本较短，减慢滚动速度: {self.scroll_speed:.2f} → {adjusted_speed:.2f} 像素/帧")
+                self.scroll_speed = adjusted_speed
+                scroll_frames = min_scroll_frames
+        
+        # 视频开头和结尾各添加足够的静止画面
+        padding_frames_start = int(self.fps * 2.0)  # 增加开头的静止时间到2秒
+        padding_frames_end = int(self.fps * 2.0)    # 增加结尾的静止时间到2秒
         total_frames = padding_frames_start + scroll_frames + padding_frames_end
         duration = total_frames / self.fps
         logger.info(f"文本高:{text_actual_height}, 图像高:{img_height}, 视频高:{self.height}")

@@ -161,7 +161,7 @@ class RollVideoService:
         line_spacing: int = 20,
         char_spacing: int = 0,
         fps: int = 30,
-        scroll_speed: int = 2,
+        scroll_speed: float = 0.5,  # 修改为每秒滚动的行数
         audio_path: Optional[str] = None,
     ) -> Dict[str, Union[str, bool]]:
         """
@@ -181,7 +181,7 @@ class RollVideoService:
             line_spacing: 行间距
             char_spacing: 字符间距
             fps: 视频帧率
-            scroll_speed: 滚动速度(像素/帧)
+            scroll_speed: 滚动速度(每秒滚动的行数)，例如0.5表示每2秒滚动一行
             audio_path: 可选的音频文件路径
             
         Returns:
@@ -231,7 +231,7 @@ class RollVideoService:
                 width=width,
                 font_path=font_path,
                 font_size=font_size,
-                font_color=font_color,
+                font_color=tuple(font_color) if isinstance(font_color, list) else font_color,
                 bg_color=bg_color_final, 
                 line_spacing=line_spacing,
                 char_spacing=char_spacing,
@@ -241,10 +241,40 @@ class RollVideoService:
             logger.info("将文本渲染为图片...")
             text_image, text_actual_height = text_renderer.render_text_to_image(text, min_height=height)
             logger.info(f"文本实际高度: {text_actual_height}px, 渲染图像总高度: {text_image.height}px")
+            
+            # 估算行高 (字体大小 + 行间距)
+            estimated_line_height = font_size + line_spacing
+            
+            # 估算总行数（文本高度除以行高）
+            estimated_total_lines = max(1, text_actual_height / estimated_line_height)
+            
+            # 设置最小滚动时长（单位：秒）
+            min_scroll_duration = 10.0  # 至少10秒的滚动时间
+            
+            # 计算当前设置下的滚动时长（不包括头尾静止时间）
+            current_scroll_duration = estimated_total_lines / scroll_speed if scroll_speed > 0 else 0
+            
+            # 如果滚动时间太短，则自动调整滚动速度
+            adjusted_scroll_speed = scroll_speed
+            if current_scroll_duration < min_scroll_duration and current_scroll_duration > 0:
+                adjusted_scroll_speed = estimated_total_lines / min_scroll_duration
+                logger.info(f"文本较短 ({estimated_total_lines:.1f}行)，自动调整滚动速度: {scroll_speed:.2f}行/秒 → {adjusted_scroll_speed:.2f}行/秒")
+                logger.info(f"预计滚动时长: {current_scroll_duration:.1f}秒 → {min_scroll_duration:.1f}秒 (不含头尾静止)")
+            else:
+                logger.info(f"预计滚动时长: {current_scroll_duration:.1f}秒 (不含头尾静止)")
+            
+            # 将每秒滚动的行数转换为每帧滚动的像素数
+            # adjusted_scroll_speed是每秒滚动的行数，乘以行高得到每秒滚动的像素数，再除以fps得到每帧滚动的像素数
+            pixels_per_frame = (adjusted_scroll_speed * estimated_line_height) / fps
+            
+            # 取整，确保至少滚动1像素/帧
+            pixels_per_frame = max(1, round(pixels_per_frame))
+            
+            logger.info(f"滚动速度设置: {adjusted_scroll_speed:.2f}行/秒 → {pixels_per_frame}像素/帧 (行高约{estimated_line_height}像素)")
 
             # 创建视频渲染器
             video_renderer = VideoRenderer(
-                width=width, height=height, fps=fps, scroll_speed=scroll_speed
+                width=width, height=height, fps=fps, scroll_speed=pixels_per_frame
             )
 
             # 创建滚动视频，传递决策结果

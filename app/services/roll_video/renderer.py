@@ -198,6 +198,8 @@ class VideoRenderer:
         """构造基础的ffmpeg命令"""
         command = [
             "ffmpeg", "-y",
+            # 设置全局内存限制(30GB)
+            "-max_muxing_queue_size", "1024", # 减少缓冲区大小
             "-f", "rawvideo",
             "-vcodec", "rawvideo",
             "-s", f"{self.width}x{self.height}",
@@ -302,7 +304,12 @@ class VideoRenderer:
                 "-cq:v", "21",           # Constant Quality level (good quality)
                 "-b:v", "0",              # Let CQ control bitrate
                 "-pix_fmt", "yuv420p",   # << 添加此行以提高兼容性
-                "-movflags", "+faststart"
+                "-movflags", "+faststart",
+                # 添加GPU资源限制
+                "-gpu_memory_reserved", "512M",  # 为系统保留512MB显存
+                "-surfaces", "16",        # 限制NVENC表面数量，减少显存使用
+                "-spatial-aq", "1",       # 启用空间自适应量化，提高编码效率
+                "-temporal-aq", "1"       # 启用时间自适应量化，进一步提高效率
             ]
             # CPU 回退参数: libx264, preset medium(默认), CRF 21, pix_fmt yuv420p, faststart
             cpu_fallback_codec_and_output_params = [
@@ -310,7 +317,13 @@ class VideoRenderer:
                 "-crf", "21",            # Constant Rate Factor (good quality)
                 "-preset", "medium",      # Default preset (good balance)
                 "-pix_fmt", "yuv420p",   # Required by libx264 for mp4
-                "-movflags", "+faststart"
+                "-movflags", "+faststart",
+                # 添加CPU资源限制
+                "-threads", "8",          # 限制使用最多8个CPU线程
+                "-row-mt", "1",           # 启用行级多线程，更高效利用线程
+                "-aq-mode", "1",          # 启用方差自适应量化模式1，提高编码效率
+                "-g", "300",              # 设置GOP大小，减少关键帧频率，降低CPU负担
+                "-bufsize", "20M"         # 限制缓冲区大小，间接限制内存使用
             ]
             logger.info(f"设置ffmpeg(不透明): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
             logger.info(f"  首选GPU参数: {' '.join(video_codec_and_output_params)}")
@@ -349,54 +362,89 @@ class VideoRenderer:
                 codec_name = "unknown"
                 try: codec_name = current_codec_params[current_codec_params.index("-c:v") + 1]
                 except (ValueError, IndexError): pass
-                frame_iterator = tqdm.tqdm(range(total_frames), desc=f"编码 ({codec_name}) ")
-                for frame_idx in frame_iterator:
-                    if frame_idx < padding_frames_start: current_position = 0
+                
+                # 性能优化：预计算所有帧的位置信息
+                logger.info("预计算帧位置信息以提高性能...")
+                frame_positions = []
+                for frame_idx in range(total_frames):
+                    if frame_idx < padding_frames_start: 
+                        frame_positions.append(0)
                     elif frame_idx < padding_frames_start + scroll_frames:
                         scroll_progress = frame_idx - padding_frames_start
                         current_position = scroll_progress * self.scroll_speed
                         current_position = min(current_position, scroll_distance)
-                    else: current_position = scroll_distance
-                    img_start_y = int(current_position)
-                    img_end_y = min(img_height, img_start_y + self.height)
-                    frame_start_y = 0
-                    frame_end_y = img_end_y - img_start_y
-                    output_frame_data = None
-                    if img_start_y < img_end_y and frame_start_y < frame_end_y and frame_end_y <= self.height:
-                        img_h_slice = slice(img_start_y, img_end_y)
-                        img_w_slice = slice(0, min(self.width, img_width))
-                        frame_h_slice = slice(frame_start_y, frame_end_y)
-                        frame_w_slice = slice(0, min(self.width, img_width))
-                        source_section = img_array[img_h_slice, img_w_slice]
+                        frame_positions.append(int(current_position))
+                    else: 
+                        frame_positions.append(int(scroll_distance))
+                
+                # 预先创建背景帧模板
+                if transparency_required:
+                    bg_template = np.zeros((self.height, self.width, 4), dtype=np.uint8)
+                else:
+                    bg_template = background_frame_rgb.copy()
+                    
+                # 使用更大的批处理大小提高性能
+                batch_size = 30
+                num_batches = (total_frames + batch_size - 1) // batch_size
+                
+                # 使用进度条显示编码进度
+                frame_iterator = tqdm.tqdm(range(num_batches), desc=f"编码 ({codec_name}) ")
+                for batch_idx in frame_iterator:
+                    start_frame = batch_idx * batch_size
+                    end_frame = min(start_frame + batch_size, total_frames)
+                    
+                    for frame_idx in range(start_frame, end_frame):
+                        # 获取当前帧的滚动位置
+                        img_start_y = frame_positions[frame_idx]
+                        img_end_y = min(img_height, img_start_y + self.height)
+                        frame_start_y = 0
+                        frame_end_y = img_end_y - img_start_y
+                        
+                        # 准备当前帧
                         if transparency_required:
-                            frame_rgba = np.zeros((self.height, self.width, 4), dtype=np.uint8)
-                            target_area = frame_rgba[frame_h_slice, frame_w_slice]
-                            if target_area.shape[:2] == source_section.shape[:2]: np.copyto(target_area, source_section)
-                            else: copy_width = min(target_area.shape[1], source_section.shape[1]); target_area[:target_area.shape[0], :copy_width] = source_section[:target_area.shape[0], :copy_width]
-                            output_frame_data = frame_rgba.tobytes()
+                            frame = bg_template.copy()
                         else:
-                            frame_rgb = background_frame_rgb.copy()
-                            target_area = frame_rgb[frame_h_slice, frame_w_slice]
-                            if target_area.shape[:2] == source_section.shape[:2]:
-                                alpha = source_section[:, :, 3:4].astype(np.float32) / 255.0
-                                blended = (source_section[:, :, :3].astype(np.float32) * alpha + target_area.astype(np.float32) * (1.0 - alpha))
-                                np.copyto(target_area, blended.astype(np.uint8))
+                            frame = bg_template.copy()
+                            
+                        # 如果有内容要显示
+                        if img_start_y < img_end_y and frame_start_y < frame_end_y and frame_end_y <= self.height:
+                            # 提取图像相关区域
+                            img_h_slice = slice(img_start_y, img_end_y)
+                            img_w_slice = slice(0, min(self.width, img_width))
+                            frame_h_slice = slice(frame_start_y, frame_end_y)
+                            frame_w_slice = slice(0, min(self.width, img_width))
+                            source_section = img_array[img_h_slice, img_w_slice]
+                            
+                            # 将内容复制到帧中
+                            target_area = frame[frame_h_slice, frame_w_slice]
+                            
+                            if transparency_required:
+                                # 透明背景直接复制
+                                if target_area.shape[:2] == source_section.shape[:2]:
+                                    np.copyto(target_area, source_section)
+                                else:
+                                    copy_width = min(target_area.shape[1], source_section.shape[1])
+                                    target_area[:target_area.shape[0], :copy_width] = source_section[:target_area.shape[0], :copy_width]
                             else:
-                                copy_width = min(target_area.shape[1], source_section.shape[1])
-                                source_section_crop = source_section[:target_area.shape[0], :copy_width]
-                                target_area_crop = target_area[:target_area.shape[0], :copy_width]
-                                alpha = source_section_crop[:, :, 3:4].astype(np.float32) / 255.0
-                                blended = (source_section_crop[:, :, :3].astype(np.float32) * alpha + target_area_crop.astype(np.float32) * (1.0 - alpha))
-                                target_area[:target_area.shape[0], :copy_width] = blended.astype(np.uint8)
-                            output_frame_data = frame_rgb.tobytes()
-                    else:
-                        if transparency_required: output_frame_data = np.zeros((self.height, self.width, 4), dtype=np.uint8).tobytes()
-                        else: output_frame_data = background_frame_rgb.tobytes()
-                    if output_frame_data:
-                        try: process.stdin.write(output_frame_data)
+                                # 不透明背景需要混合
+                                if target_area.shape[:2] == source_section.shape[:2]:
+                                    alpha = source_section[:, :, 3:4].astype(np.float32) / 255.0
+                                    blended = source_section[:, :, :3] * alpha + target_area * (1.0 - alpha)
+                                    np.copyto(target_area, blended.astype(np.uint8))
+                                else:
+                                    copy_width = min(target_area.shape[1], source_section.shape[1])
+                                    source_crop = source_section[:target_area.shape[0], :copy_width]
+                                    target_crop = target_area[:target_area.shape[0], :copy_width]
+                                    alpha = source_crop[:, :, 3:4].astype(np.float32) / 255.0
+                                    blended = source_crop[:, :, :3] * alpha + target_crop * (1.0 - alpha)
+                                    target_area[:target_area.shape[0], :copy_width] = blended.astype(np.uint8)
+                        
+                        # 将帧数据写入ffmpeg
+                        try:
+                            process.stdin.write(frame.tobytes())
                         except (IOError, BrokenPipeError) as e:
                             logger.error(f"写入ffmpeg管道时出错: {e}")
-                            # 写入失败时，尝试获取stderr, 可能需要等待线程
+                            # 写入失败时，尝试获取stderr
                             stderr_lines_on_error = []
                             while True:
                                 try: line = stderr_q.get(timeout=0.1)
