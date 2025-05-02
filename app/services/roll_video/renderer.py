@@ -1817,6 +1817,7 @@ class VideoRenderer:
 
         # 更新滚动距离和速度，用于其他方法判断滚动状态
         # self.scroll_distance 现在代表完全滚出所需的距离
+        # 将 self.scroll_distance 的赋值移到 total_frames 计算之前
         self.scroll_distance = scroll_distance_needed
         self.scroll_speed = actual_scroll_speed  # 保存实际使用的滚动速度
 
