@@ -376,31 +376,43 @@ class RollVideoService:
             if video_renderer.use_frame_cache and frame_index in frame_cache:
                 return frame_cache[frame_index]
             
-            # 计算当前帧文本图像的起始y坐标 (从底部向上滚动)
-            # 初始位置让文本底部在视频底部之下一个屏幕高度处
-            # 随着frame_index增加，y_start减小，图像向上移动
-            y_start = img_height - (frame_index * scroll_speed) - target_height
+            # 计算当前帧文本图像的起始y坐标 (从顶部向下滚动源图像)
+            # frame_index=0 时 y_start=0，显示图像顶部
+            # 随着 frame_index 增加，y_start 增加，截取区域下移 (实现文字上滚效果)
+            y_start = frame_index * scroll_speed
 
-            # 计算需要从文本图像中截取的区域
+            # 计算需要从文本图像中截取的区域的结束y坐标
             y_end = y_start + target_height
             
             # 边界检查 (确保截取范围在图像内)
             slice_y_start = max(0, y_start)
             slice_y_end = min(img_height, y_end)
             
-            # 如果截取区域无效 (完全在图像上方或下方)，则生成空白帧
-            if slice_y_end <= slice_y_start or slice_y_start >= img_height:
+            # 如果截取区域无效 (完全在图像下方)，则生成空白帧
+            # (y_start 已经超出了 img_height)
+            if slice_y_start >= img_height:
                 if transparent_bg:
                     # 返回全透明帧 (RGBA)
                     frame_data = np.zeros((target_height, target_width, 4), dtype=target_dtype)
                 else:
-                    # 返回纯色背景帧 (RGB)，颜色来自VideoRenderer的预期？
-                    # TODO: 应该使用传入的bg_color参数，但这里不易获取，暂时用黑色
+                    # 返回纯色背景帧 (RGB) - TODO: 使用bg_color
                     frame_data = np.zeros((target_height, target_width, 3), dtype=target_dtype)
                 
-                # 缓存空白帧
+                # 缓存空白帧 (如果启用)
                 if video_renderer.use_frame_cache:
                     frame_cache[frame_index] = frame_data
+                return frame_data
+            
+            # 确保 slice_y_end > slice_y_start
+            # (防止因浮点误差或极端情况导致无效切片)
+            if slice_y_end <= slice_y_start:
+                # 理论上不应发生在此处，因为上面有检查，但作为安全措施添加
+                if transparent_bg:
+                     frame_data = np.zeros((target_height, target_width, 4), dtype=target_dtype)
+                else:
+                     frame_data = np.zeros((target_height, target_width, 3), dtype=target_dtype)
+                if video_renderer.use_frame_cache:
+                     frame_cache[frame_index] = frame_data
                 return frame_data
 
             # 从Numpy数组中截取对应帧的图像部分
@@ -408,41 +420,49 @@ class RollVideoService:
             source_alpha = alpha_channel[slice_y_start:slice_y_end, :, :]
             
             # 计算截取部分在目标帧中的起始y坐标
-            target_y_start = max(0, -y_start)
-            target_y_end = target_y_start + (slice_y_end - slice_y_start)
+            # 由于滚动是通过移动源图像的截取窗口实现的，
+            # 截取到的内容总是粘贴到目标帧的顶部。
+            target_y_start = 0
             
-            # 确保目标坐标在范围内
+            # 计算截取内容的高度
+            paste_height = slice_y_end - slice_y_start
+            target_y_end = target_y_start + paste_height
+            
+            # 确保目标坐标在范围内 (安全检查)
             target_y_end = min(target_height, target_y_end)
-            if target_y_start >= target_height:
-                # 这种情况理论上不应发生，因为前面有检查，但也处理一下
+            # 更新实际粘贴的高度
+            paste_height = target_y_end - target_y_start 
+            if paste_height <= 0:
+                 # 如果粘贴高度无效，返回空白帧
                  if transparent_bg:
-                    frame_data = np.zeros((target_height, target_width, 4), dtype=target_dtype)
+                     frame_data = np.zeros((target_height, target_width, 4), dtype=target_dtype)
                  else:
-                    frame_data = np.zeros((target_height, target_width, 3), dtype=target_dtype)
+                     frame_data = np.zeros((target_height, target_width, 3), dtype=target_dtype)
                  if video_renderer.use_frame_cache:
                      frame_cache[frame_index] = frame_data
                  return frame_data
+                 
+            # 如果粘贴高度小于截取高度，需要调整源数据的截取范围
+            if paste_height < source_rgb.shape[0]:
+                 source_rgb = source_rgb[:paste_height, :, :]
+                 source_alpha = source_alpha[:paste_height, :, :]
 
             # 创建目标帧画布
             if transparent_bg:
                 # RGBA画布，初始为全透明
                 frame_canvas = np.zeros((target_height, target_width, 4), dtype=target_dtype)
                 # 直接将带Alpha通道的RGB数据复制到画布对应位置
-                # 注意：这里假设FFmpeg能处理带Alpha的输入
-                frame_canvas[target_y_start:target_y_end, :, :3] = (source_rgb * 255).astype(target_dtype)
-                frame_canvas[target_y_start:target_y_end, :, 3:4] = (source_alpha * 255).astype(target_dtype)
+                frame_canvas[target_y_start:target_y_end, :, :3] = (source_rgb * 255).astype(np.uint8) # 确保是 uint8
+                frame_canvas[target_y_start:target_y_end, :, 3:4] = (source_alpha * 255).astype(np.uint8) # 确保是 uint8
             else:
                 # RGB画布，初始为黑色 (或其他背景色?)
                 # TODO: 需要获取原始bg_color参数才能正确设置背景
-                # 暂时使用黑色背景
                 frame_canvas = np.zeros((target_height, target_width, 3), dtype=np.float32) # 使用float32进行混合
                 
                 # 获取目标区域的视图
                 target_section = frame_canvas[target_y_start:target_y_end, :, :]
                 
-                # 使用Alpha混合将文字混合到黑色背景上
-                # target = background * (1-alpha) + foreground * alpha
-                # background 是黑色 (0), 所以 target = foreground * alpha
+                # Alpha混合
                 blended_section = blend_alpha_fast(source_rgb, target_section, source_alpha)
                 
                 # 将混合结果放回画布
