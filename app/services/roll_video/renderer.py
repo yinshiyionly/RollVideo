@@ -1546,10 +1546,10 @@ class VideoRenderer:
         
         # --- 修改计算逻辑 --- 
         # 计算文本完全滚出屏幕所需的帧数
-        # 由于起始位置为-screen_height，总滚动距离需包括屏幕高度
-        total_scroll_distance = text_height + self.height
-        scroll_frames_needed = int(np.ceil(total_scroll_distance / actual_scroll_speed))
-        logger.info(f"文本完全滚出屏幕需要 {scroll_frames_needed} 帧 (总滚动距离={total_scroll_distance}px)")
+        # text_height已经是传入的完整图像高度（包含文本实际高度和屏幕高度）
+        # 因此直接使用这个高度计算总帧数
+        scroll_frames_needed = int(np.ceil(text_height / actual_scroll_speed))
+        logger.info(f"文本完全滚出屏幕需要 {scroll_frames_needed} 帧 (图像总高度={text_height}px)")
         
         # 添加 3 秒停留帧
         pause_frames = self.fps * 3
@@ -1575,7 +1575,7 @@ class VideoRenderer:
                    f"计算总帧数: {total_frames} (滚动: {scroll_frames_needed}, 停留: {pause_frames})")
                    
         # 更新 self.scroll_distance 为总滚动距离
-        # 设置为文本完全滚出所需距离，包括初始屏幕高度
-        self.scroll_distance = total_scroll_distance
+        # 直接使用图像高度，无需再加屏幕高度
+        self.scroll_distance = text_height
                    
         return total_frames

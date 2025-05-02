@@ -288,11 +288,12 @@ class RollVideoService:
         logger.info(f"文本图片已生成，尺寸: {text_img.size}, 文本高度: {text_height}")
 
         # --- 计算滚动结束帧 --- 
-        # 由于起始位置调整为 -target_height，需要计算文本完全滚出屏幕的帧数
-        # 总滚动距离 = 文本高度 + 屏幕高度 (文本从屏幕底部完全进入到屏幕顶部完全离开)
-        total_scroll_distance = text_height + scaled_height
-        scroll_frames_needed = int(np.ceil(total_scroll_distance / scaled_scroll_speed))
-        logger.info(f"计算得到文本滚出所需帧数: {scroll_frames_needed} (总滚动距离={total_scroll_distance}px)")
+        # 注意：render_text_to_image已经创建了一个高度为(text_height + screen_height)的图像
+        # 所以图像本身已经包含了所需的空白区域，不需要再加屏幕高度
+        # 只需要滚动整个图像的高度即可
+        img_height = text_img.size[1]  # 获取图像实际高度
+        scroll_frames_needed = int(np.ceil(img_height / scaled_scroll_speed))
+        logger.info(f"计算得到文本滚出所需帧数: {scroll_frames_needed} (图像总高度={img_height}px, 文本实际高度={text_height}px)")
         # ---------------------
 
         # 初始化 VideoRenderer
