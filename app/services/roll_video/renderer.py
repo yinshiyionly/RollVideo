@@ -506,8 +506,8 @@ class VideoRenderer:
                 # 决定使用多少个进程进行渲染
                 try:
                     cpu_count = mp.cpu_count()
-                    # 使用可用CPU核心数，不限制上限
-                    num_processes = max(1, cpu_count - 1)  # 留出一个核心给系统和主进程
+                    # 使用可用CPU核心数，但限制在8核以内
+                    num_processes = min(8, max(1, cpu_count - 1))  # 限制最多使用8核，留出一个核心给系统和主进程
                     logger.info(f"检测到{cpu_count}个CPU核心，将使用{num_processes}个进程进行渲染")
                 except:
                     # 如果无法检测CPU数量，默认使用6个进程
@@ -523,6 +523,9 @@ class VideoRenderer:
                 # 设置全局共享图像数组，用于多进程渲染
                 global _g_img_array
                 _g_img_array = img_array
+                
+                # 添加一个开始时间记录
+                start_time = time.time()
                 
                 # 使用进度条显示编码进度
                 frame_iterator = tqdm.tqdm(range(num_batches), desc=f"编码 ({codec_name}) ")
@@ -615,6 +618,12 @@ class VideoRenderer:
                 
                 # 清理全局图像数组
                 _g_img_array = None
+                
+                # 计算并输出总帧率
+                end_time = time.time()
+                total_time = end_time - start_time
+                frames_per_second = total_frames / total_time if total_time > 0 else 0
+                logger.info(f"总渲染性能: 渲染了{total_frames}帧，耗时{total_time:.2f}秒，平均{frames_per_second:.2f}帧/秒")
                 
                 logger.info("所有帧已写入管道，关闭stdin...")
                 process.stdin.close()
