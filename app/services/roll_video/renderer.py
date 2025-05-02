@@ -14,8 +14,22 @@ import threading
 import queue
 import gc  # 添加垃圾回收模块
 import time
+import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor
+import ctypes  # 用于共享内存优化
 
 logger = logging.getLogger(__name__)
+
+# 设置NumPy以使用多线程加速计算
+try:
+    # 尝试设置NumPy使用更多线程以提高性能
+    if 'OMP_NUM_THREADS' not in os.environ:
+        os.environ['OMP_NUM_THREADS'] = '4'  # 设置OpenMP线程数
+    if 'MKL_NUM_THREADS' not in os.environ:
+        os.environ['MKL_NUM_THREADS'] = '4'  # 设置MKL线程数
+    logger.info(f"已设置NumPy优化: OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS')}, MKL_NUM_THREADS={os.environ.get('MKL_NUM_THREADS')}")
+except Exception as e:
+    logger.warning(f"设置NumPy线程优化失败: {e}")
 
 # 尝试导入资源限制模块（如果可用）
 try:
@@ -49,6 +63,70 @@ try:
     limit_resources()
 except Exception as e:
     logger.warning(f"尝试限制资源时发生错误: {e}")
+
+# 在多线程/多进程中共享的全局变量
+_g_img_array = None  # 全局共享的图像数组
+
+def _process_frame(args):
+    """多进程帧处理函数"""
+    global _g_img_array
+    
+    frame_idx, img_start_y, img_height, img_width, self_height, self_width, frame_positions, is_transparent, bg_color = args
+    img_end_y = min(img_height, img_start_y + self_height)
+    frame_start_y = 0
+    frame_end_y = img_end_y - img_start_y
+    
+    # 空帧情况下直接返回
+    if img_start_y >= img_end_y or frame_start_y >= frame_end_y or frame_end_y > self_height or _g_img_array is None:
+        # 创建空帧
+        if is_transparent:
+            frame = np.zeros((self_height, self_width, 4), dtype=np.uint8)
+        else:
+            # 使用背景色
+            frame = np.ones((self_height, self_width, 3), dtype=np.uint8) * np.array(bg_color, dtype=np.uint8)
+        return frame_idx, frame
+    
+    # 创建帧
+    if is_transparent:
+        frame = np.zeros((self_height, self_width, 4), dtype=np.uint8)
+    else:
+        # 使用背景色
+        frame = np.ones((self_height, self_width, 3), dtype=np.uint8) * np.array(bg_color, dtype=np.uint8)
+    
+    # 提取图像相关区域
+    img_h_slice = slice(img_start_y, img_end_y)
+    img_w_slice = slice(0, min(self_width, img_width))
+    frame_h_slice = slice(frame_start_y, frame_end_y)
+    frame_w_slice = slice(0, min(self_width, img_width))
+    
+    try:
+        source_section = _g_img_array[img_h_slice, img_w_slice]
+        target_area = frame[frame_h_slice, frame_w_slice]
+        
+        if is_transparent:
+            # 透明背景处理
+            if target_area.shape[:2] == source_section.shape[:2]:
+                np.copyto(target_area, source_section)
+            else:
+                copy_width = min(target_area.shape[1], source_section.shape[1])
+                target_area[:target_area.shape[0], :copy_width] = source_section[:target_area.shape[0], :copy_width]
+        else:
+            # 不透明背景处理
+            if target_area.shape[:2] == source_section.shape[:2]:
+                alpha = source_section[:, :, 3:4].astype(np.float32) / 255.0
+                blended = source_section[:, :, :3] * alpha + target_area * (1.0 - alpha)
+                np.copyto(target_area, blended.astype(np.uint8))
+            else:
+                copy_width = min(target_area.shape[1], source_section.shape[1])
+                source_crop = source_section[:target_area.shape[0], :copy_width]
+                target_crop = target_area[:target_area.shape[0], :copy_width]
+                alpha = source_crop[:, :, 3:4].astype(np.float32) / 255.0
+                blended = source_crop[:, :, :3] * alpha + target_crop * (1.0 - alpha)
+                target_area[:target_area.shape[0], :copy_width] = blended.astype(np.uint8)
+    except Exception as e:
+        logger.error(f"处理帧 {frame_idx} 时出错: {e}")
+    
+    return frame_idx, frame
 
 class TextRenderer:
     """文字渲染器，负责将文本渲染成图片"""
@@ -415,15 +493,36 @@ class VideoRenderer:
                 # 根据图像尺寸调整批处理大小，确保不会占用过多内存
                 # 假设单帧RGBA图像内存 = 宽*高*4字节
                 frame_memory_mb = (self.width * self.height * 4) / (1024*1024)
-                # 设置最大内存使用量（控制在约1GB以内）
-                max_batch_memory_mb = 1024
+                # 设置最大内存使用量（提高到20GB以支持超大批处理）
+                max_batch_memory_mb = 20 * 1024  # 20GB
                 # 计算适合的批处理大小
-                adaptive_batch_size = max(1, min(30, int(max_batch_memory_mb / frame_memory_mb)))
+                adaptive_batch_size = max(1, min(120, int(max_batch_memory_mb / frame_memory_mb)))
                 logger.info(f"单帧内存估算: {frame_memory_mb:.2f}MB, 自适应批处理大小: {adaptive_batch_size}")
                 
                 # 使用自适应批处理大小
                 batch_size = adaptive_batch_size
                 num_batches = (total_frames + batch_size - 1) // batch_size
+                
+                # 决定使用多少个进程进行渲染
+                try:
+                    cpu_count = mp.cpu_count()
+                    # 使用可用CPU核心数，不限制上限
+                    num_processes = max(1, cpu_count - 1)  # 留出一个核心给系统和主进程
+                    logger.info(f"检测到{cpu_count}个CPU核心，将使用{num_processes}个进程进行渲染")
+                except:
+                    # 如果无法检测CPU数量，默认使用6个进程
+                    num_processes = 6
+                    logger.info(f"无法检测CPU核心数，默认使用{num_processes}个进程")
+                
+                # 准备背景色参数（为了多进程）
+                if not transparency_required and bg_color and len(bg_color) >= 3:
+                    bg_color_rgb = bg_color[:3]
+                else:
+                    bg_color_rgb = (0, 0, 0)  # 默认黑色
+                
+                # 设置全局共享图像数组，用于多进程渲染
+                global _g_img_array
+                _g_img_array = img_array
                 
                 # 使用进度条显示编码进度
                 frame_iterator = tqdm.tqdm(range(num_batches), desc=f"编码 ({codec_name}) ")
@@ -431,86 +530,91 @@ class VideoRenderer:
                 # 周期性垃圾回收计数器
                 gc_counter = 0
                 
-                for batch_idx in frame_iterator:
+                # 提前准备批帧参数以提高性能
+                frame_batch_params = []
+                for batch_idx in range(num_batches):
                     start_frame = batch_idx * batch_size
                     end_frame = min(start_frame + batch_size, total_frames)
+                    batch_frames = []
                     
                     for frame_idx in range(start_frame, end_frame):
-                        # 获取当前帧的滚动位置
                         img_start_y = frame_positions[frame_idx]
-                        img_end_y = min(img_height, img_start_y + self.height)
-                        frame_start_y = 0
-                        frame_end_y = img_end_y - img_start_y
-                        
-                        # 准备当前帧
-                        if transparency_required:
-                            frame = bg_template.copy()
-                        else:
-                            frame = bg_template.copy()
-                            
-                        # 如果有内容要显示
-                        if img_start_y < img_end_y and frame_start_y < frame_end_y and frame_end_y <= self.height:
-                            # 提取图像相关区域
-                            img_h_slice = slice(img_start_y, img_end_y)
-                            img_w_slice = slice(0, min(self.width, img_width))
-                            frame_h_slice = slice(frame_start_y, frame_end_y)
-                            frame_w_slice = slice(0, min(self.width, img_width))
-                            source_section = img_array[img_h_slice, img_w_slice]
-                            
-                            # 将内容复制到帧中
-                            target_area = frame[frame_h_slice, frame_w_slice]
-                            
-                            if transparency_required:
-                                # 透明背景直接复制
-                                if target_area.shape[:2] == source_section.shape[:2]:
-                                    np.copyto(target_area, source_section)
-                                else:
-                                    copy_width = min(target_area.shape[1], source_section.shape[1])
-                                    target_area[:target_area.shape[0], :copy_width] = source_section[:target_area.shape[0], :copy_width]
-                            else:
-                                # 不透明背景需要混合
-                                if target_area.shape[:2] == source_section.shape[:2]:
-                                    alpha = source_section[:, :, 3:4].astype(np.float32) / 255.0
-                                    blended = source_section[:, :, :3] * alpha + target_area * (1.0 - alpha)
-                                    np.copyto(target_area, blended.astype(np.uint8))
-                                else:
-                                    copy_width = min(target_area.shape[1], source_section.shape[1])
-                                    source_crop = source_section[:target_area.shape[0], :copy_width]
-                                    target_crop = target_area[:target_area.shape[0], :copy_width]
-                                    alpha = source_crop[:, :, 3:4].astype(np.float32) / 255.0
-                                    blended = source_crop[:, :, :3] * alpha + target_crop * (1.0 - alpha)
-                                    target_area[:target_area.shape[0], :copy_width] = blended.astype(np.uint8)
-                        
-                        # 将帧数据写入ffmpeg
-                        try:
-                            frame_data = frame.tobytes()
-                            process.stdin.write(frame_data)
-                            # 内存优化：清除不再需要的变量
-                            del frame_data
-                            del frame
-                        except (IOError, BrokenPipeError) as e:
-                            logger.error(f"写入ffmpeg管道时出错: {e}")
-                            # 写入失败时，尝试获取stderr
-                            stderr_lines_on_error = []
-                            while True:
-                                try: line = stderr_q.get(timeout=0.1)
-                                except queue.Empty: break
-                                if line is None: break
-                                stderr_lines_on_error.append(line.decode(errors='ignore').strip())
-                            # 修正：先 join 再放入 f-string
-                            stderr_content_on_error = "\n".join(stderr_lines_on_error)
-                            logger.error(f"ffmpeg stderr (写入时):\n{stderr_content_on_error}")
-                            raise Exception(f"ffmpeg进程意外终止: {e}") from e
+                        # 将参数保存为元组，避免在循环中重复计算
+                        frame_params = (frame_idx, img_start_y, img_height, img_width, self.height, self.width, frame_positions, transparency_required, bg_color_rgb)
+                        batch_frames.append(frame_params)
                     
-                    # 周期性垃圾回收，每处理5个批次执行一次
-                    gc_counter += 1
-                    if gc_counter >= 5:
-                        gc_counter = 0
-                        # 强制执行垃圾回收
-                        collected = gc.collect()
-                        logger.debug(f"执行垃圾回收，释放对象数: {collected}")
-                        # 短暂休眠，给系统喘息的机会
-                        time.sleep(0.01)
+                    frame_batch_params.append(batch_frames)
+                
+                # 创建线程池，用于并行写入数据到ffmpeg（增加线程数以提高I/O吞吐量）
+                executor = ThreadPoolExecutor(max_workers=4)  # 增加到4个写入线程
+                write_futures = []
+                
+                # 超大批次处理模式
+                logger.info(f"启用超大批处理模式，批次大小: {adaptive_batch_size}")
+                
+                # 使用多进程处理帧
+                with mp.Pool(processes=num_processes) as pool:
+                    for batch_idx in frame_iterator:
+                        batch_frames = frame_batch_params[batch_idx]
+                        
+                        # 并行处理一批帧
+                        processed_frames = pool.map(_process_frame, batch_frames)
+                        
+                        # 按顺序写入处理后的帧
+                        for frame_idx, frame in sorted(processed_frames):
+                            if frame is not None:
+                                try:
+                                    # 使用线程池异步写入数据
+                                    future = executor.submit(lambda d: process.stdin.write(d), frame.tobytes())
+                                    write_futures.append(future)
+                                    
+                                    # 限制最大并行写入数量，避免队列过长（增加并行写入数）
+                                    if len(write_futures) > 20:  # 从10增加到20
+                                        # 等待最早的一个写入操作完成
+                                        write_futures[0].result()
+                                        write_futures = write_futures[1:]
+                                except (IOError, BrokenPipeError) as e:
+                                    logger.error(f"写入ffmpeg管道时出错: {e}")
+                                    # 写入失败时，尝试获取stderr
+                                    stderr_lines_on_error = []
+                                    while True:
+                                        try: line = stderr_q.get(timeout=0.1)
+                                        except queue.Empty: break
+                                        if line is None: break
+                                        stderr_lines_on_error.append(line.decode(errors='ignore').strip())
+                                    stderr_content_on_error = "\n".join(stderr_lines_on_error)
+                                    logger.error(f"ffmpeg stderr (写入时):\n{stderr_content_on_error}")
+                                    raise Exception(f"ffmpeg进程意外终止: {e}") from e
+                            
+                                # 清理帧数据，及时释放内存
+                                del frame
+                        
+                        # 周期性垃圾回收，每处理5个批次执行一次
+                        gc_counter += 1
+                        if gc_counter >= 5:  # 由于批处理增大，减少垃圾回收频率
+                            gc_counter = 0
+                            collected = gc.collect()
+                            logger.debug(f"执行垃圾回收，释放对象数: {collected}")
+                            
+                            # 在每次垃圾回收后强制释放内存（仅适用于Linux）
+                            if HAS_RESOURCE_MODULE and os.name == 'posix':
+                                try:
+                                    # 在Linux系统上尝试释放未使用内存回操作系统
+                                    os.system('sync')  # 刷新文件系统缓冲区
+                                    with open('/proc/sys/vm/drop_caches', 'w') as f:
+                                        f.write('1')
+                                except:
+                                    pass
+                
+                # 等待所有写入操作完成
+                for future in write_futures:
+                    future.result()
+                    
+                # 关闭线程池
+                executor.shutdown()
+                
+                # 清理全局图像数组
+                _g_img_array = None
                 
                 logger.info("所有帧已写入管道，关闭stdin...")
                 process.stdin.close()
