@@ -402,13 +402,16 @@ class RollVideoService:
             background_frame = np.ones((target_height, target_width, 3), dtype=np.uint8) * bg_color_arr[:3]
             background_float = background_frame.astype(np.float32) / 255.0
 
+        # 记录最大有效帧索引以防止循环
+        max_valid_frame_index = scroll_frames_needed + video_renderer.fps * 3  # 加上3秒额外停留时间
+
         def frame_generator(frame_index: int) -> Optional[np.ndarray]:
             """生成指定索引的视频帧"""
             nonlocal frame_cache
             
             # --- 滚动结束后直接返回背景帧（确保不再滚动）---
-            # 严格判断滚动是否结束：要么明确超过结束帧数，要么已经滚动到图像底部
-            if frame_index >= scroll_frames_needed or (frame_index * scroll_speed) >= img_height:
+            # 严格判断滚动是否结束：要么明确超过最大有效帧，要么已经滚动到图像底部，要么超过计算的滚动帧
+            if frame_index >= max_valid_frame_index or frame_index >= scroll_frames_needed or (frame_index * scroll_speed) >= img_height:
                 logger.debug(f"帧 {frame_index}: 滚动已结束 (帧索引={frame_index}, 滚动结束帧={scroll_frames_needed}, 当前位置={frame_index * scroll_speed}px, 总高度={img_height}px)")
                 frame_data = background_frame.copy()
                 if video_renderer.use_frame_cache and frame_index not in frame_cache:

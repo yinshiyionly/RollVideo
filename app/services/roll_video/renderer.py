@@ -543,15 +543,18 @@ class VideoRenderer:
             
             # Add a counter for loop iterations
             loop_counter = 0
-
+            
+            # 添加帧计数器确保不超过总帧数
+            expected_frames_to_process = self.total_frames
+            
             # Log just before entering the loop
             logger.info("Entering main frame writing loop...")
             logger.debug(f"Initial state before loop: Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}")
 
-            while not self._event_stop.is_set() or not self._frame_queue.empty():
+            while (not self._event_stop.is_set() or not self._frame_queue.empty()) and frames_written < expected_frames_to_process:
                 # Comment out verbose loop logs, revert to DEBUG or remove if not needed
                 # logger.info(f"---> Loop {loop_counter + 1}: Entered loop top.") # Changed to INFO
-                logger.debug(f"---> Loop {loop_counter + 1}: Entered loop top.") # Reverted to DEBUG
+                logger.debug(f"---> Loop {loop_counter + 1}: Entered loop top. Frames written so far: {frames_written}/{expected_frames_to_process}")
                 
                 loop_counter += 1
                 frame_data = None # Initialize frame_data for this iteration
