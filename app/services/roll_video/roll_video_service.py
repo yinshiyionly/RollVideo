@@ -283,6 +283,12 @@ class RollVideoService:
             
         logger.info(f"文本图片已生成，尺寸: {text_img.size}, 文本高度: {text_height}")
 
+        # --- 计算滚动结束帧 --- 
+        # 在调用 calculate_total_frames 之前计算，因为需要传递给 frame_generator
+        scroll_frames_needed = int(np.ceil(text_height / scaled_scroll_speed))
+        logger.info(f"计算得到文本滚出所需帧数: {scroll_frames_needed}")
+        # ---------------------
+
         # 初始化 VideoRenderer
         video_renderer = VideoRenderer(
             width=width, # 使用原始宽度
@@ -310,7 +316,8 @@ class RollVideoService:
         frame_generator = self._create_frame_generator(
             img=text_img,               # 传递渲染好的文本图片
             video_renderer=video_renderer, # 传递VideoRenderer实例
-            scroll_speed=scaled_scroll_speed # 传递渲染分辨率下的滚动速度
+            scroll_speed=scaled_scroll_speed, # 传递渲染分辨率下的滚动速度
+            scroll_frames_needed=scroll_frames_needed # <--- 传递滚动结束帧
         )
 
         # 开始渲染视频帧
@@ -328,7 +335,7 @@ class RollVideoService:
         logger.info(f"滚动视频已成功创建: {output_path}")
         return output_path
 
-    def _create_frame_generator(self, img: Image.Image, video_renderer: VideoRenderer, scroll_speed: int) -> Callable[[int], Optional[np.ndarray]]:
+    def _create_frame_generator(self, img: Image.Image, video_renderer: VideoRenderer, scroll_speed: int, scroll_frames_needed: int) -> Callable[[int], Optional[np.ndarray]]:
         """
         创建用于生成视频帧的函数 (闭包)
         
@@ -336,6 +343,7 @@ class RollVideoService:
             img: 包含渲染文本的PIL Image对象 (RGBA格式)
             video_renderer: VideoRenderer实例，用于获取参数
             scroll_speed: 每帧滚动的像素数 (在渲染分辨率下)
+            scroll_frames_needed: 滚动结束帧数
             
         Returns:
             一个函数，接收帧索引，返回该帧的Numpy数组 (H, W, C) 或 None
@@ -366,21 +374,34 @@ class RollVideoService:
         # 如果背景透明，可能需要保持float32进行混合，或根据FFmpeg要求调整
         target_dtype = np.uint8 if not transparent_bg else np.float32 
 
-        logger.info(f"帧生成器设置: img_size=({img_width},{img_height}), target_size=({target_width},{target_height}), scroll_speed={scroll_speed}, transparent={transparent_bg}")
+        logger.info(f"帧生成器设置: img_size=({img_width},{img_height}), target_size=({target_width},{target_height}), scroll_speed={scroll_speed}, transparent={transparent_bg}, scroll_end_frame={scroll_frames_needed}")
 
         def frame_generator(frame_index: int) -> Optional[np.ndarray]:
             """生成指定索引的视频帧"""
             nonlocal frame_cache
             
-            # 如果启用了帧缓存且已缓存，直接返回
+            # --- 添加判断：滚动结束后直接返回空白帧 --- 
+            if frame_index >= scroll_frames_needed:
+                logger.debug(f"帧 {frame_index}: 滚动已结束 (>{scroll_frames_needed})，生成静态空白帧")
+                if transparent_bg:
+                    frame_data = np.zeros((target_height, target_width, 4), dtype=np.uint8) # uint8 for transparent
+                else:
+                    # TODO: 使用 bg_color
+                    frame_data = np.zeros((target_height, target_width, 3), dtype=np.uint8) # uint8 for solid
+                # 缓存空白帧 (如果启用)
+                if video_renderer.use_frame_cache and frame_index not in frame_cache: # 避免重复缓存
+                    frame_cache[frame_index] = frame_data
+                return frame_data
+            # ---------------------------------------------
+            
+            # 如果启用了帧缓存且已缓存，直接返回 (滚动阶段)
             if video_renderer.use_frame_cache and frame_index in frame_cache:
                 return frame_cache[frame_index]
             
+            # --- 滚动阶段计算逻辑 (不变) --- 
             # 计算当前帧文本图像的起始y坐标 (从顶部向下滚动源图像)
-            # frame_index=0 时 y_start=0，显示图像顶部
-            # 随着 frame_index 增加，y_start 增加，截取区域下移 (实现文字上滚效果)
             y_start = frame_index * scroll_speed
-
+            
             # 计算需要从文本图像中截取的区域的结束y坐标
             y_end = y_start + target_height
             
