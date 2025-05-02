@@ -399,13 +399,13 @@ class RollVideoService:
             background_frame = np.ones((target_height, target_width, 3), dtype=np.uint8) * bg_color_arr[:3]
             background_float = background_frame.astype(np.float32) / 255.0
 
-        # 记录最大有效帧索引以防止循环
+        # 记录最大有效帧索引以防止循环 - 移除额外停留帧
         # 确保最大帧索引至少与滚动帧数一致
         if hasattr(video_renderer, 'total_frames') and video_renderer.total_frames > 0:
-            max_valid_frame_index = min(scroll_frames_needed + video_renderer.fps * 3, video_renderer.total_frames - 1)
+            max_valid_frame_index = min(scroll_frames_needed, video_renderer.total_frames - 1)
             logger.info(f"最大有效帧索引: {max_valid_frame_index}, 总帧数: {video_renderer.total_frames}, 滚动结束帧: {scroll_frames_needed}")
         else:
-            max_valid_frame_index = scroll_frames_needed + video_renderer.fps * 3
+            max_valid_frame_index = scroll_frames_needed
             logger.info(f"未设置总帧数，使用计算的最大有效帧索引: {max_valid_frame_index}, 滚动结束帧: {scroll_frames_needed}")
 
         def frame_generator(frame_index: int) -> Optional[np.ndarray]:

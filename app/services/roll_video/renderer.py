@@ -1626,12 +1626,8 @@ class VideoRenderer:
         scroll_frames_needed = int(np.ceil(text_height / actual_scroll_speed))
         logger.info(f"文本完全滚出屏幕需要 {scroll_frames_needed} 帧 (图像总高度={text_height}px)")
         
-        # 添加 3 秒停留帧
-        pause_frames = self.fps * 3
-        logger.info(f"添加 {pause_frames} 帧 ({3} 秒) 用于滚动结束后的停留")
-        
-        # 总帧数 = 滚动帧数 + 停留帧数
-        total_frames = scroll_frames_needed + pause_frames
+        # 移除3秒停留帧
+        total_frames = scroll_frames_needed
         # -----------------------
 
         # 考虑跳帧 (frame_skip)
@@ -1647,7 +1643,7 @@ class VideoRenderer:
                 logger.info(f"应用跳帧 ({self.actual_frame_skip}) 后，总帧数从 {original_total_frames} 调整为 {total_frames}")
                 
         logger.info(f"文本高度: {text_height}px, 滚动速度: {actual_scroll_speed}px/帧, "
-                   f"计算总帧数: {total_frames} (滚动: {scroll_frames_needed}, 停留: {pause_frames})")
+                   f"计算总帧数: {total_frames} (滚动: {scroll_frames_needed})")
                    
         # 更新 self.scroll_distance 为总滚动距离
         # 直接使用图像高度，无需再加屏幕高度
