@@ -315,6 +315,20 @@ class RollVideoService:
             scroll_speed=scaled_scroll_speed # 使用渲染分辨率下的滚动速度
         )
         logger.info(f"计算得到的总帧数: {total_frames}")
+        
+        # 确认最终关键帧参数
+        logger.info(f"【重要参数确认】滚动帧数: {scroll_frames_needed}, 总帧数: {total_frames}")
+        if total_frames != scroll_frames_needed:
+            logger.warning(f"【警告】总帧数 ({total_frames}) 与滚动所需帧数 ({scroll_frames_needed}) 不一致，这可能导致视频结尾出现循环或黑屏")
+            logger.info(f"总帧数与滚动帧数应该相等，只有滚动帧被渲染为有意义内容，超出部分将渲染为背景色")
+            # 使滚动帧数与总帧数一致，避免问题
+            if total_frames > scroll_frames_needed:
+                logger.info(f"调整滚动帧数以匹配总帧数：{scroll_frames_needed} -> {total_frames}")
+                scroll_frames_needed = total_frames
+            else:
+                logger.info(f"调整总帧数以匹配滚动帧数：{total_frames} -> {scroll_frames_needed}")
+                total_frames = scroll_frames_needed
+                video_renderer.total_frames = total_frames
 
         # 创建帧生成器，传递用户指定的背景色
         frame_generator = self._create_frame_generator(
@@ -399,107 +413,86 @@ class RollVideoService:
             background_frame = np.ones((target_height, target_width, 3), dtype=np.uint8) * bg_color_arr[:3]
             background_float = background_frame.astype(np.float32) / 255.0
 
-        # 记录最大有效帧索引以防止循环 - 移除额外停留帧
-        # 确保最大帧索引至少与滚动帧数一致
-        if hasattr(video_renderer, 'total_frames') and video_renderer.total_frames > 0:
-            max_valid_frame_index = min(scroll_frames_needed, video_renderer.total_frames - 1)
-            logger.info(f"最大有效帧索引: {max_valid_frame_index}, 总帧数: {video_renderer.total_frames}, 滚动结束帧: {scroll_frames_needed}")
-        else:
-            max_valid_frame_index = scroll_frames_needed
-            logger.info(f"未设置总帧数，使用计算的最大有效帧索引: {max_valid_frame_index}, 滚动结束帧: {scroll_frames_needed}")
-
+        # 明确划分两个帧索引区间：滚动区间和结束区间
+        # 滚动区间: [0, scroll_frames_needed - 1]
+        # 结束区间: [scroll_frames_needed, infinity)
+        logger.info(f"关键帧范围划分: 滚动区间[0-{scroll_frames_needed-1}], 结束区间[{scroll_frames_needed}+]")
+        
+        # 创建一个纯背景帧的缓存，避免重复创建
+        end_frame = background_frame.copy()
+        
         def frame_generator(frame_index: int) -> Optional[np.ndarray]:
-            """生成指定索引的视频帧，使用与旧版本兼容的滚动逻辑"""
+            """生成指定索引的视频帧，严格区分滚动阶段和结束阶段"""
             nonlocal frame_cache
-
-            # 检查帧索引范围
-            if hasattr(video_renderer, 'total_frames') and video_renderer.total_frames > 0:
-                if frame_index < 0 or frame_index >= video_renderer.total_frames:
-                    logger.warning(f"帧索引 {frame_index} 超出有效范围 [0, {video_renderer.total_frames-1}]，返回背景帧")
-                    return background_frame.copy()
             
             # 如果启用了帧缓存且已缓存，直接返回
             if video_renderer.use_frame_cache and frame_index in frame_cache:
                 return frame_cache[frame_index]
             
-            # 采用与旧版本类似的三阶段滚动策略
-            # 1. 开始停留阶段 - 显示顶部
-            # 2. 滚动阶段 - 动态计算位置
-            # 3. 结束停留阶段 - 保持在最终位置
+            # === 关键分支点：根据帧索引确定阶段 ===
             
-            # 计算当前帧的滚动位置 (类似旧版本的逻辑)
-            current_position = 0 
-            
-            # 关键点：明确检查是否已超出滚动范围，这是防止循环的核心
+            # 结束阶段：如果帧索引超过或等于滚动所需帧数，直接返回背景帧
             if frame_index >= scroll_frames_needed:
-                logger.warning(f"【重要】帧索引 {frame_index} 已超过滚动结束帧 {scroll_frames_needed}，返回背景帧并结束滚动")
-                # 用于调试的额外信息
-                if frame_index % 10 == 0:  # 避免日志过多，每10帧记录一次
-                    logger.debug(f"滚动调试: 总帧数={getattr(video_renderer, 'total_frames', 'unknown')}, "
-                               f"滚动结束帧={scroll_frames_needed}, 图像高度={img_height}px, "
-                               f"滚动速度={scroll_speed}px/帧")
-                # 这里返回纯背景帧，确保文本完全滚出后只显示背景
-                return background_frame.copy()
+                logger.debug(f"帧索引 {frame_index} 已进入结束阶段 (滚动结束帧={scroll_frames_needed})，返回背景帧")
+                if video_renderer.use_frame_cache and frame_index not in frame_cache:
+                    frame_cache[frame_index] = end_frame
+                return end_frame
+                
+            # === 滚动阶段 ===
             
-            # 正常滚动阶段
+            # 计算滚动位置
             current_position = frame_index * scroll_speed
-            # 确保不超过总滚动距离
-            current_position = min(current_position, img_height)
             
-            # 额外检查：如果已滚动到图像底部，返回背景帧
+            # 边界检查：如果已超出图像高度，返回背景帧（内部安全检查）
             if current_position >= img_height:
-                logger.info(f"帧 {frame_index}: 滚动位置 {current_position}px 已达到图像高度 {img_height}px，返回背景帧")
-                return background_frame.copy()
+                logger.debug(f"帧 {frame_index}: 位置 {current_position}px 超出图像高度 {img_height}px")
+                if video_renderer.use_frame_cache and frame_index not in frame_cache:
+                    frame_cache[frame_index] = end_frame
+                return end_frame
+                
+            # 计算切片区域
+            slice_start = int(current_position)
+            slice_end = slice_start + target_height
             
-            # 计算在图像上的切片范围
-            img_start_y = int(current_position)
-            img_end_y = img_start_y + target_height
+            # 边界检查
+            if slice_start >= img_height or slice_start >= slice_end:
+                logger.debug(f"帧 {frame_index}: 切片范围无效 ({slice_start}:{slice_end})")
+                if video_renderer.use_frame_cache and frame_index not in frame_cache:
+                    frame_cache[frame_index] = end_frame
+                return end_frame
+                
+            # 限制切片范围
+            slice_end = min(slice_end, img_height)
+            slice_height = slice_end - slice_start
             
-            # 边界检查 - 确保不会越界
-            img_start_y = min(max(0, img_start_y), img_height)
-            img_end_y = min(img_end_y, img_height)
-            
-            # 如果切片范围无效或完全超出图像，返回纯背景帧
-            if img_start_y >= img_end_y or img_start_y >= img_height:
-                logger.debug(f"帧 {frame_index}: 位置 {current_position} 已超出图像 {img_height}，返回背景帧")
-                return background_frame.copy()
-            
-            # 计算显示的剩余高度，如果只剩很少一部分，可能直接显示背景
-            remaining_height = img_height - img_start_y
-            if remaining_height < target_height * 0.1:  # 如果剩余不到10%的屏幕高度
-                logger.info(f"帧 {frame_index}: 剩余高度仅 {remaining_height}px，不足显示区域的10%，返回背景帧")
-                return background_frame.copy()
-            
-            # 从图像数组中切片获取当前帧内容
-            slice_height = img_end_y - img_start_y
-            source_rgb = rgb_channel[img_start_y:img_end_y, :, :]
-            source_alpha = alpha_channel[img_start_y:img_end_y, :, :]
+            # 获取源数据
+            source_rgb = rgb_channel[slice_start:slice_end, :, :]
+            source_alpha = alpha_channel[slice_start:slice_end, :, :]
             
             # 创建输出帧
             if transparent_bg:
-                # 创建透明背景帧
+                # 透明背景
                 frame_canvas = background_frame.copy()
-                # 将内容复制到画布的顶部
                 frame_canvas[0:slice_height, :, :3] = (source_rgb * 255).astype(np.uint8)
                 frame_canvas[0:slice_height, :, 3:4] = (source_alpha * 255).astype(np.uint8)
             else:
-                # 创建不透明背景帧
+                # 不透明背景
                 frame_canvas = background_float.copy()
+                # Alpha混合
                 target_section = frame_canvas[0:slice_height, :, :]
-                # 进行alpha混合
                 blended_section = blend_alpha_fast(source_rgb, target_section, source_alpha)
                 frame_canvas[0:slice_height, :, :] = blended_section
-                # 转换为uint8
+                # 转换回uint8
                 frame_canvas = (frame_canvas * 255).astype(np.uint8)
-            
-            # 缓存结果
+                
+            # 缓存帧
             if video_renderer.use_frame_cache:
                 frame_cache[frame_index] = frame_canvas
-            
-            # 每100帧记录一次进度，避免日志过多
-            if frame_index % 100 == 0:
-                logger.debug(f"生成帧 {frame_index}: 位置={current_position}px, 切片={img_start_y}:{img_end_y}, 高度={slice_height}px")
+                
+            # 每500帧记录一次进度
+            if frame_index % 500 == 0:
+                logger.debug(f"生成滚动帧: {frame_index}/{scroll_frames_needed}")
                 
             return frame_canvas
-
+            
         return frame_generator
