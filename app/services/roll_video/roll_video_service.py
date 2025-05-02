@@ -341,38 +341,12 @@ class RollVideoService:
             error_callback=error_callback,
         )
 
-        # 计算总帧数
-        # 注意：这里使用原始的滚动速度和缩放后的文本高度
-        # 因为滚动是在最终分辨率下进行的，但文本内容的高度是在渲染分辨率下确定的
-        total_frames = video_renderer.calculate_total_frames(
-            text_height=text_height,  # 使用渲染后的文本高度
-            scroll_speed=scaled_scroll_speed,  # 使用渲染分辨率下的滚动速度
+        # 使用在 create_roll_video 中计算的 scroll_frames_needed 作为总帧数
+        total_frames = scroll_frames_needed
+        logger.info(f"最终确定的总帧数: {total_frames}")
+        video_renderer.total_frames = (
+            total_frames  # 确保 VideoRenderer 内部也知道总帧数
         )
-        logger.info(f"计算得到的总帧数: {total_frames}")
-
-        # 确认最终关键帧参数
-        logger.info(
-            f"【重要参数确认】滚动帧数: {scroll_frames_needed}, 总帧数: {total_frames}"
-        )
-        if total_frames != scroll_frames_needed:
-            logger.warning(
-                f"【警告】总帧数 ({total_frames}) 与滚动所需帧数 ({scroll_frames_needed}) 不一致，这可能导致视频结尾出现循环或黑屏"
-            )
-            logger.info(
-                f"总帧数与滚动帧数应该相等，只有滚动帧被渲染为有意义内容，超出部分将渲染为背景色"
-            )
-            # 使滚动帧数与总帧数一致，避免问题
-            if total_frames > scroll_frames_needed:
-                logger.info(
-                    f"调整滚动帧数以匹配总帧数：{scroll_frames_needed} -> {total_frames}"
-                )
-                scroll_frames_needed = total_frames
-            else:
-                logger.info(
-                    f"调整总帧数以匹配滚动帧数：{total_frames} -> {scroll_frames_needed}"
-                )
-                total_frames = scroll_frames_needed
-                video_renderer.total_frames = total_frames
 
         # 创建帧生成器，传递用户指定的背景色
         frame_generator = self._create_frame_generator(
@@ -385,6 +359,7 @@ class RollVideoService:
 
         # 开始渲染视频帧
         try:
+            # 直接使用计算好的 total_frames
             video_renderer.render_frames(
                 total_frames=total_frames, frame_generator=frame_generator
             )
@@ -448,21 +423,25 @@ class RollVideoService:
             f"帧生成器设置: img_size=({img_width},{img_height}), target_size=({target_width},{target_height}), scroll_speed={scroll_speed}, transparent={transparent_bg}, scroll_end_frame={scroll_frames_needed}"
         )
         # 使用用户指定的背景色创建背景帧模板
-        bg_color_arr = np.array(bg_color, dtype=np.uint8)
-        if transparent_bg:
-            # RGBA背景模板
-            background_frame = (
-                np.ones((target_height, target_width, 4), dtype=np.uint8) * bg_color_arr
-            )
-            # 预转换为浮点用于混合，仅RGB通道
-            background_float = background_frame[..., :3].astype(np.float32) / 255.0
-        else:
-            # RGB背景模板
-            background_frame = (
-                np.ones((target_height, target_width, 3), dtype=np.uint8)
-                * bg_color_arr[:3]
-            )
-            background_float = background_frame.astype(np.float32) / 255.0
+        # 如果背景透明，创建RGBA模板，否则创建RGB
+        bg_mode = "RGBA" if transparent_bg else "RGB"
+        bg_channels = 4 if transparent_bg else 3
+        # 将背景色转换为0-255范围的整数
+        bg_color_int = tuple(int(c) for c in bg_color[:bg_channels])
+
+        # 确定目标帧的数据类型
+        # 透明背景使用uint8 RGBA, 不透明背景使用uint8 RGB
+        target_dtype = np.uint8
+
+        # 创建基础背景帧 (uint8)
+        base_frame = np.full(
+            (target_height, target_width, bg_channels), bg_color_int, dtype=target_dtype
+        )
+
+        # 如果是不透明背景，创建浮点型背景用于混合计算
+        background_float = None
+        if not transparent_bg:
+            background_float = base_frame.astype(np.float32) / 255.0
 
         # 明确划分两个帧索引区间：滚动区间和结束区间
         # 滚动区间: [0, scroll_frames_needed - 1]
@@ -471,8 +450,8 @@ class RollVideoService:
             f"关键帧范围划分: 滚动区间[0-{scroll_frames_needed-1}], 结束区间[{scroll_frames_needed}+]"
         )
 
-        # 创建一个纯背景帧的缓存，避免重复创建
-        end_frame = background_frame.copy()
+        # 创建一个纯背景帧的缓存，避免重复创建 (使用 base_frame)
+        end_frame = base_frame.copy()
 
         # 创建浮点数位置累加器，精确计算滚动位置
         position_accumulator = 0.0
@@ -489,82 +468,106 @@ class RollVideoService:
 
             # 结束阶段：如果帧索引超过或等于滚动所需帧数，直接返回背景帧
             if frame_index >= scroll_frames_needed:
-                logger.debug(
-                    f"帧索引 {frame_index} 已进入结束阶段 (滚动结束帧={scroll_frames_needed})，返回背景帧"
-                )
+                # logger.debug(
+                #     f"帧索引 {frame_index} 已进入结束阶段 (滚动结束帧={scroll_frames_needed})，返回背景帧"
+                # )
+                # 缓存结束帧
                 if video_renderer.use_frame_cache and frame_index not in frame_cache:
                     frame_cache[frame_index] = end_frame
                 return end_frame
 
             # === 滚动阶段 ===
 
-            # 精确计算滚动位置 - 使用浮点数位置累加器而不是简单乘法，提高精度
-            # 尤其适用于滚动速度为小数的情况(如：0.5像素/帧)
-            if frame_index == 0:
-                # 第一帧重置累加器
-                position_accumulator = 0.0
-            else:
-                # 非第一帧，累加滚动位置
+            # 精确计算滚动位置 - 使用浮点数位置累加器
+            # 注意：第一帧 (frame_index=0) 的位置是 0
+            # 后续帧的位置是累加的
+            if frame_index > 0:
                 position_accumulator += scroll_speed
 
-            # 这里保留浮点数精度，只在实际切片时再取整
             current_position = position_accumulator
 
-            # 如果需要调试浮点精度，取消下面的注释
+            # # 调试日志
             # if frame_index % 30 == 0:  # 每30帧记录一次
             #     logger.debug(f"帧 {frame_index}: 精确位置={current_position:.2f}px, 累加器={position_accumulator:.2f}")
 
-            # 边界检查：如果已超出图像高度，返回背景帧（内部安全检查）
-            if current_position >= img_height:
-                logger.debug(
-                    f"帧 {frame_index}: 位置 {current_position:.2f}px 超出图像高度 {img_height}px"
-                )
-                if video_renderer.use_frame_cache and frame_index not in frame_cache:
-                    frame_cache[frame_index] = end_frame
-                return end_frame
-
             # 计算切片区域 - 此处转为整数用于切片
-            slice_start = int(current_position)
+            slice_start = int(round(current_position))  # 四舍五入取整可能更平滑
             slice_end = slice_start + target_height
 
-            # 边界检查
-            if slice_start >= img_height or slice_start >= slice_end:
-                logger.debug(
-                    f"帧 {frame_index}: 切片范围无效 ({slice_start}:{slice_end})"
-                )
+            # 边界检查：如果切片起点已超出图像高度，说明滚动已完成
+            if slice_start >= img_height:
+                # logger.debug(
+                #     f"帧 {frame_index}: 切片起点 {slice_start}px 超出图像高度 {img_height}px，视为结束"
+                # )
                 if video_renderer.use_frame_cache and frame_index not in frame_cache:
                     frame_cache[frame_index] = end_frame
                 return end_frame
 
-            # 限制切片范围
-            slice_end = min(slice_end, img_height)
-            slice_height = slice_end - slice_start
+            # 限制切片范围，确保不越界
+            actual_slice_start = max(0, slice_start)
+            actual_slice_end = min(img_height, slice_end)
+            slice_height = actual_slice_end - actual_slice_start
 
-            # 获取源数据
-            source_rgb = rgb_channel[slice_start:slice_end, :, :]
-            source_alpha = alpha_channel[slice_start:slice_end, :, :]
+            # 如果计算出的切片高度<=0，也视为结束
+            if slice_height <= 0:
+                # logger.debug(
+                #     f"帧 {frame_index}: 计算切片高度为 {slice_height}，视为结束"
+                # )
+                if video_renderer.use_frame_cache and frame_index not in frame_cache:
+                    frame_cache[frame_index] = end_frame
+                return end_frame
 
-            # 创建输出帧
+            # 获取源数据切片 (RGBA float32)
+            source_slice_rgba = img_np[actual_slice_start:actual_slice_end, :, :]
+            source_rgb = source_slice_rgba[:, :, :3]
+            source_alpha = source_slice_rgba[:, :, 3:4]
+
+            # 创建当前帧的画布 (从基础背景帧复制)
+            frame_canvas = base_frame.copy()
+
+            # 计算目标画布上的起始粘贴位置 (y坐标)
+            paste_y_start = 0
+            if slice_start < 0:
+                # 如果文本的一部分还在屏幕下方
+                paste_y_start = -slice_start
+
+            # 确保粘贴区域不超过画布边界
+            paste_height = min(slice_height, target_height - paste_y_start)
+            if paste_height <= 0:
+                # logger.debug(f"帧 {frame_index}: 计算粘贴高度为 {paste_height}，视为结束")
+                if video_renderer.use_frame_cache and frame_index not in frame_cache:
+                    frame_cache[frame_index] = end_frame
+                return end_frame
+
+            # --- 执行粘贴/混合 ---
             if transparent_bg:
-                # 透明背景
-                frame_canvas = background_frame.copy()
-                frame_canvas[0:slice_height, :, :3] = (source_rgb * 255).astype(
-                    np.uint8
-                )
-                frame_canvas[0:slice_height, :, 3:4] = (source_alpha * 255).astype(
-                    np.uint8
+                # 透明背景: 直接将源RGBA数据粘贴到目标位置
+                # 注意数据类型转换回 uint8
+                source_uint8 = (source_slice_rgba * 255).astype(np.uint8)
+                frame_canvas[paste_y_start : paste_y_start + paste_height, :, :] = (
+                    source_uint8[:paste_height, :, :]
                 )
             else:
-                # 不透明背景
-                frame_canvas = background_float.copy()
-                # Alpha混合
-                target_section = frame_canvas[0:slice_height, :, :]
+                # 不透明背景: Alpha混合
+                # 目标区域 (float32)
+                target_section_float = background_float[
+                    paste_y_start : paste_y_start + paste_height, :, :
+                ]
+                # 源区域 (float32)
+                source_rgb_float = source_rgb[:paste_height, :, :]
+                source_alpha_float = source_alpha[:paste_height, :, :]
+
+                # 执行混合
                 blended_section = blend_alpha_fast(
-                    source_rgb, target_section, source_alpha
+                    source_rgb_float, target_section_float, source_alpha_float
                 )
-                frame_canvas[0:slice_height, :, :] = blended_section
+                # 将混合结果放回画布 (float32)
+                frame_canvas_float = background_float.copy()
+                frame_canvas_float[
+                    paste_y_start : paste_y_start + paste_height, :, :
+                ] = blended_section
                 # 转换回uint8
-                frame_canvas = (frame_canvas * 255).astype(np.uint8)
+                frame_canvas = (frame_canvas_float * 255).astype(np.uint8)
 
             # 缓存帧
             if video_renderer.use_frame_cache:
