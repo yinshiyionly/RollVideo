@@ -334,24 +334,25 @@ class RollVideoService:
             # 默认白色背景
             bg_color = (255, 255, 255)
         
-        # 计算三个阶段的帧数
-        # 阶段1：文字滚动阶段 - 计算滚动所需的帧数
-        scroll_frames = (img.height + render_height) // scroll_speed
-        if (img.height + render_height) % scroll_speed != 0:
-            scroll_frames += 1
-            
-        # 阶段3：定格结束阶段 - 3秒的定格时间
-        ending_frames = fps * 3  # 3秒 * fps
+        # 计算文本信息
+        text_height = img.height
         
-        # 如果计算的总帧数超过了预设的总帧数，调整各阶段帧数
+        # 计算滚动阶段帧数 - 文本从底部滚动到完全离开顶部
+        scroll_distance = text_height + render_height  # 总滚动距离=文本高度+屏幕高度
+        scroll_frames = (scroll_distance // scroll_speed) + (1 if scroll_distance % scroll_speed != 0 else 0)
+        
+        # 定格阶段 - 保持3秒
+        ending_frames = fps * 3
+        
+        # 确保不超过总帧数
         if scroll_frames + ending_frames > total_frames:
-            if ending_frames > total_frames // 3:
-                ending_frames = total_frames // 3  # 最多占1/3的帧数
-            scroll_frames = total_frames - ending_frames
+            scroll_frames = total_frames - min(ending_frames, total_frames // 4)
+            if scroll_frames <= 0:
+                scroll_frames = total_frames
+                ending_frames = 0
+                
+        logger.info(f"文本高度={text_height}, 滚动距离={scroll_distance}, 滚动阶段={scroll_frames}帧, 定格阶段={ending_frames}帧")
         
-        logger.info(f"阶段1(滚动): {scroll_frames}帧, 阶段3(定格): {ending_frames}帧, 总帧数: {total_frames}")
-        
-        # 返回帧生成函数
         def frame_generator(frame_index):
             try:
                 # 创建视频帧
@@ -360,55 +361,59 @@ class RollVideoService:
                 else:
                     frame = Image.new("RGB", (render_width, render_height), bg_color)
                 
-                # 确定当前帧属于哪个阶段
                 if frame_index < scroll_frames:
-                    # 阶段1：文字滚动阶段
-                    # 计算当前滚动距离
-                    current_scroll = frame_index * scroll_speed
+                    # 关键改变：文字从底部开始滚动，而不是从顶部
+                    # frame_index=0时，文字应该在屏幕底部
                     
-                    # 计算文本Y坐标
-                    text_y = 0 - current_scroll
+                    # 计算文本相对于屏幕底部的位置
+                    # 从底部向上滚动，scroll_pos从0开始增加
+                    scroll_pos = frame_index * scroll_speed
+                    
+                    # 文本的Y坐标 (text_y)：
+                    # - 当frame_index=0时，text_y = render_height - scroll_pos = render_height
+                    #   文本顶部与屏幕底部对齐，即文本刚开始要进入屏幕
+                    # - 随着frame_index增加，text_y减小，文本向上滚动
+                    text_y = render_height - scroll_pos
                     
                     # 记录日志
-                    if frame_index % 100 == 0 or frame_index < 10:
-                        logger.info(f"阶段1-滚动: 帧{frame_index}/{scroll_frames}, 位置={text_y}")
+                    if frame_index == 0 or frame_index % 100 == 0:
+                        logger.info(f"滚动阶段: 帧{frame_index}/{scroll_frames}, scroll_pos={scroll_pos}, text_y={text_y}")
+
+                    # --- 裁剪和粘贴逻辑 ---
+                    # 计算源图像(img)裁剪区域
+                    src_y_start = max(0, -text_y)  # 如果文本Y是负数，从源图像的|text_y|位置开始裁剪
+                    src_y_end = min(img.height, render_height - text_y)  # 到最低点或图像高度结束
                     
-                    # 裁剪并粘贴文本
-                    # 确定需要从源文本图像 (img) 上裁剪的 Y 范围
-                    src_y_start = max(0, -text_y) # 源图像裁剪起始 Y
-                    src_y_end = min(img.height, render_height - text_y) # 源图像裁剪结束 Y
+                    # 计算目标位置
+                    paste_y = max(0, text_y)  # 如果text_y小于0，贴图位置从屏幕顶部(0)开始
                     
-                    # 计算实际裁剪高度
+                    # 计算裁剪高度
                     crop_height = src_y_end - src_y_start
-
-                    # 确定在目标帧 (frame) 上粘贴的起始 Y 坐标
-                    paste_y = max(0, text_y) # 目标帧粘贴起始 Y
-
-                    # 只有当实际裁剪高度大于0时才进行裁剪和粘贴
+                    
+                    # 只有当裁剪高度>0时才进行裁剪和粘贴
                     if crop_height > 0:
                         try:
-                            # 从源图像裁剪
+                            # 从源图像裁剪可见部分
                             visible_crop = img.crop((
                                 0,             # left
                                 src_y_start,   # top
-                                render_width,  # right
+                                render_width,  # right (限制在渲染宽度内)
                                 src_y_end      # bottom
                             ))
                             
-                            # 粘贴到目标帧的正确位置
-                            # 如果源图像是 RGBA，使用其 alpha 通道作为 mask
+                            # 粘贴到帧上
                             mask = visible_crop if visible_crop.mode == 'RGBA' else None
                             frame.paste(visible_crop, (0, paste_y), mask=mask)
                             
-                            # 显式删除裁剪对象释放内存
                             del visible_crop
                             
                         except Exception as e:
                             logger.error(f"裁剪或粘贴帧 {frame_index} 时出错: {e}")
+                            
                 else:
-                    # 阶段3：定格结束阶段 - 只显示背景图，不需要其他操作
-                    if frame_index % 100 == 0:
-                        logger.info(f"阶段3-定格: 帧{frame_index-scroll_frames}/{ending_frames}")
+                    # 定格阶段 - 只显示背景，文字已经完全滚出
+                    if frame_index % fps == 0:  # 每秒记录一次日志
+                        logger.info(f"定格阶段: 帧{frame_index-scroll_frames}/{ending_frames}")
                 
                 # 转换为字节流
                 buffer = io.BytesIO()
@@ -416,19 +421,16 @@ class RollVideoService:
                     frame.save(buffer, format="PNG")
                     frame_bytes = buffer.getvalue()
                 else:
-                    # 对于非透明视频，直接使用更高效的raw格式
                     frame_bytes = frame.tobytes()
                 
-                # 清理以释放内存
                 buffer.close()
                 del frame
                 
                 return frame_bytes
-            
+                
             except Exception as e:
-                import traceback
-                logger.error(f"生成帧 {frame_index} 时出错: {str(e)}\n{traceback.format_exc()}")
-                # 遇到错误时，返回一个空帧或默认帧而不是None，确保流程能继续
+                logger.error(f"生成帧 {frame_index} 时出错: {str(e)}")
+                # 返回默认帧
                 if should_be_transparent:
                     default_frame = Image.new("RGBA", (render_width, render_height), (0, 0, 0, 0))
                     buffer = io.BytesIO()
@@ -437,5 +439,5 @@ class RollVideoService:
                 else:
                     default_frame = Image.new("RGB", (render_width, render_height), bg_color)
                     return default_frame.tobytes()
-                    
+        
         return frame_generator
