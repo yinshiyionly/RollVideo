@@ -12,8 +12,43 @@ import shutil
 import tqdm
 import threading
 import queue
+import gc  # 添加垃圾回收模块
+import time
 
 logger = logging.getLogger(__name__)
+
+# 尝试导入资源限制模块（如果可用）
+try:
+    import resource
+    HAS_RESOURCE_MODULE = True
+except ImportError:
+    HAS_RESOURCE_MODULE = False
+    logger.warning("无法导入resource模块，将不能精确限制CPU和内存使用")
+
+def limit_resources():
+    """尝试限制进程资源使用"""
+    if HAS_RESOURCE_MODULE:
+        try:
+            # 设置内存限制 (30GB)
+            soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+            memory_limit = 30 * 1024 * 1024 * 1024  # 30GB in bytes
+            resource.setrlimit(resource.RLIMIT_AS, (memory_limit, hard))
+            
+            # 设置CPU时间限制 (限制单CPU使用)
+            cpu_time_limit = 24 * 60 * 60  # 24小时（非常宽松的限制）
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu_time_limit, hard))
+            
+            logger.info(f"已设置资源限制: 内存={memory_limit/(1024*1024*1024):.1f}GB, CPU时间={cpu_time_limit/3600:.1f}小时")
+        except Exception as e:
+            logger.warning(f"设置资源限制失败: {e}")
+    else:
+        logger.info("由于缺少resource模块，资源限制将通过其他方式实现")
+
+# 在导入时尝试设置资源限制
+try:
+    limit_resources()
+except Exception as e:
+    logger.warning(f"尝试限制资源时发生错误: {e}")
 
 class TextRenderer:
     """文字渲染器，负责将文本渲染成图片"""
@@ -198,8 +233,8 @@ class VideoRenderer:
         """构造基础的ffmpeg命令"""
         command = [
             "ffmpeg", "-y",
-            # 设置全局内存限制(30GB)
-            "-max_muxing_queue_size", "1024", # 减少缓冲区大小
+            # 移除可能不兼容的内存参数
+            # "-max_muxing_queue_size", "1024", # 减少缓冲区大小
             "-f", "rawvideo",
             "-vcodec", "rawvideo",
             "-s", f"{self.width}x{self.height}",
@@ -304,12 +339,8 @@ class VideoRenderer:
                 "-cq:v", "21",           # Constant Quality level (good quality)
                 "-b:v", "0",              # Let CQ control bitrate
                 "-pix_fmt", "yuv420p",   # << 添加此行以提高兼容性
-                "-movflags", "+faststart",
-                # 添加GPU资源限制
-                "-gpu_memory_reserved", "512M",  # 为系统保留512MB显存
-                "-surfaces", "16",        # 限制NVENC表面数量，减少显存使用
-                "-spatial-aq", "1",       # 启用空间自适应量化，提高编码效率
-                "-temporal-aq", "1"       # 启用时间自适应量化，进一步提高效率
+                "-movflags", "+faststart"
+                # 移除不兼容的GPU限制参数
             ]
             # CPU 回退参数: libx264, preset medium(默认), CRF 21, pix_fmt yuv420p, faststart
             cpu_fallback_codec_and_output_params = [
@@ -318,12 +349,9 @@ class VideoRenderer:
                 "-preset", "medium",      # Default preset (good balance)
                 "-pix_fmt", "yuv420p",   # Required by libx264 for mp4
                 "-movflags", "+faststart",
-                # 添加CPU资源限制
-                "-threads", "8",          # 限制使用最多8个CPU线程
-                "-row-mt", "1",           # 启用行级多线程，更高效利用线程
-                "-aq-mode", "1",          # 启用方差自适应量化模式1，提高编码效率
-                "-g", "300",              # 设置GOP大小，减少关键帧频率，降低CPU负担
-                "-bufsize", "20M"         # 限制缓冲区大小，间接限制内存使用
+                # 添加通用CPU资源限制
+                "-threads", "8"          # 限制使用最多8个CPU线程
+                # 移除不兼容的CPU参数
             ]
             logger.info(f"设置ffmpeg(不透明): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
             logger.info(f"  首选GPU参数: {' '.join(video_codec_and_output_params)}")
@@ -363,7 +391,7 @@ class VideoRenderer:
                 try: codec_name = current_codec_params[current_codec_params.index("-c:v") + 1]
                 except (ValueError, IndexError): pass
                 
-                # 性能优化：预计算所有帧的位置信息
+                # 预计算帧位置信息
                 logger.info("预计算帧位置信息以提高性能...")
                 frame_positions = []
                 for frame_idx in range(total_frames):
@@ -383,12 +411,26 @@ class VideoRenderer:
                 else:
                     bg_template = background_frame_rgb.copy()
                     
-                # 使用更大的批处理大小提高性能
-                batch_size = 30
+                # 资源管理：控制批处理大小以限制内存使用
+                # 根据图像尺寸调整批处理大小，确保不会占用过多内存
+                # 假设单帧RGBA图像内存 = 宽*高*4字节
+                frame_memory_mb = (self.width * self.height * 4) / (1024*1024)
+                # 设置最大内存使用量（控制在约1GB以内）
+                max_batch_memory_mb = 1024
+                # 计算适合的批处理大小
+                adaptive_batch_size = max(1, min(30, int(max_batch_memory_mb / frame_memory_mb)))
+                logger.info(f"单帧内存估算: {frame_memory_mb:.2f}MB, 自适应批处理大小: {adaptive_batch_size}")
+                
+                # 使用自适应批处理大小
+                batch_size = adaptive_batch_size
                 num_batches = (total_frames + batch_size - 1) // batch_size
                 
                 # 使用进度条显示编码进度
                 frame_iterator = tqdm.tqdm(range(num_batches), desc=f"编码 ({codec_name}) ")
+                
+                # 周期性垃圾回收计数器
+                gc_counter = 0
+                
                 for batch_idx in frame_iterator:
                     start_frame = batch_idx * batch_size
                     end_frame = min(start_frame + batch_size, total_frames)
@@ -441,7 +483,11 @@ class VideoRenderer:
                         
                         # 将帧数据写入ffmpeg
                         try:
-                            process.stdin.write(frame.tobytes())
+                            frame_data = frame.tobytes()
+                            process.stdin.write(frame_data)
+                            # 内存优化：清除不再需要的变量
+                            del frame_data
+                            del frame
                         except (IOError, BrokenPipeError) as e:
                             logger.error(f"写入ffmpeg管道时出错: {e}")
                             # 写入失败时，尝试获取stderr
@@ -455,6 +501,16 @@ class VideoRenderer:
                             stderr_content_on_error = "\n".join(stderr_lines_on_error)
                             logger.error(f"ffmpeg stderr (写入时):\n{stderr_content_on_error}")
                             raise Exception(f"ffmpeg进程意外终止: {e}") from e
+                    
+                    # 周期性垃圾回收，每处理5个批次执行一次
+                    gc_counter += 1
+                    if gc_counter >= 5:
+                        gc_counter = 0
+                        # 强制执行垃圾回收
+                        collected = gc.collect()
+                        logger.debug(f"执行垃圾回收，释放对象数: {collected}")
+                        # 短暂休眠，给系统喘息的机会
+                        time.sleep(0.01)
                 
                 logger.info("所有帧已写入管道，关闭stdin...")
                 process.stdin.close()
