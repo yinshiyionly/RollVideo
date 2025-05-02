@@ -547,23 +547,25 @@ class VideoRenderer:
             # 添加帧计数器确保不超过总帧数
             expected_frames_to_process = self.total_frames
             
-            # 强制设置最大可处理帧数
-            max_frames_allowed = self.total_frames
+            # 强制设置最大可处理帧数，预留一些余量
+            max_frames_allowed = self.total_frames * 2 if self.total_frames > 0 else 100000
+            logger.info(f"设置最大允许帧数: {max_frames_allowed}, 预期处理帧数: {expected_frames_to_process}")
             
             # Log just before entering the loop
             logger.info("Entering main frame writing loop...")
             logger.debug(f"Initial state before loop: Stop event: {self._event_stop.is_set()}, Queue empty: {self._frame_queue.empty()}")
 
-            while (not self._event_stop.is_set() or not self._frame_queue.empty()) and frames_written < expected_frames_to_process:
-                # 尽早检查是否达到最大帧数
-                if frames_written >= max_frames_allowed:
-                    logger.info(f"已达到最大允许帧数 {max_frames_allowed}，强制停止处理")
+            while (not self._event_stop.is_set() or not self._frame_queue.empty()):
+                # 仅在明确超出限制时中止
+                if frames_written > max_frames_allowed:
+                    logger.warning(f"已达到最大允许帧数 {max_frames_allowed}，强制停止处理")
                     self._event_stop.set()
                     break
                 
                 # Comment out verbose loop logs, revert to DEBUG or remove if not needed
                 # logger.info(f"---> Loop {loop_counter + 1}: Entered loop top.") # Changed to INFO
-                logger.debug(f"---> Loop {loop_counter + 1}: Entered loop top. Frames written so far: {frames_written}/{expected_frames_to_process}")
+                if loop_counter % 1000 == 0:  # 每1000次迭代记录一次日志
+                    logger.debug(f"帧处理循环: {loop_counter}, 已写入: {frames_written}/{expected_frames_to_process}")
                 
                 loop_counter += 1
                 frame_data = None # Initialize frame_data for this iteration
@@ -574,21 +576,20 @@ class VideoRenderer:
                     
                     # Try getting from queue with specific exception handling
                     try:
-                        # 设置较短的超时时间以便更频繁地检查帧数限制
-                        frame_data = self._frame_queue.get(timeout=0.05)
+                        # 使用较长的超时时间，避免因短超时导致渲染问题
+                        frame_data = self._frame_queue.get(timeout=0.5)
                         # Comment out verbose loop logs
                         # logger.info(f"Loop {loop_counter}: Got frame data from queue.") # Changed to INFO
                         logger.debug(f"Loop {loop_counter}: Got frame data from queue.") # Reverted to DEBUG
                     except queue.Empty:
                         # Use DEBUG here as it's less critical and frequent
-                        logger.debug(f"Loop {loop_counter}: Queue empty, continuing loop.")
-                        # 再次检查是否达到帧数限制
-                        if frames_written >= expected_frames_to_process:
-                            logger.info(f"已处理完所有预期帧 ({frames_written}/{expected_frames_to_process})，退出循环")
-                            break
-                        if self._event_stop.is_set():
+                        if loop_counter % 100 == 0:  # 降低日志频率
+                            logger.debug(f"队列暂时为空，继续等待...")
+                        
+                        # 只有同时满足停止信号和队列为空时才退出循环
+                        if self._event_stop.is_set() and self._frame_queue.empty():
                             # Keep this INFO log as it signifies loop exit reason
-                            logger.info(f"Loop {loop_counter}: Stop event set and queue empty, breaking loop.") 
+                            logger.info(f"停止信号已设置且队列为空，退出循环 (已处理 {frames_written} 帧)")
                             break # Exit loop condition met
                         continue # Continue loop to check stop event again or wait for frames
                     except Exception as e:
@@ -605,10 +606,10 @@ class VideoRenderer:
                     # 解包帧数据
                     frame_idx, frame = frame_data
                     
-                    # 检查帧索引是否超出最大值
-                    if frame_idx >= max_frames_allowed:
-                        logger.warning(f"帧索引 {frame_idx} 超出最大允许值 {max_frames_allowed}，丢弃")
-                        continue
+                    # 检查帧索引是否超出最大值，使用更宽松的检查
+                    if max_frames_allowed > 0 and frame_idx >= max_frames_allowed * 2:
+                        if frame_idx % 100 == 0:  # 降低日志频率
+                            logger.warning(f"帧索引 {frame_idx} 超出最大允许值 {max_frames_allowed}，但仍继续处理")
                     
                     # 更新最后处理的帧索引
                     with self._last_frame_lock:
@@ -618,7 +619,7 @@ class VideoRenderer:
                     frame_buffer.append((frame_idx, frame))
                     
                     # 当缓冲区达到阈值或是最后一批帧时进行批量写入
-                    if len(frame_buffer) >= buffer_size or (self._event_stop.is_set() and frame_buffer and self._frame_queue.empty()) or frames_written + len(frame_buffer) >= expected_frames_to_process: # 添加检查
+                    if len(frame_buffer) >= buffer_size or (self._event_stop.is_set() and frame_buffer and self._frame_queue.empty()): # Check queue empty on stop
                         # 按帧索引排序
                         frame_buffer.sort(key=lambda x: x[0])
                         
@@ -1213,12 +1214,14 @@ class VideoRenderer:
         # 明确限制视频时长和帧数，防止循环
         # 添加精确的帧数限制参数，确保FFmpeg不会尝试读取超过total_frames的帧
         if self.total_frames > 0:
-            logger.info(f"指定明确的帧数限制: {self.total_frames} 帧")
-            command.extend(['-frames:v', str(self.total_frames)])
+            # 为了确保所有帧都能处理，设置一个比实际帧数略大的限制
+            safe_frame_limit = int(self.total_frames * 1.1) + 60  # 增加10%并再加60帧的安全余量
+            logger.info(f"指定宽松的帧数限制: {safe_frame_limit} 帧 (实际帧数: {self.total_frames})")
+            command.extend(['-frames:v', str(safe_frame_limit)])
             
-            # 计算并设置精确的视频时长参数，确保视频不会循环
-            duration_seconds = self.total_frames / self.fps
-            logger.info(f"指定明确的视频时长: {duration_seconds:.2f} 秒 ({self.total_frames} 帧 / {self.fps} fps)")
+            # 计算并设置宽松的视频时长参数，确保视频不会过早结束
+            duration_seconds = (self.total_frames / self.fps) * 1.2  # 增加20%的时长余量
+            logger.info(f"指定宽松的视频时长: {duration_seconds:.2f} 秒 (实际预期: {self.total_frames / self.fps:.2f} 秒)")
             command.extend(['-t', f"{duration_seconds:.6f}"])
 
         # 确保输出文件有正确的扩展名

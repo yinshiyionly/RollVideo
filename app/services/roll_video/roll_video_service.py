@@ -400,19 +400,24 @@ class RollVideoService:
             background_float = background_frame.astype(np.float32) / 255.0
 
         # 记录最大有效帧索引以防止循环
-        max_valid_frame_index = min(scroll_frames_needed + video_renderer.fps * 3, video_renderer.total_frames - 1)  # 确保不超过总帧数
-        
-        # 记录总帧数和滚动所需帧数的关系
-        logger.info(f"最大有效帧索引: {max_valid_frame_index}, 总帧数: {video_renderer.total_frames}, 滚动结束帧: {scroll_frames_needed}")
+        # 确保最大帧索引至少与滚动帧数一致
+        if hasattr(video_renderer, 'total_frames') and video_renderer.total_frames > 0:
+            max_valid_frame_index = min(scroll_frames_needed + video_renderer.fps * 3, video_renderer.total_frames - 1)
+            logger.info(f"最大有效帧索引: {max_valid_frame_index}, 总帧数: {video_renderer.total_frames}, 滚动结束帧: {scroll_frames_needed}")
+        else:
+            max_valid_frame_index = scroll_frames_needed + video_renderer.fps * 3
+            logger.info(f"未设置总帧数，使用计算的最大有效帧索引: {max_valid_frame_index}, 滚动结束帧: {scroll_frames_needed}")
 
         def frame_generator(frame_index: int) -> Optional[np.ndarray]:
             """生成指定索引的视频帧"""
             nonlocal frame_cache
             
             # --- 预检查帧索引是否超出预期范围 ---
-            if frame_index < 0 or frame_index >= video_renderer.total_frames:
-                logger.warning(f"帧索引 {frame_index} 超出有效范围 [0, {video_renderer.total_frames-1}]，返回背景帧")
-                return background_frame.copy()
+            # 只有在设置了total_frames且为正值时才进行检查
+            if hasattr(video_renderer, 'total_frames') and video_renderer.total_frames > 0:
+                if frame_index < 0 or frame_index >= video_renderer.total_frames:
+                    logger.warning(f"帧索引 {frame_index} 超出有效范围 [0, {video_renderer.total_frames-1}]，返回背景帧")
+                    return background_frame.copy()
             
             # --- 滚动结束后直接返回背景帧（确保不再滚动）---
             # 严格判断滚动是否结束：要么明确超过最大有效帧，要么已经滚动到图像底部，要么超过计算的滚动帧
