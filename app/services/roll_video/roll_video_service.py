@@ -224,7 +224,16 @@ class RollVideoService:
         scaled_width = int(width * scale_factor)
         scaled_height = int(height * scale_factor)
         scaled_font_size = int(font_size * scale_factor)
-        scaled_scroll_speed = max(1, int(scroll_speed * scale_factor))
+        
+        # 修改：精确计算滚动速度，保留小数精度，避免速度过快
+        # 原来是取整，可能导致慢速滚动被向上取整为更快速度
+        if scroll_speed < 5:  # 对于慢速滚动特别注意精度
+            scaled_scroll_speed = max(0.5, scroll_speed * scale_factor)  # 最小速度不低于0.5像素/帧
+            logger.info(f"使用精确滚动速度: {scaled_scroll_speed}px/帧 (小数精度)")
+        else:
+            # 较快滚动可以取整，影响较小
+            scaled_scroll_speed = max(1, int(scroll_speed * scale_factor))
+            logger.info(f"使用整数滚动速度: {scaled_scroll_speed}px/帧")
         
         logger.info(f"原始分辨率: {width}x{height}, 渲染分辨率: {scaled_width}x{scaled_height}")
         logger.info(f"原始字体大小: {font_size}, 渲染字体大小: {scaled_font_size}")
@@ -421,9 +430,12 @@ class RollVideoService:
         # 创建一个纯背景帧的缓存，避免重复创建
         end_frame = background_frame.copy()
         
+        # 创建浮点数位置累加器，精确计算滚动位置
+        position_accumulator = 0.0
+        
         def frame_generator(frame_index: int) -> Optional[np.ndarray]:
             """生成指定索引的视频帧，严格区分滚动阶段和结束阶段"""
-            nonlocal frame_cache
+            nonlocal frame_cache, position_accumulator
             
             # 如果启用了帧缓存且已缓存，直接返回
             if video_renderer.use_frame_cache and frame_index in frame_cache:
@@ -440,18 +452,31 @@ class RollVideoService:
                 
             # === 滚动阶段 ===
             
-            # 计算滚动位置
-            current_position = frame_index * scroll_speed
+            # 精确计算滚动位置 - 使用浮点数位置累加器而不是简单乘法，提高精度
+            # 尤其适用于滚动速度为小数的情况(如：0.5像素/帧)
+            if frame_index == 0:
+                # 第一帧重置累加器
+                position_accumulator = 0.0
+            else:
+                # 非第一帧，累加滚动位置
+                position_accumulator += scroll_speed
+                
+            # 这里保留浮点数精度，只在实际切片时再取整
+            current_position = position_accumulator
+            
+            # 如果需要调试浮点精度，取消下面的注释
+            # if frame_index % 30 == 0:  # 每30帧记录一次
+            #     logger.debug(f"帧 {frame_index}: 精确位置={current_position:.2f}px, 累加器={position_accumulator:.2f}")
             
             # 边界检查：如果已超出图像高度，返回背景帧（内部安全检查）
             if current_position >= img_height:
-                logger.debug(f"帧 {frame_index}: 位置 {current_position}px 超出图像高度 {img_height}px")
+                logger.debug(f"帧 {frame_index}: 位置 {current_position:.2f}px 超出图像高度 {img_height}px")
                 if video_renderer.use_frame_cache and frame_index not in frame_cache:
                     frame_cache[frame_index] = end_frame
                 return end_frame
                 
-            # 计算切片区域
-            slice_start = int(current_position)
+            # 计算切片区域 - 此处转为整数用于切片
+            slice_start = int(current_position)  
             slice_end = slice_start + target_height
             
             # 边界检查
@@ -491,7 +516,7 @@ class RollVideoService:
                 
             # 每500帧记录一次进度
             if frame_index % 500 == 0:
-                logger.debug(f"生成滚动帧: {frame_index}/{scroll_frames_needed}")
+                logger.debug(f"生成滚动帧: {frame_index}/{scroll_frames_needed}, 位置={current_position:.2f}px")
                 
             return frame_canvas
             

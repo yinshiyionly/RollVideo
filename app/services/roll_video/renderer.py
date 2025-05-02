@@ -1501,14 +1501,14 @@ class VideoRenderer:
             logger.info("render_frames 方法即将结束")
 
     def calculate_total_frames(self, text_height, scroll_speed):
-        """计算视频需要的总帧数，仅生成滚动所需的帧数"""
-        # 确保滚动速度至少为1像素/帧
-        actual_scroll_speed = max(1, scroll_speed)
+        """计算视频需要的总帧数，仅生成滚动所需的帧数，支持浮点数滚动速度"""
+        # 确保滚动速度至少为0.5像素/帧
+        actual_scroll_speed = max(0.5, scroll_speed)
         logger.info(f"使用实际滚动速度: {actual_scroll_speed}px/帧 (原始: {scroll_speed})")
         
         # 计算文本完全滚出屏幕所需的帧数
         # 这是核心计算：总帧数 = 文本高度 / 滚动速度 (向上取整)
-        # 不添加任何额外的暂停或缓冲帧
+        # 支持浮点数滚动速度（如0.5像素/帧）
         scroll_frames_needed = int(np.ceil(text_height / actual_scroll_speed))
         
         # 最终帧数直接使用滚动帧数，不添加额外帧
@@ -1516,7 +1516,7 @@ class VideoRenderer:
         
         logger.info(f"【帧数计算】文本高度: {text_height}px, 滚动速度: {actual_scroll_speed}px/帧")
         logger.info(f"【帧数计算】完全滚出所需帧数: {scroll_frames_needed}帧 (实际使用总帧数: {total_frames}帧)")
-        logger.info(f"【帧数计算】预计视频时长: {total_frames/self.fps:.2f}秒")
+        logger.info(f"【帧数计算】预计视频时长: {total_frames/self.fps:.2f}秒，帧率: {self.fps}fps")
         
         # 更新滚动距离，用于其他方法判断滚动状态
         self.scroll_distance = text_height
