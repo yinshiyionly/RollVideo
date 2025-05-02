@@ -407,8 +407,9 @@ class RollVideoService:
             nonlocal frame_cache
             
             # --- 滚动结束后直接返回背景帧（确保不再滚动）---
-            if frame_index >= scroll_frames_needed:
-                logger.debug(f"帧 {frame_index}: 滚动已结束 (>{scroll_frames_needed})，生成静态背景帧")
+            # 严格判断滚动是否结束：要么明确超过结束帧数，要么已经滚动到图像底部
+            if frame_index >= scroll_frames_needed or (frame_index * scroll_speed) >= img_height:
+                logger.debug(f"帧 {frame_index}: 滚动已结束 (帧索引={frame_index}, 滚动结束帧={scroll_frames_needed}, 当前位置={frame_index * scroll_speed}px, 总高度={img_height}px)")
                 frame_data = background_frame.copy()
                 if video_renderer.use_frame_cache and frame_index not in frame_cache:
                     frame_cache[frame_index] = frame_data
@@ -421,9 +422,9 @@ class RollVideoService:
             
             # --- 滚动阶段计算逻辑（修改起始位置）--- 
             # 计算当前帧文本图像的起始y坐标
-            # 修改：设置初始位置为负值，使文本从第一帧就显示顶部内容
-            y_start = frame_index * scroll_speed - target_height
-            # 注意：这里减去target_height是为了让文本一开始就完全进入视野
+            # 修改：第一帧就从图像顶部(0)开始，不需要任何偏移
+            y_start = frame_index * scroll_speed
+            # 注意：不需要减去target_height，因为我们要直接显示文本顶部，而不是使整个文本进入视野
             
             # 计算需要从文本图像中截取的区域的结束y坐标
             y_end = y_start + target_height
