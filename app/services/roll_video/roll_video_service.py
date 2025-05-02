@@ -430,16 +430,25 @@ class RollVideoService:
             # 计算当前帧的滚动位置 (类似旧版本的逻辑)
             current_position = 0 
             
-            if frame_index < scroll_frames_needed:
-                # 滚动阶段 - 逐步增加位置
-                current_position = frame_index * scroll_speed
-                # 确保不超过总滚动距离
-                current_position = min(current_position, img_height)
-            else:
-                # 已经到达或超过了滚动所需帧数，固定在最终位置
-                # 这确保不会循环，文本完全滚出后显示空白背景
-                current_position = img_height
-                # 如果已经完全滚出屏幕，直接返回背景帧
+            # 关键点：明确检查是否已超出滚动范围，这是防止循环的核心
+            if frame_index >= scroll_frames_needed:
+                logger.warning(f"【重要】帧索引 {frame_index} 已超过滚动结束帧 {scroll_frames_needed}，返回背景帧并结束滚动")
+                # 用于调试的额外信息
+                if frame_index % 10 == 0:  # 避免日志过多，每10帧记录一次
+                    logger.debug(f"滚动调试: 总帧数={getattr(video_renderer, 'total_frames', 'unknown')}, "
+                               f"滚动结束帧={scroll_frames_needed}, 图像高度={img_height}px, "
+                               f"滚动速度={scroll_speed}px/帧")
+                # 这里返回纯背景帧，确保文本完全滚出后只显示背景
+                return background_frame.copy()
+            
+            # 正常滚动阶段
+            current_position = frame_index * scroll_speed
+            # 确保不超过总滚动距离
+            current_position = min(current_position, img_height)
+            
+            # 额外检查：如果已滚动到图像底部，返回背景帧
+            if current_position >= img_height:
+                logger.info(f"帧 {frame_index}: 滚动位置 {current_position}px 已达到图像高度 {img_height}px，返回背景帧")
                 return background_frame.copy()
             
             # 计算在图像上的切片范围
@@ -453,6 +462,12 @@ class RollVideoService:
             # 如果切片范围无效或完全超出图像，返回纯背景帧
             if img_start_y >= img_end_y or img_start_y >= img_height:
                 logger.debug(f"帧 {frame_index}: 位置 {current_position} 已超出图像 {img_height}，返回背景帧")
+                return background_frame.copy()
+            
+            # 计算显示的剩余高度，如果只剩很少一部分，可能直接显示背景
+            remaining_height = img_height - img_start_y
+            if remaining_height < target_height * 0.1:  # 如果剩余不到10%的屏幕高度
+                logger.info(f"帧 {frame_index}: 剩余高度仅 {remaining_height}px，不足显示区域的10%，返回背景帧")
                 return background_frame.copy()
             
             # 从图像数组中切片获取当前帧内容
@@ -481,6 +496,10 @@ class RollVideoService:
             if video_renderer.use_frame_cache:
                 frame_cache[frame_index] = frame_canvas
             
+            # 每100帧记录一次进度，避免日志过多
+            if frame_index % 100 == 0:
+                logger.debug(f"生成帧 {frame_index}: 位置={current_position}px, 切片={img_start_y}:{img_end_y}, 高度={slice_height}px")
+                
             return frame_canvas
 
         return frame_generator

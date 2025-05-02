@@ -619,8 +619,13 @@ class VideoRenderer:
                     # 添加到帧缓冲区
                     frame_buffer.append((frame_idx, frame))
                     
+                    # 检查是否应该停止滚动 - 添加明确的检查以防止循环滚动
+                    if self._should_stop_scrolling(frame_idx):
+                        logger.info(f"检测到已达到最大滚动帧数，设置停止信号")
+                        self._event_stop.set()
+                    
                     # 当缓冲区达到阈值或是最后一批帧时进行批量写入
-                    if len(frame_buffer) >= buffer_size or (self._event_stop.is_set() and frame_buffer and self._frame_queue.empty()): # Check queue empty on stop
+                    if len(frame_buffer) >= buffer_size or (self._event_stop.is_set() and frame_buffer and self._frame_queue.empty()):
                         # 按帧索引排序
                         frame_buffer.sort(key=lambda x: x[0])
                         
@@ -1036,6 +1041,27 @@ class VideoRenderer:
             logger.info("_frame_writer 线程即将设置完成事件并退出")
             self._event_complete.set()
 
+    def _should_stop_scrolling(self, frame_index):
+        """判断是否应该停止滚动，避免循环播放问题"""
+        # 如果已明确设置停止标记，立即停止
+        if self._event_stop.is_set():
+            return True
+            
+        # 确保有必要的属性
+        if not hasattr(self, 'scroll_distance') or not hasattr(self, 'total_frames'):
+            return False
+            
+        # 计算实际需要的最大滚动帧数
+        scroll_speed = max(1, getattr(self, 'scroll_speed', 1))
+        max_scroll_frames = int(np.ceil(self.scroll_distance / scroll_speed))
+        
+        # 如果当前帧超过了滚动所需的最大帧数，应该停止
+        if frame_index >= max_scroll_frames:
+            logger.info(f"帧 {frame_index} 已达到最大滚动帧数 {max_scroll_frames}，应停止滚动")
+            return True
+            
+        return False
+        
     def _prepare_ffmpeg_command(self):
         """准备FFmpeg命令行，尽量简化以避免参数冲突"""
         
@@ -1060,7 +1086,7 @@ class VideoRenderer:
             except Exception as e:
                 logger.error(f"创建输出目录失败: {str(e)}")
         
-        # 极简化的命令，避免任何复杂参数和硬件加速
+        # 极简化的命令，明确设置非循环和帧数/时长
         command = [
             'ffmpeg',
             '-y',                              # 覆盖输出文件
@@ -1072,12 +1098,14 @@ class VideoRenderer:
             '-i', 'pipe:',                     # 从管道读取
         ]
         
-        # 设置帧数限制
+        # 强制设置帧数和时长以确保不会循环
         if hasattr(self, 'total_frames') and self.total_frames > 0:
+            exact_duration = self.total_frames / self.fps
             command.extend([
                 '-frames:v', str(self.total_frames),  # 明确帧数
-                '-t', str(self.total_frames / self.fps)  # 明确时长
+                '-t', str(exact_duration)            # 明确时长
             ])
+            logger.info(f"强制设置非循环参数: 总帧数={self.total_frames}, 时长={exact_duration:.2f}秒")
         
         # 根据透明度选择不同的编码配置
         if self.transparent:
@@ -1096,6 +1124,9 @@ class VideoRenderer:
                 '-pix_fmt', 'yuv420p',
                 '-movflags', '+faststart'
             ])
+        
+        # 明确添加非循环标记 - 单独添加这个参数而不是与编码参数一起添加
+        command.extend(['-loop', '0']) 
         
         # 添加输出文件路径
         command.append(output_path)
@@ -1470,39 +1501,25 @@ class VideoRenderer:
             logger.info("render_frames 方法即将结束")
 
     def calculate_total_frames(self, text_height, scroll_speed):
-        """计算视频需要的总帧数"""
+        """计算视频需要的总帧数，仅生成滚动所需的帧数"""
         # 确保滚动速度至少为1像素/帧
         actual_scroll_speed = max(1, scroll_speed)
         logger.info(f"使用实际滚动速度: {actual_scroll_speed}px/帧 (原始: {scroll_speed})")
         
-        # --- 修改计算逻辑 --- 
         # 计算文本完全滚出屏幕所需的帧数
-        # text_height已经是传入的完整图像高度（包含文本实际高度和屏幕高度）
-        # 因此直接使用这个高度计算总帧数
+        # 这是核心计算：总帧数 = 文本高度 / 滚动速度 (向上取整)
+        # 不添加任何额外的暂停或缓冲帧
         scroll_frames_needed = int(np.ceil(text_height / actual_scroll_speed))
-        logger.info(f"文本完全滚出屏幕需要 {scroll_frames_needed} 帧 (图像总高度={text_height}px)")
         
-        # 移除3秒停留帧
+        # 最终帧数直接使用滚动帧数，不添加额外帧
         total_frames = scroll_frames_needed
-        # -----------------------
-
-        # 考虑跳帧 (frame_skip)
-        # 注意：这里的跳帧计算可能需要重新审视，因为它基于总帧数。
-        # 如果跳帧导致总时长变化过大，可能需要调整。
-        # 目前保持原样，但标记为潜在优化点。
-        if self.actual_frame_skip > 1:
-            # 确保总帧数是实际跳帧的倍数，保证完整的视频
-            # (这可能会略微增加总时长)
-            if total_frames % self.actual_frame_skip != 0:
-                original_total_frames = total_frames
-                total_frames += self.actual_frame_skip - (total_frames % self.actual_frame_skip)
-                logger.info(f"应用跳帧 ({self.actual_frame_skip}) 后，总帧数从 {original_total_frames} 调整为 {total_frames}")
-                
-        logger.info(f"文本高度: {text_height}px, 滚动速度: {actual_scroll_speed}px/帧, "
-                   f"计算总帧数: {total_frames} (滚动: {scroll_frames_needed})")
-                   
-        # 更新 self.scroll_distance 为总滚动距离
-        # 直接使用图像高度，无需再加屏幕高度
+        
+        logger.info(f"【帧数计算】文本高度: {text_height}px, 滚动速度: {actual_scroll_speed}px/帧")
+        logger.info(f"【帧数计算】完全滚出所需帧数: {scroll_frames_needed}帧 (实际使用总帧数: {total_frames}帧)")
+        logger.info(f"【帧数计算】预计视频时长: {total_frames/self.fps:.2f}秒")
+        
+        # 更新滚动距离，用于其他方法判断滚动状态
         self.scroll_distance = text_height
-                   
+        self.scroll_speed = actual_scroll_speed  # 保存实际使用的滚动速度
+        
         return total_frames
