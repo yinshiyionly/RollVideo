@@ -503,21 +503,11 @@ class VideoRenderer:
                     # 在macOS/Linux上使用资源限制命令
                     if is_macos or is_linux:
                         # 使用资源限制，合并到ffmpeg命令中
-                        logger.info("应用系统资源限制: CPU最大8核，内存最大30GB")
-                        
-                        # 设置内存限制环境变量（单位：MB）
+                        logger.info("设置FFmpeg资源限制 (CPU: 2核, 内存: 最大30GB)")
                         os.environ["LIBAV_BUFFER_SIZE"] = "1024"  # 1GB libav缓冲区大小
                         os.environ["FFMPEG_MEMORY_LIMIT"] = "30720"  # 30GB内存限制
-                        
-                        if is_linux:
-                            # Linux可以使用taskset限制CPU亲和性
-                            resource_limit_cmd = ["taskset", "-c", "0-7"]  # 限制到前8个CPU核心
-                            ffmpeg_cmd = resource_limit_cmd + ffmpeg_cmd
-                        elif is_macos:
-                            # macOS可以使用环境变量限制CPU内核
-                            # 注意：在macOS上，这只是一个建议而不是硬性限制
-                            os.environ["VECLIB_MAXIMUM_THREADS"] = "8"
-                            os.environ["OMP_NUM_THREADS"] = "8"
+                        os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
+                        os.environ["OMP_NUM_THREADS"] = "2"
                     else:
                         # Windows或其他系统，只能使用FFmpeg内部限制
                         logger.info("当前系统不支持外部资源限制，仅使用FFmpeg内部限制机制")
@@ -1387,11 +1377,11 @@ class VideoRenderer:
         """
         try:
             # 设置FFmpeg资源限制环境变量
-            logger.info("设置FFmpeg资源限制 (CPU: 8核, 内存: 最大30GB)")
+            logger.info("设置FFmpeg资源限制 (CPU: 2核, 内存: 最大30GB)")
             os.environ["LIBAV_BUFFER_SIZE"] = "1024"  # 1GB libav缓冲区大小
             os.environ["FFMPEG_MEMORY_LIMIT"] = "30720"  # 30GB内存限制
-            os.environ["VECLIB_MAXIMUM_THREADS"] = "8"
-            os.environ["OMP_NUM_THREADS"] = "8"
+            os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
+            os.environ["OMP_NUM_THREADS"] = "2"
             
             # 临时图像优化选项
             image_optimize_options = {
@@ -1482,14 +1472,16 @@ class VideoRenderer:
             # 4. 创建FFmpeg命令，使用crop滤镜和表达式
             encoding_start_time = time.time()
             
-            # 创建FFmpeg滤镜表达式
-            # 使用crop滤镜和表达式实现滚动效果
-            crop_expr = (
-                f"crop=w={self.width}:h={self.height}:"
-                f"x=0:y='if(between(t,{scroll_start_time},{scroll_end_time}),"
-                f"min({img_height-self.height},(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}),"
-                f"if(lt(t,{scroll_start_time}),0,{scroll_distance}))'"
-            )
+            # 检查系统是否有NVIDIA GPU
+            has_nvidia_gpu = False
+            try:
+                # 尝试使用nvidia-smi检测GPU
+                result = subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
+                has_nvidia_gpu = result.returncode == 0
+                if has_nvidia_gpu:
+                    logger.info("检测到NVIDIA GPU，将使用CUDA加速滤镜处理")
+            except:
+                logger.info("未检测到NVIDIA GPU，将使用CPU处理")
             
             # 构建基本FFmpeg命令
             ffmpeg_cmd = [
@@ -1500,7 +1492,7 @@ class VideoRenderer:
                 "-progress", "pipe:2",  # 输出进度信息到stderr
                 "-stats",  # 启用统计信息
                 "-stats_period", "0.5",  # 每0.5秒输出一次统计信息
-                "-threads", "8",  # 限制CPU使用核心数为8
+                "-threads", "2",  # 限制CPU使用核心数为2
                 "-max_muxing_queue_size", "1024",  # 限制复用队列大小
             ]
             
@@ -1508,9 +1500,44 @@ class VideoRenderer:
             if audio_path and os.path.exists(audio_path):
                 ffmpeg_cmd.extend(["-i", audio_path])
             
-            # 添加滤镜和编码参数
+            # 创建裁剪表达式
+            crop_y_expr = f"'if(between(t,{scroll_start_time},{scroll_end_time}),min({img_height-self.height},(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}),if(lt(t,{scroll_start_time}),0,{scroll_distance}))'"
+            
+            # 根据GPU支持选择不同的滤镜
+            if has_nvidia_gpu and not transparency_required:
+                # 使用CUDA GPU加速滤镜（仅适用于非透明视频）
+                crop_expr = (
+                    f"[0:v] hwupload_cuda, crop_cuda=w={self.width}:h={self.height}:"
+                    f"x=0:y={crop_y_expr} [v]"
+                )
+                
+                # 对于GPU加速，尝试使用NVENC编码器
+                if preferred_codec == "libx264":
+                    # 将CPU编码器替换为GPU编码器
+                    logger.info("使用NVIDIA GPU加速编码 (h264_nvenc)")
+                    for i, param in enumerate(codec_params):
+                        if param == "libx264":
+                            codec_params[i] = "h264_nvenc"
+                            break
+                            
+                # 添加GPU滤镜和映射
+                ffmpeg_cmd.extend([
+                    "-filter_complex", crop_expr,
+                    "-map", "[v]",  # 映射标记的视频流
+                ])
+            else:
+                # 标准CPU滤镜
+                crop_expr = (
+                    f"crop=w={self.width}:h={self.height}:"
+                    f"x=0:y={crop_y_expr}"
+                )
+                # 添加CPU滤镜
+                ffmpeg_cmd.extend([
+                    "-filter_complex", crop_expr,
+                ])
+            
+            # 添加公共参数
             ffmpeg_cmd.extend([
-                "-filter_complex", crop_expr,
                 "-t", str(total_duration),  # 设置总时长
                 "-vsync", "1",  # 添加vsync参数，确保平滑的视频同步
                 "-thread_queue_size", "512",  # 限制线程队列大小，减少内存使用
@@ -1520,17 +1547,17 @@ class VideoRenderer:
             if transparency_required:
                 # 透明视频使用ProRes编码器
                 codec_params.extend([
-                    "-threads", "8",  # 为编码器设置线程数
+                    "-threads", "2",  # 为编码器设置线程数
                     "-bufsize", "100M",  # 缓冲区大小
                 ])
             else:
                 # 非透明视频使用H.264编码器
                 codec_params.extend([
-                    "-threads", "8",  # 为编码器设置线程数
+                    "-threads", "2",  # 为编码器设置线程数
                     "-bufsize", "50M",  # 缓冲区大小
                     "-maxrate", "8M",  # 最大比特率
                 ])
-                
+            
             # 添加视频编码参数
             ffmpeg_cmd.extend(codec_params)
             
@@ -1539,11 +1566,21 @@ class VideoRenderer:
             
             # 添加音频映射（如果有）
             if audio_path and os.path.exists(audio_path):
-                ffmpeg_cmd.extend([
-                    "-c:a", "aac",
-                    "-b:a", "192k",
-                    "-shortest",
-                ])
+                # 对于GPU滤镜需要特殊处理音频映射
+                if has_nvidia_gpu and not transparency_required:
+                    ffmpeg_cmd.extend([
+                        "-c:a", "aac",
+                        "-b:a", "192k",
+                        "-map", "1:a:0",  # 从第2个输入（索引1）获取音频
+                    ])
+                else:
+                    ffmpeg_cmd.extend([
+                        "-c:a", "aac",
+                        "-b:a", "192k",
+                        "-map", "0:v:0",  # 从第1个输入（索引0）获取视频
+                        "-map", "1:a:0",  # 从第2个输入（索引1）获取音频
+                        "-shortest",
+                    ])
             
             # 添加输出路径
             ffmpeg_cmd.append(output_path)
