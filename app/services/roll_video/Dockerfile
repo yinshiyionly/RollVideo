@@ -155,6 +155,9 @@ ENV PATH="/usr/local/cuda/bin:${PATH}" \
 # 验证FFmpeg是否支持NVIDIA编码器
 # RUN ffmpeg -encoders | grep nvenc
 
+# 复制依赖文件
+COPY dockerfile-requirements.txt .
+
 # 设置工作目录
 WORKDIR /app
 
