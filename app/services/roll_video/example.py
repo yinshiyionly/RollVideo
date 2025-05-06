@@ -2,21 +2,29 @@
 # -*- coding: utf-8 -*-
 
 """
-滚动视频服务使用示例
+RollVideo测试示例
+
+此脚本演示了如何使用RollVideo服务创建滚动文本视频
 """
 
 import os
+import sys
 import logging
 import time
-import sys
-from roll_video_service import RollVideoService
+from datetime import datetime
 
-# 配置日志
+# 添加父目录到sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+
+# 导入RollVideo服务
+from app.services.roll_video.roll_video_service import RollVideoService
+
+# 设置日志
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
 )
+
 logger = logging.getLogger(__name__)
 
 def main():
