@@ -150,9 +150,8 @@ class VideoRenderer:
                 codec_params = [
                     "-c:v", "h264_nvenc",
                     "-preset", "p1",  # 使用最快的预设
-                    "-tune", "fastdecode",  # 加速解码
-                    "-rc", "vbr_hq", 
-                    "-cq", "27",  # 略微降低质量以提高速度
+                    "-rc", "vbr", 
+                    "-cq", "28",  # 更低的质量以提高速度
                     "-b:v", "4M",
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
@@ -477,6 +476,10 @@ class VideoRenderer:
             # 构建完整的ffmpeg命令
             ffmpeg_cmd = self._get_ffmpeg_command(output_path, pix_fmt, codec_params, audio_path)
             
+            # 在GPU下记录详细的ffmpeg命令，便于调试
+            if preferred_codec.startswith("h264_"):
+                logger.info(f"FFmpeg命令: {' '.join(ffmpeg_cmd)}")
+            
             # 创建进程池和帧生成器
             try:
                 # 如果shared_dict为None，使用最小化的字典
@@ -691,19 +694,31 @@ class VideoRenderer:
                                 if result is not None:
                                     frame_idx, frame = result
                                     
-                                    # 优化: 直接写入二进制数据，避免额外复制
-                                    frame_bytes = frame.tobytes()
-                                    proc.stdin.write(frame_bytes)
-                                    proc.stdin.flush()
+                                    # 检查FFmpeg是否仍在运行，如果退出则不再写入
+                                    if proc.poll() is not None:
+                                        logger.warning(f"FFmpeg进程已退出(返回码:{proc.returncode})，停止写入帧")
+                                        break
                                     
-                                    # 更新进度
-                                    frames_processed += 1
-                                    
-                                    # 更新进度条
-                                    pbar.update(1)
-                                    
-                                    # 报告进度
-                                    report_progress()
+                                    try:
+                                        # 优化: 直接写入二进制数据，避免额外复制
+                                        frame_bytes = frame.tobytes()
+                                        proc.stdin.write(frame_bytes)
+                                        proc.stdin.flush()
+                                        
+                                        # 更新进度
+                                        frames_processed += 1
+                                        
+                                        # 更新进度条
+                                        pbar.update(1)
+                                        
+                                        # 报告进度
+                                        report_progress()
+                                    except BrokenPipeError:
+                                        logger.warning("FFmpeg管道已关闭，停止写入帧")
+                                        break
+                                    except Exception as e:
+                                        logger.error(f"写入帧数据时出错: {str(e)}")
+                                        break
                         except Exception as e:
                             logger.error(f"处理批次 {batch_idx+1}/{total_batches} 时出错: {str(e)}\n{traceback.format_exc()}")
                             # 继续尝试处理其他批次
@@ -727,7 +742,16 @@ class VideoRenderer:
                     watchdog_event.set()
                     logger.debug(f"所有{frames_processed}帧处理完成，通知看门狗线程退出")
                     
-                    proc.stdin.close()
+                    # 安全关闭stdin管道
+                    try:
+                        if proc.poll() is None:  # 只在进程仍在运行时关闭stdin
+                            proc.stdin.close()
+                        else:
+                            logger.warning(f"FFmpeg进程已退出(返回码:{proc.returncode})，跳过关闭stdin")
+                    except BrokenPipeError:
+                        logger.warning("FFmpeg管道已关闭，无法关闭stdin")
+                    except Exception as e:
+                        logger.error(f"关闭stdin时出错: {str(e)}")
                     
                     # 记录帧处理阶段结束，编码阶段开始
                     frame_processing_end_time = time.time()
@@ -870,12 +894,30 @@ class VideoRenderer:
                 try:
                     if 'proc' in locals() and proc.poll() is None:
                         proc.terminate()
+                        time.sleep(0.5)
+                        if proc.poll() is None:
+                            proc.kill()
                 except:
                     pass
 
+                # 检查是否为参数错误，提供具体诊断
+                error_str = str(e).lower()
+                if 'broken pipe' in error_str:
+                    logger.warning("FFmpeg管道错误，可能是编码器参数不兼容导致")
+                elif 'invalid argument' in error_str:
+                    logger.warning("FFmpeg参数错误，尝试使用更兼容的参数")
+
                 # 垃圾回收
                 gc.collect()
-        
+                
+                # 检查是否已经进行过回退尝试
+                if 'retry_attempted' in locals() and retry_attempted:
+                    logger.error("已尝试回退方案，仍然失败，放弃处理")
+                    return None
+                
+                # 设置回退标志
+                retry_attempted = True
+
         except Exception as e:
             logger.error(f"视频创建过程失败: {str(e)}\n{traceback.format_exc()}")
             # 回退到标准CPU处理
