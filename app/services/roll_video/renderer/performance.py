@@ -7,6 +7,9 @@ import logging
 import numpy as np
 from collections import deque
 import os
+import re
+import sys
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,81 @@ class PerformanceMonitor:
         self.max_fps = 0
         self.avg_fps = 0
         
+        self.stats = {}
+        self.reset()
+
+    def reset(self):
+        """重置性能统计数据"""
+        self.stats = {
+            "start_time": 0,
+            "end_time": 0,
+            "duration": 0,
+            "frames_processed": 0,
+            "frames_per_second": 0,
+            "memory_peak": 0,
+            "cpu_percent_avg": 0,
+        }
+        self.timers = {}
+
+    def start(self, name="default"):
+        """开始计时"""
+        self.timers[name] = {"start": time.time(), "end": 0, "duration": 0}
+        if name == "default" or not self.start_time:
+            self.start_time = time.time()
+            self.stats["start_time"] = self.start_time
+
+    def stop(self, name="default", frames_processed=None):
+        """停止计时并记录性能数据"""
+        if name in self.timers:
+            self.timers[name]["end"] = time.time()
+            self.timers[name]["duration"] = (
+                self.timers[name]["end"] - self.timers[name]["start"]
+            )
+
+        if name == "default" or not self.stats["end_time"]:
+            self.stats["end_time"] = time.time()
+            self.stats["duration"] = self.stats["end_time"] - self.stats["start_time"]
+
+        # 如果提供了已处理的帧数，计算FPS
+        if frames_processed:
+            self.stats["frames_processed"] = frames_processed
+            self.stats["frames_per_second"] = (
+                frames_processed / self.stats["duration"] if self.stats["duration"] > 0 else 0
+            )
+
+        # 获取进程信息
+        process = psutil.Process(os.getpid())
+        self.stats["memory_peak"] = process.memory_info().rss / (1024 * 1024)  # MB
+        self.stats["cpu_percent_avg"] = process.cpu_percent()
+
+        return self.stats
+
+    def report(self):
+        """生成性能报告"""
+        logger.info("\n" + "=" * 50)
+        logger.info("性能统计报告:")
+        logger.info(f"总时间: {self.stats['duration']:.2f} 秒")
+        logger.info(f"处理帧数: {self.stats['frames_processed']}")
+        logger.info(f"平均帧率: {self.stats['frames_per_second']:.2f} FPS")
+        logger.info(f"内存峰值: {self.stats['memory_peak']:.2f} MB")
+        logger.info(f"CPU平均使用率: {self.stats['cpu_percent_avg']:.2f}%")
+
+        # 输出各阶段计时
+        if self.timers:
+            logger.info("\n各阶段耗时:")
+            for name, timer in self.timers.items():
+                if name != "default" and "duration" in timer:
+                    percent = (
+                        timer["duration"] / self.stats["duration"] * 100
+                        if self.stats["duration"] > 0
+                        else 0
+                    )
+                    logger.info(
+                        f"- {name}: {timer['duration']:.2f} 秒 ({percent:.1f}%)"
+                    )
+
+        logger.info("=" * 50 + "\n")
+    
     def start(self, interval=1.0):
         """启动后台监控线程"""
         self.running = True
@@ -187,6 +265,137 @@ class PerformanceMonitor:
             "min_fps": self.min_fps if self.min_fps != float('inf') else 0,
             "max_fps": self.max_fps
         }
+
+    @staticmethod
+    def monitor_ffmpeg_progress(process, total_duration, total_frames, encoding_start_time=None):
+        """
+        监控FFmpeg进度并显示进度条
+        
+        参数:
+            process: FFmpeg进程对象
+            total_duration: 视频总时长（秒）
+            total_frames: 视频总帧数
+            encoding_start_time: 编码开始时间（如果为None则使用当前时间）
+        
+        返回:
+            监控线程对象
+        """
+        if encoding_start_time is None:
+            encoding_start_time = time.time()
+            
+        # 创建进度监控线程
+        def progress_monitor_thread():
+            # 保存进度正则表达式模式
+            frame_pattern = re.compile(r"frame=\s*(\d+)")
+            time_pattern = re.compile(r"time=\s*(\d+:\d+:\d+\.\d+)")
+            fps_pattern = re.compile(r"fps=\s*(\d+\.?\d*)")
+            speed_pattern = re.compile(r"speed=\s*([\d.]+)x")
+            
+            # 创建TQDM进度条
+            pbar = tqdm(
+                total=100, 
+                desc="FFmpeg处理进度", 
+                bar_format='{l_bar}{bar}| {n:3.1f}% [{elapsed}<{remaining}, {rate_fmt}{postfix}]',
+                unit="%",
+                ncols=100
+            )
+            pbar.set_postfix(fps="0", 帧="0/0", 速度="0.0x", 剩余="未知")
+            
+            last_progress = 0
+            last_frame = 0
+            
+            try:
+                while process.poll() is None:
+                    # 非阻塞方式读取stderr
+                    stderr_line = process.stderr.readline()
+                    if not stderr_line:
+                        time.sleep(0.1)  # 减少CPU使用
+                        continue
+                        
+                    stderr_line = stderr_line.strip()
+                    
+                    # 解析进度信息
+                    frame_match = frame_pattern.search(stderr_line)
+                    time_match = time_pattern.search(stderr_line)
+                    fps_match = fps_pattern.search(stderr_line)
+                    speed_match = speed_pattern.search(stderr_line)
+                    
+                    # 更新进度信息
+                    if time_match:
+                        # 从时间字符串(HH:MM:SS.MS)解析时间
+                        time_str = time_match.group(1)
+                        time_parts = time_str.split(':')
+                        if len(time_parts) == 3:
+                            hours = int(time_parts[0])
+                            minutes = int(time_parts[1])
+                            seconds = float(time_parts[2])
+                            current_time_sec = hours * 3600 + minutes * 60 + seconds
+                            
+                            # 计算实际进度百分比
+                            progress = min(1.0, current_time_sec / total_duration) * 100
+                            
+                            # 更新进度条
+                            if progress > last_progress:
+                                pbar.update(progress - last_progress)
+                                last_progress = progress
+                            
+                            # 获取当前帧数和速度
+                            current_frame = int(frame_match.group(1)) if frame_match else 0
+                            fps = float(fps_match.group(1)) if fps_match else 0
+                            speed = float(speed_match.group(1)) if speed_match else 0
+                            
+                            # 计算已用时间和预计剩余时间
+                            elapsed = time.time() - encoding_start_time
+                            
+                            if progress > 0:
+                                eta = elapsed / (progress/100) - elapsed
+                                eta_str = f"{eta:.1f}秒"
+                            else:
+                                eta_str = "未知"
+                            
+                            # 更新进度条后缀信息
+                            pbar.set_postfix(
+                                fps=f"{fps:.1f}", 
+                                帧=f"{current_frame}/{total_frames}", 
+                                速度=f"{speed:.1f}x", 
+                                剩余=eta_str
+                            )
+                            
+                            # 记录日志（不那么频繁）
+                            if current_frame - last_frame >= total_frames / 20:  # 每完成约5%记录一次
+                                logger.info(
+                                    f"FFmpeg进度: {progress:.1f}% | "
+                                    f"时间: {time_str}/{total_duration:.1f}秒 | "
+                                    f"帧: {current_frame}/{total_frames} | "
+                                    f"速度: {speed:.1f}x | "
+                                    f"FPS: {fps:.1f} | "
+                                    f"预计剩余: {eta_str}"
+                                )
+                                last_frame = current_frame
+                    
+                # 处理完成，关闭进度条
+                pbar.update(100 - last_progress)  # 确保进度达到100%
+                pbar.close()
+                
+                # 输出完成信息
+                elapsed = time.time() - encoding_start_time
+                logger.info(f"FFmpeg处理完成，总用时: {elapsed:.2f}秒")
+                
+            except Exception as e:
+                logger.error(f"监控FFmpeg进度时出错: {str(e)}")
+                
+                # 关闭进度条
+                try:
+                    pbar.close()
+                except:
+                    pass
+            
+        # 创建并启动监控线程
+        monitor_thread = threading.Thread(target=progress_monitor_thread)
+        monitor_thread.daemon = True
+        monitor_thread.start()
+        
+        return monitor_thread
 
 def log_system_info():
     """记录系统信息"""

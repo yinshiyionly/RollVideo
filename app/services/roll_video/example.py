@@ -32,9 +32,6 @@ def main():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     sample_text_path = os.path.join(current_dir, "example.txt")
     sample_text = open(sample_text_path, "r").read()
-    
-    # 使用非常短的文本进行快速测试 - 只有200个字符
-    sample_text_tiny = sample_text
 
     # 路径
     output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
@@ -46,59 +43,42 @@ def main():
     # 定义测试场景参数列表
     test_cases = [
         {
-            # 不透明 -> 自动尝试 GPU (h264_nvenc) -> 输出 .mp4
-            "description": "白底黑字（自动GPU -> MP4）- 原始方法",
-            "method": "original",  # 使用原始方法
-            "params": {
-                "text": sample_text_tiny,  # 使用极短文本
-                "width": 480,              # 更小的视频尺寸
-                "height": 640,             # 更小的视频尺寸
-                "font_path": "方正黑体简体.ttf",
-                "font_size": 24,
-                "font_color": [0,0,0],
-                "bg_color":[255,255,255,1.0], # 不透明
-                "line_spacing": 5,
-                "char_spacing": 0,
-                "fps": 30,
-                "scroll_speed": 2,  # 更快的滚动速度
-            }
-        },
-        {
             # 使用FFmpeg滤镜方法
             "description": "白底黑字（自动GPU -> MP4）- FFmpeg滤镜方法",
             "method": "ffmpeg",  # 使用FFmpeg滤镜方法
             "params": {
-                "text": sample_text_tiny,  # 使用极短文本
-                "width": 480,              # 更小的视频尺寸
-                "height": 640,             # 更小的视频尺寸
+                "text": sample_text,
+                "width": 720,
+                "height": 1280,
                 "font_path": "方正黑体简体.ttf",
-                "font_size": 24,
+                "font_size": 30,
                 "font_color": [0,0,0],
                 "bg_color":[255,255,255,1.0], # 不透明
-                "line_spacing": 5,
-                "char_spacing": 0,
+                "line_spacing": 20,
+                "char_spacing": 10,
                 "fps": 30,
-                "scroll_speed": 2,  # 更快的滚动速度
-            }
-        },
-        {
-            # 使用FFmpeg滤镜方法 - 透明背景
-            "description": "透明背景黑字（ProRes 4444 -> MOV）- FFmpeg滤镜方法",
-            "method": "ffmpeg",  # 使用FFmpeg滤镜方法
-            "params": {
-                "text": sample_text_tiny,  # 使用极短文本
-                "width": 480,              # 更小的视频尺寸
-                "height": 640,             # 更小的视频尺寸
-                "font_path": "方正黑体简体.ttf",
-                "font_size": 24,
-                "font_color": [0,0,0],
-                "bg_color": [255,255,255,0.5],  # 半透明背景
-                "line_spacing": 5,
-                "char_spacing": 0,
-                "fps": 30,
-                "scroll_speed": 2,  # 更快的滚动速度
+                "scroll_speed": 1,
             }
         }
+        # },
+        # {
+        #     # 使用FFmpeg滤镜方法 - 透明背景
+        #     "description": "透明背景黑字（ProRes 4444 -> MOV）- FFmpeg滤镜方法",
+        #     "method": "ffmpeg",  # 使用FFmpeg滤镜方法
+        #     "params": {
+        #          "text": sample_text,
+        #         "width": 720,
+        #         "height": 1280,
+        #         "font_path": "方正黑体简体.ttf",
+        #         "font_size": 24,
+        #         "font_color": [0,0,0],
+        #         "bg_color": [255,255,255,0.5],  # 半透明背景
+        #         "line_spacing": 5,
+        #         "char_spacing": 0,
+        #         "fps": 30,
+        #         "scroll_speed": 2,  # 更快的滚动速度
+        #     }
+        # }
     ]
 
     # 循环生成不同场景的视频

@@ -21,6 +21,7 @@ import signal
 from multiprocessing import shared_memory
 import random
 import string
+import re
 
 from .memory_management import FrameMemoryPool, SharedMemoryFramePool, FrameBuffer
 from .performance import PerformanceMonitor
@@ -163,7 +164,7 @@ class VideoRenderer:
                 codec_params = [
                     "-c:v", "libx264",
                     "-preset", "veryfast",  # 使用更快的预设
-                    "-crf", "26",  # 略微降低质量以提高速度
+                    "-crf", "20",  # 略微降低质量以提高速度
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
                 ]
@@ -184,7 +185,7 @@ class VideoRenderer:
                 codec_params = [
                     "-c:v", "libx264",
                     "-preset", "fast",
-                    "-crf", "23",
+                    "-crf", "20",
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
                 ]
@@ -213,7 +214,7 @@ class VideoRenderer:
             codec_params = [
                 "-c:v", "libx264",
                 "-preset", "medium",  # 平衡速度和质量的预设
-                "-crf", "23",         # 恒定质量因子 (0-51, 越低质量越高)
+                "-crf", "20",         # 恒定质量因子 (0-51, 越低质量越高)
                 "-pix_fmt", "yuv420p", # 兼容大多数播放器
                 "-movflags", "+faststart", # MP4优化
             ]
@@ -250,6 +251,8 @@ class VideoRenderer:
             pix_fmt,
             "-r",
             str(self.fps),
+            "-vsync",
+            "1",  # 添加vsync参数，确保平滑的视频同步
             "-i",
             "-",  # 从 stdin 读取
         ]
@@ -1057,15 +1060,15 @@ class VideoRenderer:
                     "-c:v",
                     "libx264",
                     "-crf",
-                    "21",  # 略微降低质量以提高速度
+                    "20",
                     "-preset",
-                    "medium",  # 保持medium预设
+                    "medium",
                     "-pix_fmt",
                     "yuv420p",
                     "-movflags",
                     "+faststart",
                     "-threads",
-                    "8",  # 充分利用8核CPU
+                    "8",
                 ]
                 logger.info(f"使用CPU编码器: libx264 (GPU编码器不可用或被禁用)")
                 use_gpu = False
@@ -1371,38 +1374,18 @@ class VideoRenderer:
             # 1. 准备图像
             preparation_start_time = time.time()
             
-            # 将图像转换为numpy数组
+            # 将输入图像转换为PIL.Image对象
             if isinstance(image, np.ndarray):
-                img_array = image.copy()
-            else:  # PIL.Image
-                img_array = np.array(image)
-            
-            # 处理透明度
-            if img_array.shape[2] == 4:  # RGBA
-                if not transparency_required:
-                    # 将RGBA转换为RGB（用背景色填充）
-                    rgb_array = np.zeros((img_array.shape[0], img_array.shape[1], 3), dtype=np.uint8)
-                    alpha = img_array[:, :, 3].astype(float) / 255.0
-                    
-                    # 安全处理背景色，确保是RGB格式
-                    if isinstance(bg_color, (list, tuple)):
-                        if len(bg_color) >= 3:
-                            bg_r, bg_g, bg_b = bg_color[0], bg_color[1], bg_color[2]
-                        else:
-                            bg_r, bg_g, bg_b = 255, 255, 255  # 默认白色
-                    else:
-                        bg_r, bg_g, bg_b = 255, 255, 255  # 默认白色
-                    
-                    # 将RGB通道从RGBA转换出来，使用背景色填充
-                    rgb_array[:, :, 0] = (img_array[:, :, 0] * alpha + bg_r * (1 - alpha)).astype(np.uint8)
-                    rgb_array[:, :, 1] = (img_array[:, :, 1] * alpha + bg_g * (1 - alpha)).astype(np.uint8)
-                    rgb_array[:, :, 2] = (img_array[:, :, 2] * alpha + bg_b * (1 - alpha)).astype(np.uint8)
-                    
-                    img_array = rgb_array
-            
-            # 获取图像尺寸
-            img_height, img_width = img_array.shape[:2]
-            channels = img_array.shape[2] if len(img_array.shape) > 2 else 1
+                # NumPy数组转PIL图像
+                if image.shape[2] == 4:  # RGBA
+                    pil_image = Image.fromarray(image, 'RGBA')
+                else:  # RGB
+                    pil_image = Image.fromarray(image, 'RGB')
+            elif isinstance(image, Image.Image):
+                # 直接使用PIL图像
+                pil_image = image
+            else:
+                raise ValueError("不支持的图像类型，需要PIL.Image或numpy.ndarray")
             
             # 确保输出目录存在
             os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -1410,12 +1393,11 @@ class VideoRenderer:
             # 设置临时图像文件路径
             temp_img_path = f"{os.path.splitext(output_path)[0]}_temp.png"
             
-            # 保存图像到临时文件
-            import cv2
-            if transparency_required and channels == 4:
-                cv2.imwrite(temp_img_path, cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGRA))
-            else:
-                cv2.imwrite(temp_img_path, cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR))
+            # 使用PIL直接保存图像，保留原始格式和所有信息
+            pil_image.save(temp_img_path, format="PNG")
+            
+            # 获取图像尺寸
+            img_width, img_height = pil_image.size
             
             logger.info(f"已保存临时图像: {temp_img_path}, 尺寸: {img_width}x{img_height}")
             
@@ -1446,7 +1428,7 @@ class VideoRenderer:
             
             # 3. 设置编码器参数
             codec_params, pix_fmt = self._get_codec_parameters(
-                preferred_codec, transparency_required, channels
+                preferred_codec, transparency_required, 4 if transparency_required else 3
             )
             
             # 准备阶段结束
@@ -1471,6 +1453,9 @@ class VideoRenderer:
                 "-y",
                 "-loop", "1",  # 循环输入图像
                 "-i", temp_img_path,  # 输入图像
+                "-progress", "pipe:2",  # 输出进度信息到stderr
+                "-stats",  # 启用统计信息
+                "-stats_period", "0.5",  # 每0.5秒输出一次统计信息
             ]
             
             # 添加音频输入（如果有）
@@ -1481,6 +1466,7 @@ class VideoRenderer:
             ffmpeg_cmd.extend([
                 "-filter_complex", crop_expr,
                 "-t", str(total_duration),  # 设置总时长
+                "-vsync", "1",  # 添加vsync参数，确保平滑的视频同步
             ])
             
             # 添加视频编码参数
@@ -1511,28 +1497,25 @@ class VideoRenderer:
                     ffmpeg_cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True
+                    text=True,
+                    bufsize=1,  # 行缓冲
+                    universal_newlines=True  # 使用通用换行符
                 )
                 
-                # 创建进度监控线程
-                def monitor_progress():
-                    while process.poll() is None:
-                        try:
-                            # 估算进度
-                            elapsed = time.time() - encoding_start_time
-                            estimated_progress = min(1.0, elapsed / (total_duration * 1.2))  # 1.2是一个估计因子
-                            logger.info(f"FFmpeg处理进度: {estimated_progress:.1%}, 已用时: {elapsed:.1f}秒")
-                            time.sleep(2.0)  # 每2秒更新一次
-                        except:
-                            break
-                
-                # 启动监控线程
-                monitor_thread = threading.Thread(target=monitor_progress)
-                monitor_thread.daemon = True
-                monitor_thread.start()
+                # 使用新的进度条监控FFmpeg进度
+                monitor_thread = PerformanceMonitor.monitor_ffmpeg_progress(
+                    process=process,
+                    total_duration=total_duration,
+                    total_frames=total_frames,
+                    encoding_start_time=encoding_start_time
+                )
                 
                 # 获取输出和错误
                 stdout, stderr = process.communicate()
+                
+                # 等待监控线程结束
+                if monitor_thread and monitor_thread.is_alive():
+                    monitor_thread.join(timeout=2.0)
                 
                 # 检查进程返回码
                 if process.returncode != 0:

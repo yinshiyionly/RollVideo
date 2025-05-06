@@ -168,7 +168,7 @@ class RollVideoService:
         line_spacing: int = 20,
         char_spacing: int = 0,
         fps: int = 30,
-        scroll_speed: float = 0.5,  # 修改为每秒滚动的行数
+        scroll_speed: float = 1,  # 修改为每秒滚动的行数
         audio_path: Optional[str] = None,
     ) -> Dict[str, Union[str, bool]]:
         """
@@ -687,7 +687,7 @@ class RollVideoService:
         line_spacing: int = 20,
         char_spacing: int = 0,
         fps: int = 30,
-        scroll_speed: float = 0.5,  # 修改为每秒滚动的行数
+        scroll_speed: float = 1,  # 修改为每秒滚动的行数
         audio_path: Optional[str] = None,
     ) -> Dict[str, Union[str, bool]]:
         """
@@ -788,10 +788,10 @@ class RollVideoService:
                 width=width, height=height, fps=fps, scroll_speed=pixels_per_frame
             )
 
-            # 使用FFmpeg滤镜方式创建滚动视频
+            # 使用FFmpeg滤镜方式创建滚动视频 - 直接传递PIL图像，不转换为numpy数组
             logger.info("开始创建滚动视频 (FFmpeg滤镜方式)...")
             final_output_path = video_renderer.create_scrolling_video_ffmpeg(
-                image=text_image,
+                image=text_image,  # 直接传递PIL图像对象
                 output_path=actual_output_path,  # 使用自动调整后的路径
                 text_actual_height=text_actual_height,
                 transparency_required=transparency_required,  # 传递透明度需求
