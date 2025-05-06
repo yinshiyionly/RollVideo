@@ -1475,46 +1475,46 @@ class VideoRenderer:
             # 检查系统是否有支持的GPU加速
             gpu_support = {
                 "nvidia": False,
-                "intel": False,
-                "amd": False,
                 "apple": False
             }
             
-            # 检测NVIDIA GPU
+            # 检测NVIDIA GPU并验证CUDA滤镜是否可用
+            has_cuda_filters = False
             try:
+                # 首先检测NVIDIA GPU是否存在
                 nvidia_result = subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
                 gpu_support["nvidia"] = nvidia_result.returncode == 0
+                
                 if gpu_support["nvidia"]:
-                    logger.info("检测到NVIDIA GPU，将尝试使用CUDA加速")
-            except:
-                pass
+                    # 进一步检查FFmpeg是否支持CUDA滤镜
+                    logger.info("检测到NVIDIA GPU，正在验证CUDA滤镜可用性...")
+                    try:
+                        # 使用-hide_banner参数和完整过滤器列表检测
+                        cuda_check = subprocess.run(
+                            ['ffmpeg', '-hide_banner', '-filters'], 
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5
+                        )
+                        cuda_output = cuda_check.stdout.lower()
+                        # 检查是否同时包含这两个CUDA滤镜
+                        has_cuda_filters = 'hwupload_cuda' in cuda_output and 'crop_cuda' in cuda_output
+                        
+                        if has_cuda_filters:
+                            logger.info("CUDA滤镜可用，将使用GPU加速")
+                        else:
+                            logger.info("检测到NVIDIA GPU，但CUDA滤镜不可用，将使用标准CPU滤镜")
+                    except Exception as e:
+                        logger.info(f"CUDA滤镜检测失败: {e}，将使用标准CPU滤镜")
+                        has_cuda_filters = False
+            except Exception as e:
+                logger.info(f"NVIDIA GPU检测出错: {e}，将使用CPU处理")
                 
             # 检测是否为macOS并支持VideoToolbox
             if platform.system() == "Darwin":
                 gpu_support["apple"] = True
                 logger.info("检测到macOS，将尝试使用VideoToolbox加速")
-                
-            # 检测Intel GPU (Linux/Windows)
-            if platform.system() in ["Linux", "Windows"]:
-                try:
-                    # 在Linux上，可以检查Intel GPU设备
-                    if platform.system() == "Linux":
-                        intel_result = subprocess.run(['lspci', '|', 'grep', '-i', 'intel.*graphics'], 
-                                                    shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                        gpu_support["intel"] = "Intel" in intel_result.stdout
-                    else:  # Windows
-                        # 在Windows上检查Intel GPU
-                        intel_result = subprocess.run(['wmic', 'path', 'win32_VideoController', 'get', 'name'], 
-                                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                        gpu_support["intel"] = "Intel" in intel_result.stdout
-                        
-                    if gpu_support["intel"]:
-                        logger.info("检测到Intel GPU，将尝试使用QSV加速")
-                except:
-                    pass
             
             # 检测是否有任何GPU支持
-            has_gpu_support = any(gpu_support.values())
+            has_gpu_support = any(gpu_support.values()) and (has_cuda_filters if gpu_support["nvidia"] else True)
             
             # 构建基本FFmpeg命令
             ffmpeg_cmd = [
@@ -1537,7 +1537,7 @@ class VideoRenderer:
             crop_y_expr = f"'if(between(t,{scroll_start_time},{scroll_end_time}),min({img_height-self.height},(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}),if(lt(t,{scroll_start_time}),0,{scroll_distance}))'"
             
             # 基于GPU支持选择合适的滤镜和编码器
-            if gpu_support["nvidia"] and not transparency_required:
+            if gpu_support["nvidia"] and has_cuda_filters and not transparency_required:
                 # 使用NVIDIA CUDA加速
                 logger.info("使用NVIDIA GPU CUDA加速滤镜")
                 crop_expr = (
@@ -1578,29 +1578,20 @@ class VideoRenderer:
                 ffmpeg_cmd.extend([
                     "-filter_complex", crop_expr,
                 ])
-            elif gpu_support["intel"] and not transparency_required:
-                # 使用Intel QSV加速
-                logger.info("使用Intel QSV硬件加速")
-                crop_expr = (
-                    f"crop=w={self.width}:h={self.height}:"
-                    f"x=0:y={crop_y_expr}"
-                )
-                
-                # 尝试使用QSV编码器
-                if "libx264" in ' '.join(codec_params):
-                    logger.info("切换到Intel QSV硬件编码器(h264_qsv)")
-                    for i, param in enumerate(codec_params):
-                        if param == "libx264":
-                            codec_params[i] = "h264_qsv"
-                            break
-                
-                # 添加标准滤镜
-                ffmpeg_cmd.extend([
-                    "-filter_complex", crop_expr,
-                ])
             else:
                 # 标准CPU滤镜
-                logger.info("未检测到支持的GPU或使用透明视频，将使用CPU处理")
+                if gpu_support["nvidia"] and not has_cuda_filters and not transparency_required:
+                    logger.info("NVIDIA GPU可用但CUDA滤镜不可用，使用CPU滤镜但尝试GPU编码")
+                    # 尽管使用CPU滤镜，仍尝试使用NVENC编码器
+                    if "libx264" in ' '.join(codec_params):
+                        logger.info("切换到NVIDIA硬件编码器(h264_nvenc)")
+                        for i, param in enumerate(codec_params):
+                            if param == "libx264":
+                                codec_params[i] = "h264_nvenc"
+                                break
+                else:
+                    logger.info("未检测到支持的GPU或使用透明视频，将使用CPU处理")
+                
                 crop_expr = (
                     f"crop=w={self.width}:h={self.height}:"
                     f"x=0:y={crop_y_expr}"
@@ -1643,7 +1634,7 @@ class VideoRenderer:
                 # 对于GPU滤镜需要特殊处理音频映射
                 if has_gpu_support and not transparency_required:
                     # GPU加速情况下的音频处理
-                    if gpu_support["nvidia"]:
+                    if gpu_support["nvidia"] and has_cuda_filters:
                         # NVIDIA CUDA滤镜需要特殊映射
                         ffmpeg_cmd.extend([
                             "-c:a", "aac",
