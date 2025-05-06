@@ -162,7 +162,7 @@ COPY dockerfile-requirements.txt /app/
 WORKDIR /app
 
 # 安装Python依赖
-RUN pip3 install --no-cache-dir -r dockerfile-requirements.txt
+# RUN pip3 install --no-cache-dir -r dockerfile-requirements.txt
 
 # 暴露API端口
 EXPOSE 5000
