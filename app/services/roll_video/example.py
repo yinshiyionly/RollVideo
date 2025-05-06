@@ -43,6 +43,24 @@ def main():
     # 定义测试场景参数列表
     test_cases = [
         {
+            # 使用original方法
+            "description": "白底黑字（自动GPU -> MP4）-   # 使用original方法",
+            "method": "original",
+            "params": {
+                "text": sample_text,
+                "width": 720,
+                "height": 1280,
+                "font_path": "方正黑体简体.ttf",
+                "font_size": 30,
+                "font_color": [0,0,0],
+                "bg_color":[255,255,255,1.0], # 不透明
+                "line_spacing": 20,
+                "char_spacing": 10,
+                "fps": 30,
+                "scroll_speed": 1,
+            }
+        },
+        {
             # 使用FFmpeg滤镜方法
             "description": "白底黑字（自动GPU -> MP4）- FFmpeg滤镜方法",
             "method": "ffmpeg",  # 使用FFmpeg滤镜方法
@@ -59,26 +77,25 @@ def main():
                 "fps": 30,
                 "scroll_speed": 1,
             }
+        },
+        {
+            # 使用FFmpeg滤镜方法 - 透明背景
+            "description": "透明背景黑字（ProRes 4444 -> MOV）- FFmpeg滤镜方法",
+            "method": "ffmpeg",  # 使用FFmpeg滤镜方法
+            "params": {
+                 "text": sample_text,
+                "width": 720,
+                "height": 1280,
+                "font_path": "方正黑体简体.ttf",
+                "font_size": 30,
+                "font_color": [0,0,0],
+                "bg_color": [255,255,255,0.5],  # 半透明背景
+                "line_spacing": 20,
+                "char_spacing": 10,
+                "fps": 30,
+                "scroll_speed": 1,  # 更快的滚动速度
+            }
         }
-        # },
-        # {
-        #     # 使用FFmpeg滤镜方法 - 透明背景
-        #     "description": "透明背景黑字（ProRes 4444 -> MOV）- FFmpeg滤镜方法",
-        #     "method": "ffmpeg",  # 使用FFmpeg滤镜方法
-        #     "params": {
-        #          "text": sample_text,
-        #         "width": 720,
-        #         "height": 1280,
-        #         "font_path": "方正黑体简体.ttf",
-        #         "font_size": 24,
-        #         "font_color": [0,0,0],
-        #         "bg_color": [255,255,255,0.5],  # 半透明背景
-        #         "line_spacing": 5,
-        #         "char_spacing": 0,
-        #         "fps": 30,
-        #         "scroll_speed": 2,  # 更快的滚动速度
-        #     }
-        # }
     ]
 
     # 循环生成不同场景的视频
