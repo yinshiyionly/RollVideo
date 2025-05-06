@@ -120,6 +120,15 @@ class VideoRenderer:
         command.append(output_path)
         return command
 
+    def _reader_thread(self, pipe, output_queue):
+        """读取管道输出并放入队列"""
+        try:
+            with pipe:
+                for line in iter(pipe.readline, b""):
+                    output_queue.put(line)
+        finally:
+            output_queue.put(None)  # 发送结束信号
+
     def create_scrolling_video_optimized(
         self,
         image: Image.Image,
