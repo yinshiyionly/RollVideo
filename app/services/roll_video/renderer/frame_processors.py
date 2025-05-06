@@ -5,89 +5,247 @@ import logging
 import ctypes
 import multiprocessing as mp
 from multiprocessing import shared_memory
+import os
+import sys
+import traceback
+import time
+import random
 
 logger = logging.getLogger(__name__)
 
-# 在多线程/多进程中共享的全局变量
-_g_img_array = None  # 全局共享的图像数组
+# 全局共享内存字典（进程内共享）
+_SHARED_MEMORY_DICT = {}
+_LOCAL_PROCESS_ID = None
 
-# 共享内存变量
-_shm = None  # 共享内存对象引用
-_shm_name = None  # 共享内存名称
-_shm_shape = None  # 图像形状
-_shm_dtype = np.uint8  # 数据类型
-
-def init_shared_memory(image_array):
-    """初始化共享内存并存储图像数据
+def init_shared_memory(shared_dict):
+    """
+    初始化共享内存管理
     
     Args:
-        image_array: 源图像的NumPy数组
-        
-    Returns:
-        shared_memory_name: 共享内存段的名称
-        shape: 图像数组的形状
+        shared_dict: 包含共享内存信息的字典
     """
-    global _shm, _shm_name, _shm_shape
-    
-    # 获取数组信息
-    nbytes = image_array.nbytes
-    shape = image_array.shape
-    dtype = image_array.dtype
-    
-    # 创建共享内存段
-    shm = shared_memory.SharedMemory(create=True, size=nbytes)
-    
-    # 创建共享内存的NumPy视图并复制数据
-    shm_array = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
-    np.copyto(shm_array, image_array)
-    
-    logger.info(f"创建共享内存: 大小={nbytes/(1024*1024):.2f}MB, 形状={shape}")
-    
-    # 保存引用以便稍后清理
-    _shm = shm
-    _shm_name = shm.name
-    _shm_shape = shape
-    
-    return shm.name, shape, dtype
+    global _SHARED_MEMORY_DICT
+    try:
+        logger.info(f"初始化共享内存: {shared_dict['shm_name']}")
+        _SHARED_MEMORY_DICT = shared_dict
+        return True
+    except Exception as e:
+        logger.error(f"初始化共享内存失败: {str(e)}\n{traceback.format_exc()}")
+        return False
 
-def cleanup_shared_memory():
-    """清理共享内存资源"""
-    global _shm
-    
-    if _shm is not None:
-        try:
-            logger.info(f"正在清理共享内存: {_shm.name}")
-            _shm.close()
-            _shm.unlink()
-            _shm = None
-        except Exception as e:
-            logger.error(f"清理共享内存失败: {e}")
-
-def init_worker(shm_name, shape, dtype):
-    """初始化工作进程，连接到共享内存
+def cleanup_shared_memory(shm_name=None):
+    """
+    清理共享内存
     
     Args:
-        shm_name: 共享内存段的名称
-        shape: 图像数组的形状
-        dtype: 数据类型
+        shm_name: 指定要清理的共享内存名称，如果为None则清理所有
     """
-    global _g_img_array, _shm_name, _shm_shape, _shm_dtype
+    global _SHARED_MEMORY_DICT
+    try:
+        if shm_name:
+            logger.info(f"清理共享内存: {shm_name}")
+            try:
+                # 尝试找到并关闭指定的共享内存
+                shm = shared_memory.SharedMemory(name=shm_name)
+                shm.close()
+                shm.unlink()
+                logger.info(f"成功清理共享内存: {shm_name}")
+            except Exception as e:
+                logger.warning(f"清理共享内存 {shm_name} 时出错: {str(e)}")
+        else:
+            # 清理_SHARED_MEMORY_DICT中记录的所有共享内存
+            if _SHARED_MEMORY_DICT and 'shm_name' in _SHARED_MEMORY_DICT:
+                try:
+                    shm_name = _SHARED_MEMORY_DICT['shm_name']
+                    shm = shared_memory.SharedMemory(name=shm_name)
+                    shm.close()
+                    shm.unlink()
+                    logger.info(f"成功清理共享内存: {shm_name}")
+                except Exception as e:
+                    logger.warning(f"清理共享内存 {shm_name} 时出错: {str(e)}")
+            
+            _SHARED_MEMORY_DICT.clear()
+            
+        return True
+    except Exception as e:
+        logger.error(f"清理共享内存过程出错: {str(e)}\n{traceback.format_exc()}")
+        return False
+
+def init_worker(shared_dict):
+    """
+    初始化工作进程
+    
+    Args:
+        shared_dict: 共享内存信息字典
+    """
+    global _SHARED_MEMORY_DICT, _LOCAL_PROCESS_ID
+    
+    # 设置进程名，便于调试
+    _LOCAL_PROCESS_ID = os.getpid()
+    try:
+        mp.current_process().name = f"FrameProcessor-{_LOCAL_PROCESS_ID}"
+    except:
+        pass
     
     try:
-        # 保存共享内存信息
-        _shm_name = shm_name
-        _shm_shape = shape
-        _shm_dtype = dtype
+        # 存储共享内存信息
+        _SHARED_MEMORY_DICT = shared_dict
         
-        # 连接到现有共享内存
-        existing_shm = shared_memory.SharedMemory(name=shm_name)
+        # 在工作进程中记录初始化
+        logger.info(f"工作进程 {_LOCAL_PROCESS_ID} 初始化，连接到共享内存 {shared_dict.get('shm_name', 'unknown')}")
         
-        # 创建NumPy数组，它使用共享内存作为底层缓冲区
-        _g_img_array = np.ndarray(shape, dtype=dtype, buffer=existing_shm.buf)
-        
-        logger.debug(f"工作进程连接到共享内存: {shm_name}, 形状={shape}")
+        # 测试是否能访问共享内存
+        if test_worker_shared_memory(shared_dict):
+            logger.info(f"工作进程 {_LOCAL_PROCESS_ID} 成功连接到共享内存")
+            return True
+        else:
+            logger.error(f"工作进程 {_LOCAL_PROCESS_ID} 连接共享内存失败")
+            return False
     except Exception as e:
-        logger.error(f"工作进程共享内存初始化失败: {e}")
+        logger.error(f"工作进程 {_LOCAL_PROCESS_ID} 初始化失败: {str(e)}\n{traceback.format_exc()}")
+        return False
+
+def test_worker_shared_memory(shared_dict):
+    """
+    测试工作进程共享内存访问
+    
+    Args:
+        shared_dict: 共享内存信息字典
+    
+    Returns:
+        bool: 测试成功返回True，否则返回False
+    """
+    pid = os.getpid()
+    try:
+        # 尝试访问共享内存
+        shm_name = shared_dict.get('shm_name')
+        img_shape = shared_dict.get('img_shape')
+        
+        if not shm_name or not img_shape:
+            logger.error(f"进程 {pid}: 共享内存信息不完整")
+            return False
+        
+        # 尝试连接到共享内存
+        try:
+            shm = shared_memory.SharedMemory(name=shm_name)
+        except Exception as e:
+            logger.error(f"进程 {pid}: 无法连接到共享内存 {shm_name}: {str(e)}")
+            return False
+        
+        # 尝试创建numpy数组读取共享内存数据
+        try:
+            shared_img = np.ndarray(img_shape, dtype=np.uint8, buffer=shm.buf)
+            
+            # 验证数据是否可读
+            test_value = shared_img[0, 0, 0]
+            
+            # 检查dtype是否正确
+            if shared_img.dtype != np.uint8:
+                logger.error(f"进程 {pid}: 共享内存数据类型错误: {shared_img.dtype}")
+                shm.close()
+                return False
+            
+            # 关闭但不销毁
+            shm.close()
+            
+            # 生成随机ID以标识此进程
+            test_id = random.randint(10000, 99999)
+            logger.info(f"进程 {pid} (ID:{test_id}): 共享内存测试成功，可以读取图像数据")
+            return True
+            
+        except Exception as e:
+            logger.error(f"进程 {pid}: 读取共享内存数据失败: {str(e)}")
+            shm.close()
+            return False
+            
+    except Exception as e:
+        logger.error(f"进程 {pid}: 共享内存测试出错: {str(e)}\n{traceback.format_exc()}")
+        return False
+
+def _process_frame_optimized_shm(args):
+    """
+    使用共享内存优化的帧处理函数
+    
+    Args:
+        args: 包含帧索引和帧元数据的元组
+    
+    Returns:
+        元组 (帧索引, 帧数据) 或 None (如果处理失败)
+    """
+    global _SHARED_MEMORY_DICT, _LOCAL_PROCESS_ID
+    
+    frame_idx, frame_meta = args
+    
+    try:
+        # 获取共享内存信息
+        shm_name = _SHARED_MEMORY_DICT.get('shm_name')
+        img_shape = _SHARED_MEMORY_DICT.get('img_shape')
+        
+        if not shm_name or not img_shape:
+            logger.error(f"进程 {_LOCAL_PROCESS_ID}: 帧 {frame_idx} 缺少共享内存信息")
+            return None
+        
+        # 尝试访问共享内存
+        try:
+            shm = shared_memory.SharedMemory(name=shm_name)
+        except Exception as e:
+            logger.error(f"进程 {_LOCAL_PROCESS_ID}: 帧 {frame_idx} 无法访问共享内存: {str(e)}")
+            return None
+        
+        try:
+            # 创建对共享内存的视图
+            source_img = np.ndarray(img_shape, dtype=np.uint8, buffer=shm.buf)
+            
+            # 从元数据获取参数
+            width = frame_meta['width']
+            height = frame_meta['height']
+            img_height = frame_meta['img_height']
+            scroll_speed = frame_meta['scroll_speed']
+            fps = frame_meta['fps']
+            
+            # 创建输出帧
+            frame = np.ones((height, width, 3), dtype=np.uint8) * 255
+            
+            # 计算当前帧的垂直位置
+            if scroll_speed > 0:
+                # 计算滚动偏移量
+                total_scroll_distance = img_height - height
+                current_position = min(
+                    total_scroll_distance,
+                    max(0, int(frame_idx * scroll_speed / fps))
+                )
+                
+                # 计算源图像和目标帧的重叠区域
+                src_start_y = current_position
+                src_end_y = min(img_height, src_start_y + height)
+                dst_start_y = 0
+                dst_end_y = src_end_y - src_start_y
+                
+                # 复制图像数据
+                frame[dst_start_y:dst_end_y, :, :] = source_img[src_start_y:src_end_y, :, :]
+            else:
+                # 如果不需要滚动，则居中放置图像
+                if img_height < height:
+                    start_y = (height - img_height) // 2
+                    frame[start_y:start_y+img_height, :, :] = source_img
+                else:
+                    # 如果图像高度超过视频高度，仅显示顶部
+                    frame[:, :, :] = source_img[:height, :, :]
+            
+            # 关闭共享内存（不销毁）
+            shm.close()
+            
+            return (frame_idx, frame)
+            
+        except Exception as e:
+            logger.error(f"进程 {_LOCAL_PROCESS_ID}: 处理帧 {frame_idx} 时出错: {str(e)}\n{traceback.format_exc()}")
+            shm.close()
+            # 返回黑色帧而不是None，以避免视频中断
+            return (frame_idx, np.zeros((frame_meta['height'], frame_meta['width'], 3), dtype=np.uint8))
+            
+    except Exception as e:
+        logger.error(f"进程 {_LOCAL_PROCESS_ID}: 处理帧 {frame_idx} 时发生致命错误: {str(e)}\n{traceback.format_exc()}")
+        return None
 
 def _process_frame(args):
     """多进程帧处理函数，高性能优化版本"""
@@ -221,154 +379,6 @@ def _process_frame_optimized(args):
     # 确保返回内存连续的帧数据 - 此步骤对于管道通信至关重要
     # 由于我们已经在创建时指定order='C'，这里可以省略额外的检查
     return frame_idx, frame
-
-def _process_frame_optimized_shm(args):
-    """使用共享内存的极度优化帧处理函数"""
-    global _g_img_array
-    
-    # 如果_g_img_array为None，尝试重新连接到共享内存
-    if _g_img_array is None and _shm_name is not None:
-        try:
-            existing_shm = shared_memory.SharedMemory(name=_shm_name)
-            _g_img_array = np.ndarray(_shm_shape, dtype=_shm_dtype, buffer=existing_shm.buf)
-        except Exception as e:
-            logger.error(f"重新连接共享内存失败: {e}")
-            return args[0], None  # 返回帧索引和None表示处理失败
-    
-    frame_idx, img_start_y, img_height, img_width, self_height, self_width, is_transparent, bg_color = args
-    
-    # 快速路径 - 直接计算切片位置
-    img_end_y = min(img_height, img_start_y + self_height)
-    visible_height = img_end_y - img_start_y
-    
-    # 零边界检查 - 极端情况直接返回背景
-    if visible_height <= 0 or _g_img_array is None:
-        if is_transparent:
-            # 预分配连续内存
-            frame = np.zeros((self_height, self_width, 4), dtype=np.uint8, order='C')
-        else:
-            # 使用背景色
-            frame = np.ones((self_height, self_width, 3), dtype=np.uint8, order='C') * np.array(bg_color, dtype=np.uint8)
-        return frame_idx, frame
-    
-    # 预分配帧缓冲区 - 提高效率，确保内存连续
-    if is_transparent:
-        # 创建空的透明帧
-        frame = np.zeros((self_height, self_width, 4), dtype=np.uint8, order='C')
-    else:
-        # 用背景色填充帧
-        frame = np.ones((self_height, self_width, 3), dtype=np.uint8, order='C') * np.array(bg_color, dtype=np.uint8)
-    
-    # 计算切片 - 超高效版
-    source_height = min(visible_height, self_height)
-    source_width = min(img_width, self_width)
-    
-    # 使用直接视图赋值，避免任何额外复制
-    if source_height > 0 and source_width > 0:
-        # 单一高效赋值操作
-        frame[:source_height, :source_width] = _g_img_array[img_start_y:img_start_y+source_height, :source_width]
-    
-    # 确保返回内存连续的帧数据
-    return frame_idx, frame
-
-# 尝试添加JIT编译支持（如果可用）
-try:
-    import numba
-    if hasattr(numba, 'jit'):
-        logger.info("启用Numba JIT加速")
-        
-        @numba.jit(nopython=True, parallel=True, fastmath=True, cache=True)
-        def _blend_images_fast(source, target, alpha):
-            """使用JIT编译加速的图像混合函数"""
-            height, width = source.shape[:2]
-            result = np.empty((height, width, 3), dtype=np.uint8)
-            
-            for y in numba.prange(height):
-                for x in range(width):
-                    a = alpha[y, x, 0] / 255.0
-                    for c in range(3):
-                        result[y, x, c] = int(source[y, x, c] * a + target[y, x, c] * (1.0 - a))
-            
-            return result
-        
-        # 创建一个使用Numba优化的帧处理函数
-        def _process_frame_jit(args):
-            """使用JIT编译加速的帧处理函数"""
-            global _g_img_array
-            
-            frame_idx, img_start_y, img_height, img_width, self_height, self_width, frame_positions, is_transparent, bg_color = args
-            
-            # 快速路径和边界检查
-            img_end_y = min(img_height, img_start_y + self_height)
-            frame_start_y = 0
-            frame_end_y = img_end_y - img_start_y
-            
-            if img_start_y >= img_end_y or frame_start_y >= frame_end_y or frame_end_y > self_height or _g_img_array is None:
-                if is_transparent:
-                    frame = np.zeros((self_height, self_width, 4), dtype=np.uint8)
-                else:
-                    frame = np.ones((self_height, self_width, 3), dtype=np.uint8) * np.array(bg_color, dtype=np.uint8)
-                return frame_idx, frame
-            
-            # 创建帧缓冲区
-            if is_transparent:
-                frame = np.zeros((self_height, self_width, 4), dtype=np.uint8)
-            else:
-                frame = np.ones((self_height, self_width, 3), dtype=np.uint8) * np.array(bg_color, dtype=np.uint8)
-            
-            # 计算切片
-            img_h_slice = slice(img_start_y, img_end_y)
-            img_w_slice = slice(0, min(self_width, img_width))
-            frame_h_slice = slice(frame_start_y, frame_end_y)
-            frame_w_slice = slice(0, min(self_width, img_width))
-            
-            try:
-                source_section = _g_img_array[img_h_slice, img_w_slice]
-                target_area = frame[frame_h_slice, frame_w_slice]
-                
-                if target_area.shape[:2] == source_section.shape[:2]:
-                    if is_transparent:
-                        target_area[:] = source_section
-                    else:
-                        # 使用JIT编译的快速混合函数
-                        blended = _blend_images_fast(
-                            source_section[:, :, :3], 
-                            target_area, 
-                            source_section[:, :, 3:4]
-                        )
-                        target_area[:] = blended
-                else:
-                    # 处理形状不匹配的情况
-                    copy_height = min(target_area.shape[0], source_section.shape[0])
-                    copy_width = min(target_area.shape[1], source_section.shape[1])
-                    
-                    if copy_height > 0 and copy_width > 0:
-                        src_crop = source_section[:copy_height, :copy_width]
-                        dst_crop = target_area[:copy_height, :copy_width]
-                        
-                        if is_transparent:
-                            target_area[:copy_height, :copy_width] = src_crop
-                        else:
-                            # 使用JIT编译的快速混合函数
-                            blended = _blend_images_fast(
-                                src_crop[:, :, :3], 
-                                dst_crop, 
-                                src_crop[:, :, 3:4]
-                            )
-                            target_area[:copy_height, :copy_width] = blended
-            except Exception as e:
-                logger.error(f"JIT优化帧处理出错 {frame_idx}: {e}")
-            
-            return frame_idx, frame
-        
-        # 用优化的JIT函数替换原函数
-        _process_frame_original = _process_frame
-        _process_frame = _process_frame_jit
-        logger.info("已启用JIT加速帧处理函数")
-    else:
-        logger.info("Numba可用但JIT不可用，使用标准优化")
-except ImportError:
-    logger.info("Numba未安装，使用标准优化")
 
 def fast_frame_processor(batch_frames, memory_pool, ffmpeg_process):
     """
