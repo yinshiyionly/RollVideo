@@ -161,6 +161,7 @@ class VideoRenderer:
         img_height, img_width = img_array.shape[:2]
         img_dtype = img_array.dtype
         img_size_bytes = img_array.nbytes
+        img_shape = img_array.shape  # 保存形状供后续使用
 
         try:
             # 创建共享内存
@@ -500,11 +501,11 @@ class VideoRenderer:
         with mp.Pool(
             processes=num_processes,
             initializer=init_worker,  # 设置 worker 初始化函数
-            initargs=(self._shm_name, img_array.shape, img_dtype),  # 传递共享内存信息
+            initargs=(self._shm_name, img_shape, img_dtype),  # 使用之前保存的形状，而不是引用已删除的img_array
         ) as pool:
             # 使用 imap_unordered 获取结果，按完成顺序返回
             results_iterator = pool.imap_unordered(
-                _process_frame_to_use, frame_params_list
+                _process_frame_optimized_shm, frame_params_list
             )
 
             with tqdm(
