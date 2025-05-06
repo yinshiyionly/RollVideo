@@ -149,21 +149,22 @@ class VideoRenderer:
             if is_windows or is_linux:
                 codec_params = [
                     "-c:v", "h264_nvenc",
-                    "-preset", "p4",
-                    "-rc", "vbr",
-                    "-cq", "23",
-                    "-b:v", "5M",
+                    "-preset", "p1",  # 使用最快的预设
+                    "-tune", "fastdecode",  # 加速解码
+                    "-rc", "vbr_hq", 
+                    "-cq", "27",  # 略微降低质量以提高速度
+                    "-b:v", "4M",
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
                 ]
-                logger.info("使用NVIDIA GPU加速编码器")
+                logger.info("使用NVIDIA GPU加速编码器 (优化性能模式)")
             else:
                 # 不支持NVIDIA，回退到CPU
                 logger.info("平台不支持NVIDIA编码，切换到libx264")
                 codec_params = [
                     "-c:v", "libx264",
-                    "-preset", "fast",
-                    "-crf", "23",
+                    "-preset", "veryfast",  # 使用更快的预设
+                    "-crf", "26",  # 略微降低质量以提高速度
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
                 ]
@@ -495,6 +496,27 @@ class VideoRenderer:
                         bufsize=10 * 1024 * 1024,  # 大缓冲区
                     )
                     
+                    # 创建stdout和stderr读取线程，防止管道缓冲区满导致FFmpeg阻塞
+                    def read_pipe(pipe, name):
+                        """读取管道数据，防止缓冲区满"""
+                        try:
+                            for line in iter(pipe.readline, b''):
+                                line_str = line.decode('utf-8', errors='replace').strip()
+                                if name == 'stderr' and ('error' in line_str.lower() or 'warning' in line_str.lower()):
+                                    logger.warning(f"FFmpeg {name}: {line_str}")
+                        except Exception as e:
+                            logger.error(f"读取FFmpeg {name}管道时出错: {str(e)}")
+                        finally:
+                            pipe.close()
+                    
+                    # 启动读取线程
+                    stdout_thread = threading.Thread(target=read_pipe, args=(proc.stdout, 'stdout'))
+                    stderr_thread = threading.Thread(target=read_pipe, args=(proc.stderr, 'stderr'))
+                    stdout_thread.daemon = True
+                    stderr_thread.daemon = True
+                    stdout_thread.start()
+                    stderr_thread.start()
+                    
                     # 帧处理阶段正式开始（从FFmpeg启动开始计时）
                     frame_processing_start_time = time.time()
 
@@ -716,8 +738,65 @@ class VideoRenderer:
                     logger.info(f"帧处理阶段完成，用时: {self.performance_stats['frame_processing_time']:.2f}秒，平均: {frames_processed / self.performance_stats['frame_processing_time']:.2f}帧/秒")
                     logger.info(f"等待FFmpeg完成编码...")
                     
-                    # 等待FFmpeg完成
-                    return_code = proc.wait()
+                    # 添加超时机制，防止无限等待
+                    encoding_timeout = 120  # 编码超时时间，单位：秒，对于GPU加速任务设置更长时间
+                    encoding_wait_interval = 0.5  # 检查间隔，单位：秒
+                    wait_start_time = time.time()
+                    encoding_progress_interval = 5.0  # 日志报告间隔，单位：秒
+                    last_progress_time = time.time()
+                    
+                    # 等待FFmpeg完成，但设置超时
+                    return_code = None
+                    while proc.poll() is None:
+                        current_time = time.time()
+                        
+                        # 检查是否应该报告进度
+                        if current_time - last_progress_time >= encoding_progress_interval:
+                            encoding_elapsed = current_time - encoding_start_time
+                            logger.info(f"FFmpeg编码进行中，已等待 {encoding_elapsed:.1f} 秒...")
+                            last_progress_time = current_time
+                        
+                        # 检查是否超时
+                        current_wait_time = current_time - wait_start_time
+                        if current_wait_time > encoding_timeout:
+                            logger.warning(f"FFmpeg编码阶段已等待{encoding_timeout}秒，超时强制结束")
+                            try:
+                                proc.terminate()
+                                # 给进程一点时间来终止
+                                time.sleep(1)
+                                # 如果仍在运行，强制结束
+                                if proc.poll() is None:
+                                    logger.warning("FFmpeg进程未响应terminate()，尝试强制终止(kill)")
+                                    proc.kill()
+                                    time.sleep(0.5)
+                                    
+                                # 最后检查
+                                if proc.poll() is None:
+                                    logger.error("无法终止FFmpeg进程，可能需要手动清理")
+                                else:
+                                    logger.warning(f"FFmpeg进程已终止，返回码: {proc.returncode}")
+                            except Exception as e:
+                                logger.error(f"终止FFmpeg进程时出错: {e}")
+                            
+                            # 设置错误返回码
+                            return_code = -9  # 自定义超时错误码
+                            break
+                        
+                        # 短暂等待后再次检查
+                        time.sleep(encoding_wait_interval)
+                    
+                    # 记录编码结束状态
+                    encoding_time = time.time() - encoding_start_time
+                    
+                    # 如果没有设置返回码（未超时），则获取进程的实际返回码
+                    if return_code is None:
+                        return_code = proc.returncode
+                        if return_code == 0:
+                            logger.info(f"FFmpeg编码成功完成，用时: {encoding_time:.2f}秒")
+                        else:
+                            logger.error(f"FFmpeg编码失败，返回码: {return_code}，用时: {encoding_time:.2f}秒")
+                    else:
+                        logger.warning(f"FFmpeg编码因超时而强制终止，已运行: {encoding_time:.2f}秒")
                     
                     # 记录编码阶段结束
                     encoding_end_time = time.time()
@@ -740,6 +819,19 @@ class VideoRenderer:
                             watchdog.join(timeout=2)
                         except Exception as e:
                             logger.debug(f"等待看门狗线程时出错: {e}")
+                    
+                    # 等待输出线程完成
+                    if 'stdout_thread' in locals() and stdout_thread.is_alive():
+                        try:
+                            stdout_thread.join(timeout=2)
+                        except Exception as e:
+                            logger.debug(f"等待stdout线程时出错: {e}")
+                    
+                    if 'stderr_thread' in locals() and stderr_thread.is_alive():
+                        try:
+                            stderr_thread.join(timeout=2)
+                        except Exception as e:
+                            logger.debug(f"等待stderr线程时出错: {e}")
                     
                     # 读取剩余输出
                     while True:
