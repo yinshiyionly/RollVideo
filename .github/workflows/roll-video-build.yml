@@ -12,43 +12,11 @@ jobs:
     runs-on: ubuntu-22.04
     if: ${{ github.repository == 'duanfuxing/RollVideo' }}
     steps:
-      - name: Free up disk space
-        run: |
-          echo "Cleaning up disk space..."
-          sudo rm -rf /usr/share/dotnet \
-                      /opt/ghc \
-                      /usr/local/lib/android \
-                      /usr/lib/jvm
-          df -h
-
       - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Create simulated physical disk
-        run: |
-          mnt_size=$(expr $(df -h /mnt | tail -1 | awk '{print $4}' | sed 's/[[:alpha:]]//g' | sed 's/\..*//') - 1)
-          root_size=$(expr $(df -h / | tail -1 | awk '{print $4}' | sed 's/[[:alpha:]]//g' | sed 's/\..*//') - 4)
-          sudo truncate -s "${mnt_size}"G /mnt/mnt.img
-          sudo truncate -s "${root_size}"G /root.img
-          sudo losetup /dev/loop6 /mnt/mnt.img
-          sudo losetup /dev/loop7 /root.img
-          sudo pvcreate /dev/loop6
-          sudo pvcreate /dev/loop7
-          sudo vgcreate github /dev/loop6 /dev/loop7
-          sudo lvcreate -n runner -l 100%FREE github
-          sudo mkfs.xfs /dev/github/runner
-          sudo mkdir -p /builder
-          sudo mount /dev/github/runner /builder
-          sudo chown -R runner:runner /builder
-          df -Th
-
-      - name: Copy project source to mounted volume
-        run: |
-          mkdir -p /builder/app
-          cp -r $GITHUB_WORKSPACE/* /builder/app/
 
       - name: Cache Docker layers
         uses: actions/cache@v3
