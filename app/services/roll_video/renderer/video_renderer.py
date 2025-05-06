@@ -601,18 +601,32 @@ class VideoRenderer:
                         last_check_frames = 0
                         last_check_time = time.time()
                         
-                        while True:
+                        # 添加一个信号标志来控制看门狗是否应该继续运行
+                        watchdog_active = True
+                        
+                        while watchdog_active:
                             # 等待看门狗重置或超时
                             if watchdog_event.wait(watchdog_timeout / 2):
                                 # 事件被设置，重置看门狗
                                 watchdog_event.clear()
                                 last_check_frames = frames_processed
                                 last_check_time = time.time()
+                                
+                                # 检查是否完成所有帧处理，如果完成则退出看门狗
+                                if frames_processed >= total_frames:
+                                    logger.debug("所有帧已处理完成，看门狗退出")
+                                    watchdog_active = False
+                                    return
                             else:
                                 # 检查是否有进展
                                 if frames_processed == last_check_frames:
                                     current_time = time.time()
                                     if current_time - last_check_time > watchdog_timeout:
+                                        # 如果已处理了所有帧，不报告卡住
+                                        if frames_processed >= total_frames:
+                                            logger.debug("所有帧已处理完成，看门狗退出")
+                                            return
+                                        
                                         logger.error(
                                             f"看门狗检测到处理卡住: {watchdog_timeout}秒内没有进度!"
                                             f"最后处理: {last_check_frames}/{total_frames}帧"
@@ -687,6 +701,10 @@ class VideoRenderer:
                             break
 
                     # 6. 完成处理，关闭stdin管道
+                    # 设置信号通知看门狗线程所有帧处理完成
+                    watchdog_event.set()
+                    logger.debug(f"所有{frames_processed}帧处理完成，通知看门狗线程退出")
+                    
                     proc.stdin.close()
                     
                     # 记录帧处理阶段结束，编码阶段开始
@@ -713,6 +731,16 @@ class VideoRenderer:
                     # 关闭进度条
                     pbar.close()
                     
+                    # 确保看门狗线程退出
+                    if 'watchdog' in locals():
+                        try:
+                            # 最后一次设置信号
+                            watchdog_event.set()
+                            # 等待看门狗线程结束，但最多等待2秒
+                            watchdog.join(timeout=2)
+                        except Exception as e:
+                            logger.debug(f"等待看门狗线程时出错: {e}")
+                    
                     # 读取剩余输出
                     while True:
                         try:
@@ -726,9 +754,9 @@ class VideoRenderer:
                         except queue.Empty:
                             break
 
-                    # 等待读取线程
-                    stdout_thread.join(timeout=2)
-                    stderr_thread.join(timeout=2)
+                    # 删除对不存在线程的引用
+                    # stdout_thread.join(timeout=2)
+                    # stderr_thread.join(timeout=2)
                     
                     # 检查退出状态
                     if return_code != 0:
