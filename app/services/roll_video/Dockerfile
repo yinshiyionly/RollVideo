@@ -3,6 +3,7 @@
 ###############################################################
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS ffmpeg-builder
 
+# 非交互式
 ENV DEBIAN_FRONTEND=noninteractive
 
 # 安装系统依赖
@@ -84,14 +85,6 @@ RUN cd /tmp && \
     cp -r cudnn-linux-x86_64-8.9.4.25_cuda12-archive/include/* /usr/local/cuda/include/ && \
     rm -rf /tmp/cudnn* && \
     ldconfig
-
-# 下载并安装nv-codec-headers 注意显卡驱动版本
-RUN git clone https://github.com/FFmpeg/nv-codec-headers.git && \
-    cd nv-codec-headers && \
-    git checkout sdk/12.0 && \
-    make -j$(nproc) && \
-    make install
-
 
 # 安装nv-codec-headers
 RUN git clone https://github.com/FFmpeg/nv-codec-headers.git && \
@@ -183,7 +176,7 @@ COPY --from=ffmpeg-builder /usr/local/bin/ffprobe /usr/local/bin/
 COPY --from=ffmpeg-builder /usr/local/lib/lib*so* /usr/local/lib/
 
 
-# 安装NVIDIA ML Python包和TensorFlow
+# 安装 python 包
 RUN pip3 install --no-cache-dir -r dockerfile-requirements.txt \
     && find /usr/local/lib/python3.*/dist-packages/ -name "*.pyc" -delete \
     && find /usr/local/lib/python3.*/dist-packages/ -name "__pycache__" -delete
