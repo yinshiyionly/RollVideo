@@ -208,7 +208,7 @@ class VideoRenderer:
                 # 使用最简单的GPU参数以确保兼容性
                 video_codec_params = [
                     "-c:v", preferred_codec,
-                    "-preset", "p3",         # 保持p3预设
+                    "-preset", "p4",         # 保持p4预设
                     "-b:v", "5M",            # 使用固定比特率
                     "-pix_fmt", "yuv420p",   # 确保兼容性
                     "-movflags", "+faststart"
