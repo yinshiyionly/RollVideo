@@ -503,11 +503,11 @@ class VideoRenderer:
                     # 在macOS/Linux上使用资源限制命令
                     if is_macos or is_linux:
                         # 使用资源限制，合并到ffmpeg命令中
-                        logger.info("设置FFmpeg资源限制 (CPU: 2核, 内存: 最大30GB)")
+                        logger.info("设置FFmpeg资源限制 (CPU: 4核, 内存: 最大30GB)")
                         os.environ["LIBAV_BUFFER_SIZE"] = "1024"  # 1GB libav缓冲区大小
                         os.environ["FFMPEG_MEMORY_LIMIT"] = "30720"  # 30GB内存限制
-                        os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
-                        os.environ["OMP_NUM_THREADS"] = "2"
+                        os.environ["VECLIB_MAXIMUM_THREADS"] = "4"
+                        os.environ["OMP_NUM_THREADS"] = "4"
                     else:
                         # Windows或其他系统，只能使用FFmpeg内部限制
                         logger.info("当前系统不支持外部资源限制，仅使用FFmpeg内部限制机制")
@@ -1377,11 +1377,11 @@ class VideoRenderer:
         """
         try:
             # 设置FFmpeg资源限制环境变量
-            logger.info("设置FFmpeg资源限制 (CPU: 2核, 内存: 最大30GB)")
+            logger.info("设置FFmpeg资源限制 (CPU: 4核, 内存: 最大30GB)")
             os.environ["LIBAV_BUFFER_SIZE"] = "1024"  # 1GB libav缓冲区大小
             os.environ["FFMPEG_MEMORY_LIMIT"] = "30720"  # 30GB内存限制
-            os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
-            os.environ["OMP_NUM_THREADS"] = "2"
+            os.environ["VECLIB_MAXIMUM_THREADS"] = "4"
+            os.environ["OMP_NUM_THREADS"] = "4"
             
             # 临时图像优化选项
             image_optimize_options = {
@@ -1472,16 +1472,49 @@ class VideoRenderer:
             # 4. 创建FFmpeg命令，使用crop滤镜和表达式
             encoding_start_time = time.time()
             
-            # 检查系统是否有NVIDIA GPU
-            has_nvidia_gpu = False
+            # 检查系统是否有支持的GPU加速
+            gpu_support = {
+                "nvidia": False,
+                "intel": False,
+                "amd": False,
+                "apple": False
+            }
+            
+            # 检测NVIDIA GPU
             try:
-                # 尝试使用nvidia-smi检测GPU
-                result = subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
-                has_nvidia_gpu = result.returncode == 0
-                if has_nvidia_gpu:
-                    logger.info("检测到NVIDIA GPU，将使用CUDA加速滤镜处理")
+                nvidia_result = subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
+                gpu_support["nvidia"] = nvidia_result.returncode == 0
+                if gpu_support["nvidia"]:
+                    logger.info("检测到NVIDIA GPU，将尝试使用CUDA加速")
             except:
-                logger.info("未检测到NVIDIA GPU，将使用CPU处理")
+                pass
+                
+            # 检测是否为macOS并支持VideoToolbox
+            if platform.system() == "Darwin":
+                gpu_support["apple"] = True
+                logger.info("检测到macOS，将尝试使用VideoToolbox加速")
+                
+            # 检测Intel GPU (Linux/Windows)
+            if platform.system() in ["Linux", "Windows"]:
+                try:
+                    # 在Linux上，可以检查Intel GPU设备
+                    if platform.system() == "Linux":
+                        intel_result = subprocess.run(['lspci', '|', 'grep', '-i', 'intel.*graphics'], 
+                                                    shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        gpu_support["intel"] = "Intel" in intel_result.stdout
+                    else:  # Windows
+                        # 在Windows上检查Intel GPU
+                        intel_result = subprocess.run(['wmic', 'path', 'win32_VideoController', 'get', 'name'], 
+                                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        gpu_support["intel"] = "Intel" in intel_result.stdout
+                        
+                    if gpu_support["intel"]:
+                        logger.info("检测到Intel GPU，将尝试使用QSV加速")
+                except:
+                    pass
+            
+            # 检测是否有任何GPU支持
+            has_gpu_support = any(gpu_support.values())
             
             # 构建基本FFmpeg命令
             ffmpeg_cmd = [
@@ -1491,42 +1524,83 @@ class VideoRenderer:
                 "-i", temp_img_path,  # 输入图像
                 "-progress", "pipe:2",  # 输出进度信息到stderr
                 "-stats",  # 启用统计信息
-                "-stats_period", "0.5",  # 每0.5秒输出一次统计信息
-                "-threads", "2",  # 限制CPU使用核心数为2
+                "-stats_period", "1",  # 每1秒输出一次统计信息
+                "-threads", "4",  # 限制CPU使用核心数为4
                 "-max_muxing_queue_size", "1024",  # 限制复用队列大小
             ]
             
             # 添加音频输入（如果有）
             if audio_path and os.path.exists(audio_path):
                 ffmpeg_cmd.extend(["-i", audio_path])
-            
+                
             # 创建裁剪表达式
             crop_y_expr = f"'if(between(t,{scroll_start_time},{scroll_end_time}),min({img_height-self.height},(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}),if(lt(t,{scroll_start_time}),0,{scroll_distance}))'"
             
-            # 根据GPU支持选择不同的滤镜
-            if has_nvidia_gpu and not transparency_required:
-                # 使用CUDA GPU加速滤镜（仅适用于非透明视频）
+            # 基于GPU支持选择合适的滤镜和编码器
+            if gpu_support["nvidia"] and not transparency_required:
+                # 使用NVIDIA CUDA加速
+                logger.info("使用NVIDIA GPU CUDA加速滤镜")
                 crop_expr = (
                     f"[0:v] hwupload_cuda, crop_cuda=w={self.width}:h={self.height}:"
                     f"x=0:y={crop_y_expr} [v]"
                 )
                 
-                # 对于GPU加速，尝试使用NVENC编码器
-                if preferred_codec == "libx264":
-                    # 将CPU编码器替换为GPU编码器
-                    logger.info("使用NVIDIA GPU加速编码 (h264_nvenc)")
+                # 尝试使用NVENC编码器
+                if "libx264" in ' '.join(codec_params):
+                    logger.info("切换到NVIDIA硬件编码器(h264_nvenc)")
                     for i, param in enumerate(codec_params):
                         if param == "libx264":
                             codec_params[i] = "h264_nvenc"
                             break
                             
-                # 添加GPU滤镜和映射
+                # 添加NVIDIA滤镜映射
                 ffmpeg_cmd.extend([
                     "-filter_complex", crop_expr,
-                    "-map", "[v]",  # 映射标记的视频流
+                    "-map", "[v]",  # 映射视频流
+                ])
+            elif gpu_support["apple"] and not transparency_required:
+                # 对于macOS，使用标准裁剪滤镜，但使用VideoToolbox编码器
+                logger.info("使用macOS VideoToolbox硬件加速")
+                crop_expr = (
+                    f"crop=w={self.width}:h={self.height}:"
+                    f"x=0:y={crop_y_expr}"
+                )
+                
+                # 尝试使用VideoToolbox编码器
+                if "libx264" in ' '.join(codec_params):
+                    logger.info("切换到VideoToolbox硬件编码器(h264_videotoolbox)")
+                    for i, param in enumerate(codec_params):
+                        if param == "libx264":
+                            codec_params[i] = "h264_videotoolbox"
+                            break
+                
+                # 添加标准滤镜
+                ffmpeg_cmd.extend([
+                    "-filter_complex", crop_expr,
+                ])
+            elif gpu_support["intel"] and not transparency_required:
+                # 使用Intel QSV加速
+                logger.info("使用Intel QSV硬件加速")
+                crop_expr = (
+                    f"crop=w={self.width}:h={self.height}:"
+                    f"x=0:y={crop_y_expr}"
+                )
+                
+                # 尝试使用QSV编码器
+                if "libx264" in ' '.join(codec_params):
+                    logger.info("切换到Intel QSV硬件编码器(h264_qsv)")
+                    for i, param in enumerate(codec_params):
+                        if param == "libx264":
+                            codec_params[i] = "h264_qsv"
+                            break
+                
+                # 添加标准滤镜
+                ffmpeg_cmd.extend([
+                    "-filter_complex", crop_expr,
                 ])
             else:
                 # 标准CPU滤镜
+                logger.info("未检测到支持的GPU或使用透明视频，将使用CPU处理")
                 crop_expr = (
                     f"crop=w={self.width}:h={self.height}:"
                     f"x=0:y={crop_y_expr}"
@@ -1547,17 +1621,17 @@ class VideoRenderer:
             if transparency_required:
                 # 透明视频使用ProRes编码器
                 codec_params.extend([
-                    "-threads", "2",  # 为编码器设置线程数
+                    "-threads", "4",  # 为编码器设置线程数
                     "-bufsize", "100M",  # 缓冲区大小
                 ])
             else:
                 # 非透明视频使用H.264编码器
                 codec_params.extend([
-                    "-threads", "2",  # 为编码器设置线程数
+                    "-threads", "4",  # 为编码器设置线程数
                     "-bufsize", "50M",  # 缓冲区大小
                     "-maxrate", "8M",  # 最大比特率
                 ])
-            
+                
             # 添加视频编码参数
             ffmpeg_cmd.extend(codec_params)
             
@@ -1567,13 +1641,26 @@ class VideoRenderer:
             # 添加音频映射（如果有）
             if audio_path and os.path.exists(audio_path):
                 # 对于GPU滤镜需要特殊处理音频映射
-                if has_nvidia_gpu and not transparency_required:
-                    ffmpeg_cmd.extend([
-                        "-c:a", "aac",
-                        "-b:a", "192k",
-                        "-map", "1:a:0",  # 从第2个输入（索引1）获取音频
-                    ])
+                if has_gpu_support and not transparency_required:
+                    # GPU加速情况下的音频处理
+                    if gpu_support["nvidia"]:
+                        # NVIDIA CUDA滤镜需要特殊映射
+                        ffmpeg_cmd.extend([
+                            "-c:a", "aac",
+                            "-b:a", "192k",
+                            "-map", "1:a:0",  # 从第2个输入（索引1）获取音频
+                        ])
+                    else:
+                        # 其他GPU加速
+                        ffmpeg_cmd.extend([
+                            "-c:a", "aac",
+                            "-b:a", "192k",
+                            "-map", "0:v:0",  # 从第1个输入（索引0）获取视频
+                            "-map", "1:a:0",  # 从第2个输入（索引1）获取音频
+                            "-shortest",
+                        ])
                 else:
+                    # CPU处理的音频映射
                     ffmpeg_cmd.extend([
                         "-c:a", "aac",
                         "-b:a", "192k",
@@ -1584,11 +1671,9 @@ class VideoRenderer:
             
             # 添加输出路径
             ffmpeg_cmd.append(output_path)
-            
-            # 记录FFmpeg命令
-            cmd_str = " ".join(ffmpeg_cmd)
-            logger.info(f"FFmpeg命令: {cmd_str}")
-            
+
+            logger.info(f"FFmpeg命令: {' '.join(ffmpeg_cmd)}")
+
             # 5. 执行FFmpeg命令
             try:
                 # 启动进程

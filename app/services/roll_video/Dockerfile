@@ -92,6 +92,12 @@ RUN wget -q https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz \
     --enable-nvenc \
     --enable-libnpp \
     --enable-pthreads \
+    --enable-filter=hwupload_cuda \
+    --enable-filter=crop_cuda \
+    --enable-filter=scale \
+    --enable-filter=drawtext \
+    --enable-filter=lut3d \
+    --enable-filter=overlay \
     --extra-cflags="-I/usr/local/cuda/include -I/usr/local/include" \
     --extra-ldflags="-L/usr/local/cuda/lib64 -L/usr/local/lib" \
     --extra-libs="-lpthread -lm -lcuda -lcudart" \
@@ -100,6 +106,7 @@ RUN wget -q https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz \
     && cd .. \
     && rm -rf ffmpeg* \
     && ldconfig
+
 
 ###############################################################
 # 最终阶段: 组装最终镜像
