@@ -722,6 +722,11 @@ class VideoRenderer:
         logger.info(f"滚动距离:{scroll_distance}, 滚动帧:{scroll_frames}, 总帧:{total_frames}, 时长:{duration:.2f}s")
         logger.info(f"输出:{output_path}, 透明:{transparency_required}, 首选编码器:{preferred_codec}")
         
+        # 确保输出目录存在
+        output_dir = os.path.dirname(os.path.abspath(output_path))
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+            
         # 3. 检测可用的编码器并获取正确参数
         # 首先检查ffmpeg是否可用
         try:
@@ -743,6 +748,12 @@ class VideoRenderer:
         except:
             logger.warning("无法检测GPU编码器")
             gpu_encoders = []
+            
+        # 背景色处理
+        if not transparency_required and bg_color and len(bg_color) >= 3:
+            bg_color_rgb = bg_color[:3]
+        else:
+            bg_color_rgb = (0, 0, 0)
             
         # 确定最终使用的编码器和参数
         use_gpu = False
