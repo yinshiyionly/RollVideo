@@ -291,15 +291,15 @@ class PerformanceMonitor:
             fps_pattern = re.compile(r"fps=\s*(\d+\.?\d*)")
             speed_pattern = re.compile(r"speed=\s*([\d.]+)x")
             
-            # 创建TQDM进度条
+            # 创建TQDM进度条（精简格式）
             pbar = tqdm(
                 total=100, 
                 desc="FFmpeg处理进度", 
-                bar_format='{l_bar}{bar}| {n:3.1f}% [{elapsed}<{remaining}, {rate_fmt}{postfix}]',
+                bar_format='{l_bar}{bar}| {n:3.1f}% [{elapsed}<{remaining}{postfix}]',
                 unit="%",
-                ncols=100
+                ncols=80
             )
-            pbar.set_postfix(fps="0", 帧="0/0", 速度="0.0x", 剩余="未知")
+            pbar.set_postfix(帧="0/0", 剩余="未知")
             
             last_progress = 0
             last_frame = 0
@@ -353,11 +353,9 @@ class PerformanceMonitor:
                             else:
                                 eta_str = "未知"
                             
-                            # 更新进度条后缀信息
+                            # 更新进度条后缀信息（精简格式）
                             pbar.set_postfix(
-                                fps=f"{fps:.1f}", 
                                 帧=f"{current_frame}/{total_frames}", 
-                                速度=f"{speed:.1f}x", 
                                 剩余=eta_str
                             )
                             
