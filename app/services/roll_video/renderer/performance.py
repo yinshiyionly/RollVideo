@@ -375,9 +375,6 @@ class PerformanceMonitor:
                 pbar.update(100 - last_progress)  # 确保进度达到100%
                 pbar.close()
                 
-                # 输出完成信息
-                elapsed = time.time() - encoding_start_time
-                logger.info(f"FFmpeg处理完成，总用时: {elapsed:.2f}秒")
                 
             except Exception as e:
                 logger.error(f"监控FFmpeg进度时出错: {str(e)}")

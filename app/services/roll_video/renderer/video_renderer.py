@@ -1463,8 +1463,7 @@ class VideoRenderer:
             # 创建裁剪表达式
             crop_y_expr = f"'if(between(t,{scroll_start_time},{scroll_end_time}),min({img_height-self.height},(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}),if(lt(t,{scroll_start_time}),0,{scroll_distance}))'"
             
-            # 始终使用CPU的crop滤镜
-            logger.info("使用CPU的crop滤镜")
+            # 始终使用CPU的crop滤镜,GPU没有crop滤镜
             crop_expr = (
                 f"crop=w={self.width}:h={self.height}:"
                 f"x=0:y={crop_y_expr}"
@@ -1491,7 +1490,7 @@ class VideoRenderer:
             ffmpeg_cmd.extend([
                 "-t", str(total_duration),  # 设置总时长
                 "-vsync", "1",  # 添加vsync参数，确保平滑的视频同步
-                "-thread_queue_size", "512",  # 限制线程队列大小，减少内存使用
+                "-thread_queue_size", "2048",  # 限制线程队列大小，减少内存使用
             ])
             
             # 添加视频编码参数
