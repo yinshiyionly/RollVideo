@@ -114,17 +114,20 @@ def _process_frame_optimized(args):
     # 零边界检查 - 极端情况直接返回背景
     if visible_height <= 0 or _g_img_array is None:
         if is_transparent:
-            return frame_idx, np.zeros((self_height, self_width, 4), dtype=np.uint8)
+            # 预分配连续内存
+            frame = np.zeros((self_height, self_width, 4), dtype=np.uint8, order='C')
         else:
-            return frame_idx, np.ones((self_height, self_width, 3), dtype=np.uint8) * np.array(bg_color, dtype=np.uint8)
+            # 使用背景色
+            frame = np.ones((self_height, self_width, 3), dtype=np.uint8, order='C') * np.array(bg_color, dtype=np.uint8)
+        return frame_idx, frame
     
-    # 预分配帧缓冲区 - 提高效率
+    # 预分配帧缓冲区 - 提高效率，确保内存连续
     if is_transparent:
         # 创建空的透明帧
-        frame = np.zeros((self_height, self_width, 4), dtype=np.uint8)
+        frame = np.zeros((self_height, self_width, 4), dtype=np.uint8, order='C')
     else:
         # 用背景色填充帧
-        frame = np.ones((self_height, self_width, 3), dtype=np.uint8) * np.array(bg_color, dtype=np.uint8)
+        frame = np.ones((self_height, self_width, 3), dtype=np.uint8, order='C') * np.array(bg_color, dtype=np.uint8)
     
     # 计算切片 - 超高效版
     source_height = min(visible_height, self_height)
@@ -136,9 +139,7 @@ def _process_frame_optimized(args):
         frame[:source_height, :source_width] = _g_img_array[img_start_y:img_start_y+source_height, :source_width]
     
     # 确保返回内存连续的帧数据 - 此步骤对于管道通信至关重要
-    if not frame.flags.c_contiguous:
-        frame = np.ascontiguousarray(frame)
-        
+    # 由于我们已经在创建时指定order='C'，这里可以省略额外的检查
     return frame_idx, frame
 
 # 尝试添加JIT编译支持（如果可用）
@@ -240,49 +241,63 @@ try:
 except ImportError:
     logger.info("Numba未安装，使用标准优化")
 
-def fast_frame_processor(frame_batch, memory_pool, process):
-    """高速批量帧处理写入器，极大减少多进程通信开销"""
+def fast_frame_processor(batch_frames, memory_pool, ffmpeg_process):
+    """
+    高性能帧处理器，直接将帧写入FFmpeg进程
+    
+    Args:
+        batch_frames: 批处理帧参数列表
+        memory_pool: 内存池
+        ffmpeg_process: FFmpeg进程
+        
+    Returns:
+        处理的帧数
+    """
     global _g_img_array
     
+    if _g_img_array is None:
+        return 0
+        
     frames_processed = 0
     
-    # 处理整个批次
-    for params in frame_batch:
-        frame_idx, img_start_y, img_height, img_width, height, width, is_transparent, bg_color = params
+    for args in batch_frames:
+        frame_idx, img_start_y, img_height, img_width, self_height, self_width, is_transparent, bg_color = args
         
-        # 优化的帧边界计算
-        img_end_y = min(img_height, img_start_y + height)
+        # 快速路径计算
+        img_end_y = min(img_height, img_start_y + self_height)
         visible_height = img_end_y - img_start_y
         
-        # 从内存池获取预分配的帧
-        pool_id, frame = memory_pool.get_frame()
-        
-        # 极速内联处理核心
-        if visible_height <= 0 or _g_img_array is None:
-            # 边界情况 - 直接使用背景
+        # 从内存池获取帧缓冲区
+        if memory_pool is not None and len(memory_pool) > 0:
+            frame = memory_pool.pop()
             if is_transparent:
-                frame.fill(0)  # 全透明
+                frame.fill(0)  # 透明帧填充0
             else:
-                frame[:] = np.array(bg_color, dtype=np.uint8)  # 背景色
+                # RGB帧填充背景色
+                frame[:, :, 0].fill(bg_color[0])
+                frame[:, :, 1].fill(bg_color[1])
+                frame[:, :, 2].fill(bg_color[2])
         else:
-            # 有效内容 - 执行复制
+            # 内存池为空，创建新帧
             if is_transparent:
-                frame.fill(0)  # 先清空
+                frame = np.zeros((self_height, self_width, 4), dtype=np.uint8)
             else:
-                frame[:] = np.array(bg_color, dtype=np.uint8)  # 先填充背景
-                
-            # 单次高效复制
-            source_height = min(visible_height, height)
-            source_width = min(img_width, width)
+                frame = np.ones((self_height, self_width, 3), dtype=np.uint8) * np.array(bg_color, dtype=np.uint8)
+        
+        # 计算切片并复制数据
+        source_height = min(visible_height, self_height)
+        source_width = min(img_width, self_width)
+        
+        if source_height > 0 and source_width > 0:
             frame[:source_height, :source_width] = _g_img_array[img_start_y:img_start_y+source_height, :source_width]
         
-        # 直接写入管道 - 零中间缓冲
-        process.stdin.write(frame.tobytes())
+        # 直接写入FFmpeg进程
+        ffmpeg_process.stdin.write(frame.tobytes())
         
-        # 释放帧回内存池
-        memory_pool.release_frame(pool_id)
+        # 将帧缓冲区放回内存池
+        if memory_pool is not None:
+            memory_pool.append(frame)
+            
         frames_processed += 1
-    
-    # 强制刷新确保所有数据写入
-    process.stdin.flush()
-    return frames_processed 
+        
+    return frames_processed

@@ -46,17 +46,28 @@ class VideoRenderer:
         self.frame_counter = 0
         self.total_frames = 0
     
-    def _init_memory_pool(self, channels, pool_size=240):
-        """初始化或重置内存池"""
-        if self.memory_pool is not None:
-            self.memory_pool.clear()
-        else:
-            self.memory_pool = FrameMemoryPool(
-                width=self.width,
-                height=self.height,
-                channels=channels,
-                pool_size=pool_size
-            )
+    def _init_memory_pool(self, channels=3, pool_size=120):
+        """
+        初始化内存池，预分配帧缓冲区
+        
+        Args:
+            channels: 通道数，3表示RGB，4表示RGBA
+            pool_size: 内存池大小
+        """
+        logger.info(f"初始化内存池: {pool_size}个{self.width}x{self.height}x{channels}帧缓冲区")
+        self.memory_pool = []
+        
+        try:
+            for _ in range(pool_size):
+                # 预分配连续内存
+                frame = np.zeros((self.height, self.width, channels), dtype=np.uint8, order='C')
+                self.memory_pool.append(frame)
+        except Exception as e:
+            logger.warning(f"内存池初始化失败: {e}，将使用动态分配")
+            # 如果内存不足，减小池大小重试
+            if pool_size > 30:
+                logger.info(f"尝试减小内存池大小至30")
+                self._init_memory_pool(channels, 30)
         return self.memory_pool
     
     def _get_ffmpeg_command(
@@ -205,7 +216,7 @@ class VideoRenderer:
             
             # 检查GPU编码器可用性
             if preferred_codec in gpu_encoders and not "NO_GPU" in os.environ:
-                # 使用最简单的GPU参数以确保兼容性
+                # 使用更简单的GPU参数以确保兼容性
                 video_codec_params = [
                     "-c:v", preferred_codec,
                     "-preset", "p4",         # 保持p4预设
@@ -252,7 +263,7 @@ class VideoRenderer:
         
         # 添加音频映射（如果有）
         if audio_path and os.path.exists(audio_path):
-            ffmpeg_cmd.extend(["-c:a", "aac", "-map", "0:v:0", "-map", "1:a:0", "-shortest"])
+            ffmpeg_cmd.extend(["-c:a", "aac", "-b:a", "192k", "-map", "0:v:0", "-map", "1:a:0", "-shortest"])
         else:
             ffmpeg_cmd.extend(["-map", "0:v:0"])
             
@@ -486,44 +497,328 @@ class VideoRenderer:
     
     def create_scrolling_video(
         self,
-        image: Image.Image,
-        output_path: str,
-        text_actual_height: int,
-        transparency_required: bool,
-        preferred_codec: str, # 仍然接收 h264_nvenc 作为首选
-        audio_path: Optional[str] = None,
-        bg_color: Optional[Tuple[int, int, int, int]] = None
-    ) -> str:
-        """创建滚动视频，使用高性能版本"""
-        # 使用优化版本实现
-        success = self.create_scrolling_video_optimized(
-            image=image,
-            output_path=output_path,
-            text_actual_height=text_actual_height,
-            transparency_required=transparency_required,
-            preferred_codec=preferred_codec,
-            audio_path=audio_path,
-            bg_color=bg_color
+        image,
+        output_path,
+        text_actual_height=None,
+        transparency_required=False,
+        preferred_codec="h264_nvenc",
+        audio_path=None,
+        bg_color=(0, 0, 0, 255),
+    ):
+        """
+        创建滚动视频
+
+        Args:
+            image: PIL图像对象
+            output_path: 输出视频路径
+            text_actual_height: 文本实际高度（不含额外填充）
+            transparency_required: 是否需要透明背景
+            preferred_codec: 首选视频编码器，默认尝试GPU加速
+            audio_path: 可选的音频文件路径
+            bg_color: 背景颜色，用于非透明视频
+
+        Returns:
+            输出视频的路径
+        """
+        # 确保输出目录存在
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+        # 获取图像尺寸
+        img_width, img_height = image.size
+        logger.info(f"图像尺寸: {img_width}x{img_height}")
+
+        # 如果未提供文本实际高度，则使用图像高度
+        if text_actual_height is None:
+            text_actual_height = img_height
+            logger.info("未提供文本实际高度，使用图像高度")
+
+        # 计算总帧数
+        # 1. 开始静止时间（秒）
+        start_static_time = 3
+        # 2. 结束静止时间（秒）
+        end_static_time = 3
+        # 3. 滚动所需帧数 = (图像高度 - 视频高度) / 每帧滚动像素数
+        scroll_frames = max(0, (img_height - self.height)) / self.scroll_speed
+        # 4. 总帧数 = 开始静止帧数 + 滚动帧数 + 结束静止帧数
+        total_frames = int(
+            (start_static_time * self.fps)
+            + scroll_frames
+            + (end_static_time * self.fps)
         )
+
+        logger.info(
+            f"视频参数: {self.width}x{self.height}, {self.fps}fps, 滚动速度: {self.scroll_speed}像素/帧"
+        )
+        logger.info(
+            f"总帧数: {total_frames} (开始静止: {start_static_time}秒, 滚动: {scroll_frames/self.fps:.2f}秒, 结束静止: {end_static_time}秒)"
+        )
+
+        # 确定像素格式和编码器
+        if transparency_required:
+            # 透明视频使用ProRes 4444
+            ffmpeg_pix_fmt = "rgba"
+            output_path = os.path.splitext(output_path)[0] + ".mov"
+            video_codec_params = [
+                "-c:v", "prores_ks", 
+                "-profile:v", "4",          # ProRes 4444
+                "-pix_fmt", "yuva444p10le", 
+                "-alpha_bits", "16", 
+                "-vendor", "ap10",
+                "-threads", "8"             # 充分利用多核CPU
+            ]
+            logger.info("使用ProRes 4444编码器处理透明视频")
+        else:
+            # 不透明视频，尝试使用GPU加速
+            ffmpeg_pix_fmt = "rgb24"
+            output_path = os.path.splitext(output_path)[0] + ".mp4"
+            
+            # 检查GPU编码器可用性
+            gpu_encoders = ["h264_nvenc", "hevc_nvenc"]
+            if preferred_codec in gpu_encoders and not "NO_GPU" in os.environ:
+                # 使用更高性能的GPU参数
+                video_codec_params = [
+                    "-c:v", preferred_codec,
+                    "-preset", "p4",         # 提升到p4预设（更高性能）
+                    "-b:v", "8M",            # 提升到8M比特率
+                    "-pix_fmt", "yuv420p",   # 确保兼容性
+                    "-movflags", "+faststart",
+                    "-gpu", "0"              # 明确指定GPU设备
+                ]
+                logger.info(f"使用GPU编码器: {preferred_codec}，预设:p4，比特率:8M")
+                use_gpu = True
+            else:
+                # 回退到CPU编码，但使用更高性能设置
+                video_codec_params = [
+                    "-c:v", "libx264",
+                    "-crf", "23",            # 略微降低质量以提高速度
+                    "-preset", "medium",     # 保持medium预设
+                    "-pix_fmt", "yuv420p",   
+                    "-movflags", "+faststart",
+                    "-threads", "8"          # 充分利用8核CPU
+                ]
+                logger.info(f"使用CPU编码器: libx264 (GPU编码器不可用或被禁用)")
+                use_gpu = False
+
+        # 预分配大型数组，减少内存碎片
+        try:
+            # 预热内存，减少动态分配开销
+            if not transparency_required:
+                # 为RGB预分配
+                batch_size = 240 if not use_gpu else 120  # 增大批处理大小
+                warmup_buffer = np.zeros((batch_size, self.height, self.width, 3), dtype=np.uint8)
+                del warmup_buffer
+            else:
+                # 为RGBA预分配
+                batch_size = 120  # 透明视频使用较小的批处理大小
+                warmup_buffer = np.zeros((batch_size, self.height, self.width, 4), dtype=np.uint8)
+                del warmup_buffer
+            
+            # 强制垃圾回收
+            gc.collect()
+            logger.info("内存预热完成")
+        except Exception as e:
+            logger.warning(f"内存预热失败: {e}")
+            batch_size = 60  # 回退到较小的批处理大小
+
+        # 数据传输模式：直接模式或缓存模式
+        # 根据GPU/CPU模式调整批处理大小
+        if not 'batch_size' in locals():
+            batch_size = 240 if not use_gpu else 120  # 增大批处理大小
+        num_batches = (total_frames + batch_size - 1) // batch_size
         
-        # 检查是否成功，如果失败则尝试回退到CPU编码
-        if not success and not transparency_required:
-            # 设置环境变量强制使用CPU编码
-            logger.info("优化渲染失败，回退到标准CPU渲染")
-            os.environ["NO_GPU"] = "1"
+        # 确定最佳进程数
+        try:
+            cpu_count = mp.cpu_count()
+            # 充分利用您的8核CPU，为系统和ffmpeg保留1个核心
+            optimal_processes = min(8, max(1, cpu_count - 1))
+            num_processes = optimal_processes
+            logger.info(f"检测到{cpu_count}个CPU核心，优化使用{num_processes}个进程进行渲染，批处理大小:{batch_size}")
+        except:
+            num_processes = 6  # 默认使用6个进程
+            logger.info(f"使用默认{num_processes}个进程，批处理大小:{batch_size}")
+
+        # 初始化内存池 - 增大池大小以减少内存分配开销
+        channels = 4 if transparency_required else 3
+        self._init_memory_pool(channels, pool_size=480)  # 增大内存池大小
+
+        # 将图像转换为numpy数组
+        img_array = np.array(image)
+
+        # 完整的ffmpeg命令
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            # I/O优化参数
+            "-probesize", "32M",       # 增加探测缓冲区大小
+            "-analyzeduration", "32M", # 增加分析时间
+            "-thread_queue_size", "4096", # 大幅增加线程队列大小
+            # 输入格式参数
+            "-f", "rawvideo",
+            "-vcodec", "rawvideo",
+            "-s", f"{self.width}x{self.height}",
+            "-pix_fmt", ffmpeg_pix_fmt, 
+            "-r", str(self.fps),
+            "-i", "-",  # 从stdin读取
+        ]
+        
+        # 添加音频输入（如果有）
+        if audio_path and os.path.exists(audio_path):
+            ffmpeg_cmd.extend(["-i", audio_path])
+            
+        # 添加视频编码参数
+        ffmpeg_cmd.extend(video_codec_params)
+        
+        # 添加音频映射（如果有）
+        if audio_path and os.path.exists(audio_path):
+            ffmpeg_cmd.extend(["-c:a", "aac", "-b:a", "192k", "-map", "0:v:0", "-map", "1:a:0", "-shortest"])
+        else:
+            ffmpeg_cmd.extend(["-map", "0:v:0"])
+            
+        # 添加输出路径
+        ffmpeg_cmd.append(output_path)
+
+        logger.info(f"FFmpeg命令: {' '.join(ffmpeg_cmd)}")
+
+        # 启动FFmpeg进程
+        process = subprocess.Popen(
+            ffmpeg_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=10 ** 8,  # 增大缓冲区
+        )
+
+        # 创建进度条
+        pbar = tqdm(total=total_frames, desc="渲染进度")
+
+        # 创建多进程池
+        with mp.Pool(processes=num_processes) as pool:
+            # 设置全局图像数组
+            global _g_img_array
+            _g_img_array = img_array
+
+            # 帧计数器
+            self.frame_counter = 0
+            start_time = time.time()
+
             try:
-                return self.create_scrolling_video_optimized(
-                    image=image,
-                    output_path=output_path,
-                    text_actual_height=text_actual_height,
-                    transparency_required=transparency_required,
-                    preferred_codec="libx264",  # 强制使用CPU编码器
-                    audio_path=audio_path,
-                    bg_color=bg_color
+                # 处理每个批次
+                for batch_idx in range(num_batches):
+                    batch_start = batch_idx * batch_size
+                    batch_end = min(batch_start + batch_size, total_frames)
+                    batch_frames = []
+
+                    # 准备批次帧参数
+                    for frame_idx in range(batch_start, batch_end):
+                        # 计算当前帧对应的图像Y坐标
+                        if frame_idx < start_static_time * self.fps:
+                            # 开始静止阶段
+                            img_start_y = 0
+                        elif frame_idx >= total_frames - end_static_time * self.fps:
+                            # 结束静止阶段
+                            img_start_y = max(0, img_height - self.height)
+                        else:
+                            # 滚动阶段
+                            scroll_frame_idx = frame_idx - start_static_time * self.fps
+                            img_start_y = min(
+                                img_height - self.height,
+                                int(scroll_frame_idx * self.scroll_speed),
+                            )
+
+                        # 添加到批次
+                        batch_frames.append(
+                            (
+                                frame_idx,
+                                img_start_y,
+                                img_height,
+                                img_width,
+                                self.height,
+                                self.width,
+                                transparency_required,
+                                bg_color[:3],  # 只传递RGB部分
+                            )
+                        )
+
+                    # 处理当前批次
+                    if len(batch_frames) > 60 and num_processes > 1:
+                        # 大批处理：并行处理所有帧
+                        pool_results = pool.map(_process_frame_optimized, batch_frames)
+                        processed_frames = sorted(pool_results, key=lambda x: x[0])
+                    else:
+                        # 小批处理：使用fast_frame_processor直接处理
+                        try:
+                            frames_processed = fast_frame_processor(batch_frames, self.memory_pool, process)
+                            self.frame_counter += frames_processed
+                            pbar.update(frames_processed)
+                            continue  # 跳过后续处理，因为帧已经直接写入
+                        except Exception as e:
+                            logger.error(f"快速帧处理器失败: {e}，回退到标准处理")
+                            # 回退到标准处理
+                            processed_frames = []
+                            for params in batch_frames:
+                                frame_idx, frame = _process_frame_optimized(params)
+                                processed_frames.append((frame_idx, frame))
+
+                    # 将处理后的帧写入FFmpeg
+                    for _, frame in processed_frames:
+                        process.stdin.write(frame.tobytes())
+                        self.frame_counter += 1
+                        pbar.update(1)
+
+                # 关闭stdin，等待FFmpeg完成
+                process.stdin.close()
+                process.wait()
+
+                # 检查FFmpeg是否成功
+                if process.returncode != 0:
+                    stderr = process.stderr.read().decode("utf-8", errors="ignore")
+                    logger.error(f"FFmpeg错误: {stderr}")
+                    raise Exception(f"FFmpeg处理失败，返回码: {process.returncode}")
+
+                # 计算性能统计
+                end_time = time.time()
+                total_time = end_time - start_time
+                fps = self.frame_counter / total_time if total_time > 0 else 0
+                logger.info(
+                    f"总渲染性能: 渲染了{self.frame_counter}帧，耗时{total_time:.2f}秒，平均{fps:.2f}帧/秒"
                 )
+
+                return output_path
+
+            except Exception as e:
+                logger.error(f"视频渲染失败: {str(e)}", exc_info=True)
+                # 尝试终止FFmpeg进程
+                try:
+                    process.terminate()
+                except:
+                    pass
+                raise e
+
             finally:
-                # 恢复环境变量
-                if "NO_GPU" in os.environ:
-                    del os.environ["NO_GPU"]
+                # 清理
+                pbar.close()
+                _g_img_array = None
+                gc.collect()  # 强制垃圾回收
+
+            return output_path
+
+            # 检查是否成功，如果失败则尝试回退到CPU编码
+            if not success and not transparency_required:
+                # 设置环境变量强制使用CPU编码
+                logger.info("优化渲染失败，回退到标准CPU渲染")
+                os.environ["NO_GPU"] = "1"
+                try:
+                    return self.create_scrolling_video_optimized(
+                        image=image,
+                        output_path=output_path,
+                        text_actual_height=text_actual_height,
+                        transparency_required=transparency_required,
+                        preferred_codec="libx264",  # 强制使用CPU编码器
+                        audio_path=audio_path,
+                        bg_color=bg_color
+                    )
+                finally:
+                    # 恢复环境变量
+                    if "NO_GPU" in os.environ:
+                        del os.environ["NO_GPU"]
         
         return output_path
