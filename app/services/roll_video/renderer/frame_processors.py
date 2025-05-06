@@ -199,7 +199,7 @@ def _process_frame_optimized_shm(args):
 
 
 # 将进程池要使用的函数指向这个新的 SHM 版本
-_process_frame_to_use = _process_frame_optimized_shm
+# _process_frame_to_use = _process_frame_optimized_shm
 
 # 可以移除旧的 _process_frame 和 _process_frame_optimized 函数，或者保留但不再使用。
 # 重要的是确保进程池调用的是 _process_frame_optimized_shm

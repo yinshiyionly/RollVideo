@@ -20,7 +20,7 @@ from .memory_management import FrameMemoryPool  # 可选，如果后面要集成
 from .performance import PerformanceMonitor
 from .frame_processors import (
     init_worker,  # 导入 worker 初始化函数
-    _process_frame_to_use,  # 导入要使用的帧处理函数 (指向 SHM 版本)
+    _process_frame_optimized_shm,  # 导入要使用的帧处理函数 (指向 SHM 版本)
 )
 
 # from .frame_processors import fast_frame_processor # 这个在这个优化路径下不使用
