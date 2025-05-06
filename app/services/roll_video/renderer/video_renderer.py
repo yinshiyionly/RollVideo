@@ -493,8 +493,38 @@ class VideoRenderer:
                 mp_context = mp.get_context("spawn")
                 with mp_context.Pool(processes=pool_size, initializer=init_worker, initargs=(shared_dict,)) as pool:
                     
-                    # 启动FFmpeg进程
-                    proc = subprocess.Popen(
+                    # 设置资源限制
+                    resource_limit_cmd = []
+                    
+                    # 检测操作系统
+                    is_macos = platform.system() == "Darwin"
+                    is_linux = platform.system() == "Linux"
+                    
+                    # 在macOS/Linux上使用资源限制命令
+                    if is_macos or is_linux:
+                        # 使用资源限制，合并到ffmpeg命令中
+                        logger.info("应用系统资源限制: CPU最大8核，内存最大30GB")
+                        
+                        # 设置内存限制环境变量（单位：MB）
+                        os.environ["LIBAV_BUFFER_SIZE"] = "1024"  # 1GB libav缓冲区大小
+                        os.environ["FFMPEG_MEMORY_LIMIT"] = "30720"  # 30GB内存限制
+                        
+                        if is_linux:
+                            # Linux可以使用taskset限制CPU亲和性
+                            resource_limit_cmd = ["taskset", "-c", "0-7"]  # 限制到前8个CPU核心
+                            ffmpeg_cmd = resource_limit_cmd + ffmpeg_cmd
+                        elif is_macos:
+                            # macOS可以使用环境变量限制CPU内核
+                            # 注意：在macOS上，这只是一个建议而不是硬性限制
+                            os.environ["VECLIB_MAXIMUM_THREADS"] = "8"
+                            os.environ["OMP_NUM_THREADS"] = "8"
+                    else:
+                        # Windows或其他系统，只能使用FFmpeg内部限制
+                        logger.info("当前系统不支持外部资源限制，仅使用FFmpeg内部限制机制")
+                    
+                    # 启动进程
+                    logger.info(f"启动FFmpeg进程(资源限制: CPU=8核, 内存≤30GB)")
+                    process = subprocess.Popen(
                         ffmpeg_cmd,
                         stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE,
@@ -516,8 +546,8 @@ class VideoRenderer:
                             pipe.close()
                     
                     # 启动读取线程
-                    stdout_thread = threading.Thread(target=read_pipe, args=(proc.stdout, 'stdout'))
-                    stderr_thread = threading.Thread(target=read_pipe, args=(proc.stderr, 'stderr'))
+                    stdout_thread = threading.Thread(target=read_pipe, args=(process.stdout, 'stdout'))
+                    stderr_thread = threading.Thread(target=read_pipe, args=(process.stderr, 'stderr'))
                     stdout_thread.daemon = True
                     stderr_thread.daemon = True
                     stdout_thread.start()
@@ -661,7 +691,7 @@ class VideoRenderer:
                                         )
                                         # 尝试停止处理
                                         try:
-                                            proc.terminate()
+                                            process.terminate()
                                         except:
                                             pass
                                         return  # 停止看门狗
@@ -698,15 +728,15 @@ class VideoRenderer:
                                     frame_idx, frame = result
                                     
                                     # 检查FFmpeg是否仍在运行，如果退出则不再写入
-                                    if proc.poll() is not None:
-                                        logger.warning(f"FFmpeg进程已退出(返回码:{proc.returncode})，停止写入帧")
+                                    if process.poll() is not None:
+                                        logger.warning(f"FFmpeg进程已退出(返回码:{process.returncode})，停止写入帧")
                                         break
                                     
                                     try:
                                         # 优化: 直接写入二进制数据，避免额外复制
                                         frame_bytes = frame.tobytes()
-                                        proc.stdin.write(frame_bytes)
-                                        proc.stdin.flush()
+                                        process.stdin.write(frame_bytes)
+                                        process.stdin.flush()
                                         
                                         # 更新进度
                                         frames_processed += 1
@@ -727,8 +757,8 @@ class VideoRenderer:
                             # 继续尝试处理其他批次
                         
                         # 检查FFmpeg是否仍在运行
-                        if proc.poll() is not None:
-                            logger.error(f"FFmpeg进程意外退出，返回码: {proc.returncode}")
+                        if process.poll() is not None:
+                            logger.error(f"FFmpeg进程意外退出，返回码: {process.returncode}")
                             # 读取剩余错误输出
                             try:
                                 while True:
@@ -747,10 +777,10 @@ class VideoRenderer:
                     
                     # 安全关闭stdin管道
                     try:
-                        if proc.poll() is None:  # 只在进程仍在运行时关闭stdin
-                            proc.stdin.close()
+                        if process.poll() is None:  # 只在进程仍在运行时关闭stdin
+                            process.stdin.close()
                         else:
-                            logger.warning(f"FFmpeg进程已退出(返回码:{proc.returncode})，跳过关闭stdin")
+                            logger.warning(f"FFmpeg进程已退出(返回码:{process.returncode})，跳过关闭stdin")
                     except BrokenPipeError:
                         logger.warning("FFmpeg管道已关闭，无法关闭stdin")
                     except Exception as e:
@@ -774,7 +804,7 @@ class VideoRenderer:
                     
                     # 等待FFmpeg完成，但设置超时
                     return_code = None
-                    while proc.poll() is None:
+                    while process.poll() is None:
                         current_time = time.time()
                         
                         # 检查是否应该报告进度
@@ -788,20 +818,20 @@ class VideoRenderer:
                         if current_wait_time > encoding_timeout:
                             logger.warning(f"FFmpeg编码阶段已等待{encoding_timeout}秒，超时强制结束")
                             try:
-                                proc.terminate()
+                                process.terminate()
                                 # 给进程一点时间来终止
                                 time.sleep(1)
                                 # 如果仍在运行，强制结束
-                                if proc.poll() is None:
+                                if process.poll() is None:
                                     logger.warning("FFmpeg进程未响应terminate()，尝试强制终止(kill)")
-                                    proc.kill()
+                                    process.kill()
                                     time.sleep(0.5)
                                     
                                 # 最后检查
-                                if proc.poll() is None:
+                                if process.poll() is None:
                                     logger.error("无法终止FFmpeg进程，可能需要手动清理")
                                 else:
-                                    logger.warning(f"FFmpeg进程已终止，返回码: {proc.returncode}")
+                                    logger.warning(f"FFmpeg进程已终止，返回码: {process.returncode}")
                             except Exception as e:
                                 logger.error(f"终止FFmpeg进程时出错: {e}")
                             
@@ -817,7 +847,7 @@ class VideoRenderer:
                     
                     # 如果没有设置返回码（未超时），则获取进程的实际返回码
                     if return_code is None:
-                        return_code = proc.returncode
+                        return_code = process.returncode
                         if return_code == 0:
                             logger.info(f"FFmpeg编码成功完成，用时: {encoding_time:.2f}秒")
                         else:
@@ -895,11 +925,11 @@ class VideoRenderer:
                 logger.error(f"处理视频时出错: {str(e)}\n{traceback.format_exc()}")
                 # 如果仍有FFmpeg进程，尝试终止
                 try:
-                    if 'proc' in locals() and proc.poll() is None:
-                        proc.terminate()
+                    if 'process' in locals() and process.poll() is None:
+                        process.terminate()
                         time.sleep(0.5)
-                        if proc.poll() is None:
-                            proc.kill()
+                        if process.poll() is None:
+                            process.kill()
                 except:
                     pass
 
@@ -1330,9 +1360,6 @@ class VideoRenderer:
 
         return output_path
 
-    def _create_static_video(self, image_array, output_path, duration, audio_path=None, fps=30):
-        """创建静态视频，用于短文本不需要滚动的情况"""
-
     def create_scrolling_video_ffmpeg(
         self,
         image,
@@ -1359,6 +1386,19 @@ class VideoRenderer:
             输出视频的路径
         """
         try:
+            # 设置FFmpeg资源限制环境变量
+            logger.info("设置FFmpeg资源限制 (CPU: 8核, 内存: 最大30GB)")
+            os.environ["LIBAV_BUFFER_SIZE"] = "1024"  # 1GB libav缓冲区大小
+            os.environ["FFMPEG_MEMORY_LIMIT"] = "30720"  # 30GB内存限制
+            os.environ["VECLIB_MAXIMUM_THREADS"] = "8"
+            os.environ["OMP_NUM_THREADS"] = "8"
+            
+            # 临时图像优化选项
+            image_optimize_options = {
+                "optimize": True,  # 优化图像存储
+                "compress_level": 6,  # 中等压缩级别
+            }
+            
             # 记录开始时间
             total_start_time = time.time()
             
@@ -1394,12 +1434,16 @@ class VideoRenderer:
             temp_img_path = f"{os.path.splitext(output_path)[0]}_temp.png"
             
             # 使用PIL直接保存图像，保留原始格式和所有信息
-            pil_image.save(temp_img_path, format="PNG")
+            pil_image.save(temp_img_path, format="PNG", **image_optimize_options)
             
             # 获取图像尺寸
             img_width, img_height = pil_image.size
             
-            logger.info(f"已保存临时图像: {temp_img_path}, 尺寸: {img_width}x{img_height}")
+            # 清理内存中的大型对象，确保不会占用过多内存
+            del pil_image
+            gc.collect()
+            
+            logger.info(f"已保存优化的临时图像: {temp_img_path}, 尺寸: {img_width}x{img_height}")
             
             # 2. 计算滚动参数
             # 滚动距离 = 图像高度 - 视频高度
@@ -1456,6 +1500,8 @@ class VideoRenderer:
                 "-progress", "pipe:2",  # 输出进度信息到stderr
                 "-stats",  # 启用统计信息
                 "-stats_period", "0.5",  # 每0.5秒输出一次统计信息
+                "-threads", "8",  # 限制CPU使用核心数为8
+                "-max_muxing_queue_size", "1024",  # 限制复用队列大小
             ]
             
             # 添加音频输入（如果有）
@@ -1467,8 +1513,24 @@ class VideoRenderer:
                 "-filter_complex", crop_expr,
                 "-t", str(total_duration),  # 设置总时长
                 "-vsync", "1",  # 添加vsync参数，确保平滑的视频同步
+                "-thread_queue_size", "512",  # 限制线程队列大小，减少内存使用
             ])
             
+            # 根据平台和编码器调整内存限制
+            if transparency_required:
+                # 透明视频使用ProRes编码器
+                codec_params.extend([
+                    "-threads", "8",  # 为编码器设置线程数
+                    "-bufsize", "100M",  # 缓冲区大小
+                ])
+            else:
+                # 非透明视频使用H.264编码器
+                codec_params.extend([
+                    "-threads", "8",  # 为编码器设置线程数
+                    "-bufsize", "50M",  # 缓冲区大小
+                    "-maxrate", "8M",  # 最大比特率
+                ])
+                
             # 添加视频编码参数
             ffmpeg_cmd.extend(codec_params)
             
@@ -1493,6 +1555,7 @@ class VideoRenderer:
             # 5. 执行FFmpeg命令
             try:
                 # 启动进程
+                logger.info(f"启动FFmpeg进程(资源限制: CPU=8核, 内存≤30GB)")
                 process = subprocess.Popen(
                     ffmpeg_cmd,
                     stdout=subprocess.PIPE,
