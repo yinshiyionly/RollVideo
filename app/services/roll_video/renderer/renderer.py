@@ -11,15 +11,14 @@ from .text_renderer import TextRenderer
 from .video_renderer import VideoRenderer
 from .performance import PerformanceMonitor
 from .memory_management import FrameMemoryPool
-from .frame_processors import _process_frame, _process_frame_optimized
+from .frame_processors import _process_frame_optimized
 from .utils import limit_resources
 
 __all__ = [
-    'TextRenderer',
-    'VideoRenderer',
-    'PerformanceMonitor',
-    'FrameMemoryPool',
-    '_process_frame',
-    '_process_frame_optimized', 
-    'limit_resources'
-] 
+    "TextRenderer",
+    "VideoRenderer",
+    "PerformanceMonitor",
+    "FrameMemoryPool",
+    "_process_frame_optimized",
+    "limit_resources",
+]
