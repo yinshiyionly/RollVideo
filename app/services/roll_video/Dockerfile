@@ -6,8 +6,7 @@ FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS ffmpeg-builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 # 修改镜像源并安装FFmpeg编译所需的最小依赖
-RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' /etc/apt/sources.list && \
-    apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential wget pkg-config yasm nasm \
     libx264-dev libx265-dev libvpx-dev libfdk-aac-dev \
     libva-dev libvdpau-dev git ca-certificates \
@@ -71,27 +70,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends wget && \
     rm -rf /var/lib/apt/lists/*
 
 ###############################################################
-# 第三阶段: Python依赖 (CPU版本)
-###############################################################
-FROM python:3.10-slim AS python-deps
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-# 安装Python依赖
-RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple \
-    ffmpeg-python==0.2.0 \
-    opencv-python-headless==4.11.0.86 \
-    numpy==1.26.4 \
-    flask==3.1.0 \
-    gunicorn==23.0.0 \
-    pillow==10.4.0 \
-    tqdm==4.67.1 \
-    moviepy==2.1.2 \
-    psutil==7.0.0 \
-    && find /usr/local/lib/python3.*/site-packages/ -name "*.pyc" -delete \
-    && find /usr/local/lib/python3.*/site-packages/ -name "__pycache__" -delete
-
-###############################################################
 # 最终阶段: 组装最终镜像
 ###############################################################
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
@@ -109,8 +87,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 WORKDIR /app
 
 # 安装运行时必要的包，尽量精简
-RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' /etc/apt/sources.list && \
-    apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     python3-pip \
     python3-setuptools \
@@ -131,11 +108,9 @@ COPY --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/
 COPY --from=ffmpeg-builder /usr/local/bin/ffprobe /usr/local/bin/
 COPY --from=ffmpeg-builder /usr/local/lib/lib*so* /usr/local/lib/
 
-# 从Python依赖阶段复制文件
-COPY --from=python-deps /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/dist-packages
 
 # 安装NVIDIA ML Python包和TensorFlow
-RUN pip3 install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple -r dockerfile-requirements.txt \
+RUN pip3 install --no-cache-dir -r dockerfile-requirements.txt \
     && find /usr/local/lib/python3.*/dist-packages/ -name "*.pyc" -delete \
     && find /usr/local/lib/python3.*/dist-packages/ -name "__pycache__" -delete
 
