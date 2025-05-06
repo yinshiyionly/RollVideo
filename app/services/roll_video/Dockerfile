@@ -86,15 +86,25 @@ RUN wget -q https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz \
     --enable-libfdk-aac \
     --enable-libx264 \
     --enable-libx265 \
+    --enable-cuda-nvcc \
     --enable-cuda \
     --enable-cuda-llvm \
     --enable-cuvid \
     --enable-nvenc \
     --enable-libnpp \
     --enable-pthreads \
+    --enable-libfreetype \
+    --enable-libharfbuzz \
+    --enable-libfontconfig \
     --enable-filter=hwupload_cuda \
-    --enable-filter=crop_cuda \
+    --enable-filter=scale_cuda \
+    --enable-filter=scale_npp \
+    --enable-filter=thumbnail_cuda \
+    --enable-filter=overlay_cuda \
+    --enable-filter=yadif_cuda \
+    --enable-filter=bwdif_cuda \
     --enable-filter=scale \
+    --enable-filter=crop \
     --enable-filter=drawtext \
     --enable-filter=lut3d \
     --enable-filter=overlay \

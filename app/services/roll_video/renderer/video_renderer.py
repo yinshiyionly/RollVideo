@@ -493,27 +493,10 @@ class VideoRenderer:
                 mp_context = mp.get_context("spawn")
                 with mp_context.Pool(processes=pool_size, initializer=init_worker, initargs=(shared_dict,)) as pool:
                     
-                    # 设置资源限制
-                    resource_limit_cmd = []
-                    
-                    # 检测操作系统
-                    is_macos = platform.system() == "Darwin"
-                    is_linux = platform.system() == "Linux"
-                    
-                    # 在macOS/Linux上使用资源限制命令
-                    if is_macos or is_linux:
-                        # 使用资源限制，合并到ffmpeg命令中
-                        logger.info("设置FFmpeg资源限制 (CPU: 4核, 内存: 最大30GB)")
-                        os.environ["LIBAV_BUFFER_SIZE"] = "1024"  # 1GB libav缓冲区大小
-                        os.environ["FFMPEG_MEMORY_LIMIT"] = "30720"  # 30GB内存限制
-                        os.environ["VECLIB_MAXIMUM_THREADS"] = "4"
-                        os.environ["OMP_NUM_THREADS"] = "4"
-                    else:
-                        # Windows或其他系统，只能使用FFmpeg内部限制
-                        logger.info("当前系统不支持外部资源限制，仅使用FFmpeg内部限制机制")
+                    # 移除资源限制设置
                     
                     # 启动进程
-                    logger.info(f"启动FFmpeg进程(资源限制: CPU=8核, 内存≤30GB)")
+                    logger.info(f"启动FFmpeg进程...")
                     process = subprocess.Popen(
                         ffmpeg_cmd,
                         stdin=subprocess.PIPE,
@@ -1376,19 +1359,7 @@ class VideoRenderer:
             输出视频的路径
         """
         try:
-            # 设置FFmpeg资源限制环境变量
-            logger.info("设置FFmpeg资源限制 (CPU: 4核, 内存: 最大30GB)")
-            os.environ["LIBAV_BUFFER_SIZE"] = "1024"  # 1GB libav缓冲区大小
-            os.environ["FFMPEG_MEMORY_LIMIT"] = "30720"  # 30GB内存限制
-            os.environ["VECLIB_MAXIMUM_THREADS"] = "4"
-            os.environ["OMP_NUM_THREADS"] = "4"
-            
-            # 临时图像优化选项
-            image_optimize_options = {
-                "optimize": True,  # 优化图像存储
-                "compress_level": 6,  # 中等压缩级别
-            }
-            
+            # 移除资源限制设置
             # 记录开始时间
             total_start_time = time.time()
             
@@ -1422,6 +1393,12 @@ class VideoRenderer:
             
             # 设置临时图像文件路径
             temp_img_path = f"{os.path.splitext(output_path)[0]}_temp.png"
+            
+            # 临时图像优化选项
+            image_optimize_options = {
+                "optimize": True,  # 优化图像存储
+                "compress_level": 6,  # 中等压缩级别
+            }
             
             # 使用PIL直接保存图像，保留原始格式和所有信息
             pil_image.save(temp_img_path, format="PNG", **image_optimize_options)
@@ -1525,7 +1502,6 @@ class VideoRenderer:
                 "-progress", "pipe:2",  # 输出进度信息到stderr
                 "-stats",  # 启用统计信息
                 "-stats_period", "1",  # 每1秒输出一次统计信息
-                "-threads", "4",  # 限制CPU使用核心数为4
                 "-max_muxing_queue_size", "1024",  # 限制复用队列大小
             ]
             
@@ -1608,21 +1584,6 @@ class VideoRenderer:
                 "-thread_queue_size", "512",  # 限制线程队列大小，减少内存使用
             ])
             
-            # 根据平台和编码器调整内存限制
-            if transparency_required:
-                # 透明视频使用ProRes编码器
-                codec_params.extend([
-                    "-threads", "4",  # 为编码器设置线程数
-                    "-bufsize", "100M",  # 缓冲区大小
-                ])
-            else:
-                # 非透明视频使用H.264编码器
-                codec_params.extend([
-                    "-threads", "4",  # 为编码器设置线程数
-                    "-bufsize", "50M",  # 缓冲区大小
-                    "-maxrate", "8M",  # 最大比特率
-                ])
-                
             # 添加视频编码参数
             ffmpeg_cmd.extend(codec_params)
             
@@ -1668,7 +1629,7 @@ class VideoRenderer:
             # 5. 执行FFmpeg命令
             try:
                 # 启动进程
-                logger.info(f"启动FFmpeg进程(资源限制: CPU=8核, 内存≤30GB)")
+                logger.info("启动FFmpeg进程...")
                 process = subprocess.Popen(
                     ffmpeg_cmd,
                     stdout=subprocess.PIPE,
