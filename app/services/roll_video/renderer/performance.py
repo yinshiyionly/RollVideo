@@ -291,13 +291,13 @@ class PerformanceMonitor:
             fps_pattern = re.compile(r"fps=\s*(\d+\.?\d*)")
             speed_pattern = re.compile(r"speed=\s*([\d.]+)x")
             
-            # 创建TQDM进度条（精简格式）
+            # 创建TQDM进度条（精简格式，自动适应屏幕宽度）
             pbar = tqdm(
                 total=100, 
                 desc="FFmpeg处理进度", 
                 bar_format='{l_bar}{bar}| {n:3.1f}% [{elapsed}<{remaining}{postfix}]',
                 unit="%",
-                ncols=80
+                ncols=None
             )
             pbar.set_postfix(帧="0/0", 剩余="未知")
             
