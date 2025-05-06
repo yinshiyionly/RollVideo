@@ -5,14 +5,93 @@ FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS ffmpeg-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 修改镜像源并安装FFmpeg编译所需的最小依赖
+# 安装系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential wget pkg-config yasm nasm \
-    libx264-dev libx265-dev libvpx-dev libfdk-aac-dev \
-    libva-dev libvdpau-dev git ca-certificates \
-    zlib1g-dev libass-dev libmp3lame-dev libopus-dev \
-    && apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    build-essential \
+    python3-dev \
+    python3-pip \
+    wget \
+    cmake \
+    git \
+    vim \
+    clang \
+    llvm \
+    clang-tools \
+    libtool \
+    autoconf \
+    automake \
+    pkg-config \
+    yasm \
+    nasm \
+    zlib1g-dev \
+    libx264-dev \
+    libx265-dev \
+    libvpx-dev \
+    libfdk-aac-dev \
+    libsdl2-dev \
+    libass-dev \
+    libva-dev \
+    libvdpau-dev \
+    libxcb1-dev \
+    libxcb-shm0-dev \
+    libxcb-xfixes0-dev \
+    nvidia-driver-525-server \
+    libreadline-dev \
+    libbz2-dev \
+    libsm6 \
+    libxrender1 \
+    libxext-dev \
+    libgomp1 \
+    liblzma-dev \
+    libgl1-mesa-glx \
+    libprotobuf-dev \
+    protobuf-compiler \
+    libglib2.0-0 \
+    mpich \
+    openmpi-bin \
+    libopenmpi-dev \
+    gcc \
+    g++ \
+    make \
+    zlib1g \
+    openssl \
+    libsqlite3-dev \
+    libssl-dev \
+    libffi-dev \
+    unzip \
+    pciutils \
+    net-tools \
+    libblas-dev \
+    gfortran \
+    libblas3 \
+    libopenblas-dev \
+    git-lfs \
+    libswresample-dev \
+    libfreetype6-dev \
+    libtheora-dev \
+    libvorbis-dev \
+    texinfo \
+    libmp3lame-dev \
+    libopus-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装cuDNN
+RUN cd /tmp && \
+    wget https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz && \
+    tar -xf cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz && \
+    cp -r cudnn-linux-x86_64-8.9.4.25_cuda12-archive/lib/* /usr/local/cuda/lib64/ && \
+    cp -r cudnn-linux-x86_64-8.9.4.25_cuda12-archive/include/* /usr/local/cuda/include/ && \
+    rm -rf /tmp/cudnn* && \
+    ldconfig
+
+# 下载并安装nv-codec-headers 注意显卡驱动版本
+RUN git clone https://github.com/FFmpeg/nv-codec-headers.git && \
+    cd nv-codec-headers && \
+    git checkout sdk/12.0 && \
+    make -j$(nproc) && \
+    make install
+
 
 # 安装nv-codec-headers
 RUN git clone https://github.com/FFmpeg/nv-codec-headers.git && \
@@ -22,10 +101,20 @@ RUN git clone https://github.com/FFmpeg/nv-codec-headers.git && \
     make install && \
     cd .. && rm -rf nv-codec-headers
 
-# 编译FFmpeg
-RUN mkdir -p /tmp/ffmpeg_sources && \
-    cd /tmp/ffmpeg_sources && \
-    wget -O ffmpeg-7.1.tar.gz https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz && \
+# 安装 CUDA 开发工具
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cuda-nvcc-12-4 \
+    cuda-nvrtc-12-4 \
+    cuda-nvrtc-dev-12-4 \
+    cuda-nvml-dev-12-4 \
+    cuda-command-line-tools-12-4 \
+    cuda-libraries-dev-12-4 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# 下载并编译支持NVIDIA硬件加速的FFmpeg
+RUN cd /tmp && \
+    wget https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz && \
     tar xvf ffmpeg-7.1.tar.gz && \
     cd ffmpeg-7.1 && \
     PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/cuda/lib64/pkgconfig" \
@@ -51,23 +140,9 @@ RUN mkdir -p /tmp/ffmpeg_sources && \
     --extra-libs="-lpthread -lm -lcuda -lcudart" && \
     make -j$(nproc) && \
     make install && \
+    cd /tmp && \
+    rm -rf ffmpeg* && \
     ldconfig
-
-###############################################################
-# 第二阶段: 安装cuDNN
-###############################################################
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS cudnn-builder
-
-RUN mkdir -p /cudnn-install
-WORKDIR /cudnn-install
-
-# 下载和安装cuDNN
-RUN apt-get update && apt-get install -y --no-install-recommends wget && \
-    wget --no-check-certificate https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz && \
-    mkdir -p /cudnn-extract && \
-    tar -xf cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz -C /cudnn-extract && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
 
 ###############################################################
 # 最终阶段: 组装最终镜像
@@ -99,11 +174,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# 从cuDNN构建阶段复制文件
-COPY --from=cudnn-builder /cudnn-extract/cudnn-linux-x86_64-8.9.4.25_cuda12-archive/lib/* /usr/local/cuda/lib64/
-COPY --from=cudnn-builder /cudnn-extract/cudnn-linux-x86_64-8.9.4.25_cuda12-archive/include/* /usr/local/cuda/include/
-
 # 从FFmpeg构建阶段复制文件
+COPY --from=ffmpeg-builder /cudnn-extract/cudnn-linux-x86_64-8.9.4.25_cuda12-archive/lib/* /usr/local/cuda/lib64/
+COPY --from=ffmpeg-builder /cudnn-extract/cudnn-linux-x86_64-8.9.4.25_cuda12-archive/include/* /usr/local/cuda/include/
+
 COPY --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/
 COPY --from=ffmpeg-builder /usr/local/bin/ffprobe /usr/local/bin/
 COPY --from=ffmpeg-builder /usr/local/lib/lib*so* /usr/local/lib/
