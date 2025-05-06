@@ -1,7 +1,7 @@
 ###############################################################
 # 第一阶段: 编译支持NVIDIA GPU的FFmpeg
 ###############################################################
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS ffmpeg-builder
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS ffmpeg-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
