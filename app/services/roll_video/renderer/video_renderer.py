@@ -1329,3 +1329,255 @@ class VideoRenderer:
 
     def _create_static_video(self, image_array, output_path, duration, audio_path=None, fps=30):
         """创建静态视频，用于短文本不需要滚动的情况"""
+
+    def create_scrolling_video_ffmpeg(
+        self,
+        image,
+        output_path,
+        text_actual_height,
+        transparency_required=False,
+        preferred_codec="libx264",
+        audio_path=None,
+        bg_color=(255, 255, 255),
+    ):
+        """
+        使用FFmpeg的crop滤镜和时间表达式创建滚动视频
+        
+        参数:
+            image: 要滚动的图像 (PIL.Image或NumPy数组)
+            output_path: 输出视频文件路径
+            text_actual_height: 文本实际高度
+            transparency_required: 是否需要透明通道
+            preferred_codec: 首选视频编码器
+            audio_path: 可选的音频文件路径
+            bg_color: 背景颜色 (R,G,B) 或 (R,G,B,A)
+        
+        Returns:
+            输出视频的路径
+        """
+        try:
+            # 记录开始时间
+            total_start_time = time.time()
+            
+            # 初始化性能统计
+            self.performance_stats = {
+                "preparation_time": 0,
+                "encoding_time": 0,
+                "total_time": 0,
+                "frames_processed": 0,
+                "fps": 0
+            }
+            
+            # 1. 准备图像
+            preparation_start_time = time.time()
+            
+            # 将图像转换为numpy数组
+            if isinstance(image, np.ndarray):
+                img_array = image.copy()
+            else:  # PIL.Image
+                img_array = np.array(image)
+            
+            # 处理透明度
+            if img_array.shape[2] == 4:  # RGBA
+                if not transparency_required:
+                    # 将RGBA转换为RGB（用背景色填充）
+                    rgb_array = np.zeros((img_array.shape[0], img_array.shape[1], 3), dtype=np.uint8)
+                    alpha = img_array[:, :, 3].astype(float) / 255.0
+                    
+                    # 安全处理背景色，确保是RGB格式
+                    if isinstance(bg_color, (list, tuple)):
+                        if len(bg_color) >= 3:
+                            bg_r, bg_g, bg_b = bg_color[0], bg_color[1], bg_color[2]
+                        else:
+                            bg_r, bg_g, bg_b = 255, 255, 255  # 默认白色
+                    else:
+                        bg_r, bg_g, bg_b = 255, 255, 255  # 默认白色
+                    
+                    # 将RGB通道从RGBA转换出来，使用背景色填充
+                    rgb_array[:, :, 0] = (img_array[:, :, 0] * alpha + bg_r * (1 - alpha)).astype(np.uint8)
+                    rgb_array[:, :, 1] = (img_array[:, :, 1] * alpha + bg_g * (1 - alpha)).astype(np.uint8)
+                    rgb_array[:, :, 2] = (img_array[:, :, 2] * alpha + bg_b * (1 - alpha)).astype(np.uint8)
+                    
+                    img_array = rgb_array
+            
+            # 获取图像尺寸
+            img_height, img_width = img_array.shape[:2]
+            channels = img_array.shape[2] if len(img_array.shape) > 2 else 1
+            
+            # 确保输出目录存在
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            
+            # 设置临时图像文件路径
+            temp_img_path = f"{os.path.splitext(output_path)[0]}_temp.png"
+            
+            # 保存图像到临时文件
+            import cv2
+            if transparency_required and channels == 4:
+                cv2.imwrite(temp_img_path, cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGRA))
+            else:
+                cv2.imwrite(temp_img_path, cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR))
+            
+            logger.info(f"已保存临时图像: {temp_img_path}, 尺寸: {img_width}x{img_height}")
+            
+            # 2. 计算滚动参数
+            # 滚动距离 = 图像高度 - 视频高度
+            scroll_distance = max(0, img_height - self.height)
+            
+            # 确保至少有8秒的滚动时间
+            min_scroll_duration = 8.0  # 秒
+            scroll_duration = max(min_scroll_duration, scroll_distance / (self.scroll_speed * self.fps))
+            
+            # 前后各添加2秒静止时间
+            start_static_time = 2.0  # 秒
+            end_static_time = 2.0  # 秒
+            total_duration = start_static_time + scroll_duration + end_static_time
+            
+            # 总帧数
+            total_frames = int(total_duration * self.fps)
+            self.total_frames = total_frames
+            
+            # 滚动起始和结束时间点
+            scroll_start_time = start_static_time
+            scroll_end_time = start_static_time + scroll_duration
+            
+            logger.info(f"视频参数: 宽度={self.width}, 高度={self.height}, 帧率={self.fps}")
+            logger.info(f"滚动参数: 距离={scroll_distance}px, 速度={self.scroll_speed}px/帧, 持续={scroll_duration:.2f}秒")
+            logger.info(f"时间设置: 总时长={total_duration:.2f}秒, 静止开始={start_static_time}秒, 静止结束={end_static_time}秒")
+            
+            # 3. 设置编码器参数
+            codec_params, pix_fmt = self._get_codec_parameters(
+                preferred_codec, transparency_required, channels
+            )
+            
+            # 准备阶段结束
+            preparation_end_time = time.time()
+            self.performance_stats["preparation_time"] = preparation_end_time - preparation_start_time
+            
+            # 4. 创建FFmpeg命令，使用crop滤镜和表达式
+            encoding_start_time = time.time()
+            
+            # 创建FFmpeg滤镜表达式
+            # 使用crop滤镜和表达式实现滚动效果
+            crop_expr = (
+                f"crop=w={self.width}:h={self.height}:"
+                f"x=0:y='if(between(t,{scroll_start_time},{scroll_end_time}),"
+                f"min({img_height-self.height},(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}),"
+                f"if(lt(t,{scroll_start_time}),0,{scroll_distance}))'"
+            )
+            
+            # 构建基本FFmpeg命令
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-y",
+                "-loop", "1",  # 循环输入图像
+                "-i", temp_img_path,  # 输入图像
+            ]
+            
+            # 添加音频输入（如果有）
+            if audio_path and os.path.exists(audio_path):
+                ffmpeg_cmd.extend(["-i", audio_path])
+            
+            # 添加滤镜和编码参数
+            ffmpeg_cmd.extend([
+                "-filter_complex", crop_expr,
+                "-t", str(total_duration),  # 设置总时长
+            ])
+            
+            # 添加视频编码参数
+            ffmpeg_cmd.extend(codec_params)
+            
+            # 设置帧率
+            ffmpeg_cmd.extend(["-r", str(self.fps)])
+            
+            # 添加音频映射（如果有）
+            if audio_path and os.path.exists(audio_path):
+                ffmpeg_cmd.extend([
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-shortest",
+                ])
+            
+            # 添加输出路径
+            ffmpeg_cmd.append(output_path)
+            
+            # 记录FFmpeg命令
+            cmd_str = " ".join(ffmpeg_cmd)
+            logger.info(f"FFmpeg命令: {cmd_str}")
+            
+            # 5. 执行FFmpeg命令
+            try:
+                # 启动进程
+                process = subprocess.Popen(
+                    ffmpeg_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                
+                # 创建进度监控线程
+                def monitor_progress():
+                    while process.poll() is None:
+                        try:
+                            # 估算进度
+                            elapsed = time.time() - encoding_start_time
+                            estimated_progress = min(1.0, elapsed / (total_duration * 1.2))  # 1.2是一个估计因子
+                            logger.info(f"FFmpeg处理进度: {estimated_progress:.1%}, 已用时: {elapsed:.1f}秒")
+                            time.sleep(2.0)  # 每2秒更新一次
+                        except:
+                            break
+                
+                # 启动监控线程
+                monitor_thread = threading.Thread(target=monitor_progress)
+                monitor_thread.daemon = True
+                monitor_thread.start()
+                
+                # 获取输出和错误
+                stdout, stderr = process.communicate()
+                
+                # 检查进程返回码
+                if process.returncode != 0:
+                    logger.error(f"FFmpeg处理失败: {stderr}")
+                    raise Exception(f"FFmpeg处理失败，返回码: {process.returncode}")
+                
+                logger.info("FFmpeg处理完成")
+                
+            except Exception as e:
+                logger.error(f"执行FFmpeg命令时出错: {str(e)}")
+                raise
+            finally:
+                # 清理临时文件
+                try:
+                    if os.path.exists(temp_img_path):
+                        os.remove(temp_img_path)
+                        logger.info(f"已删除临时图像文件: {temp_img_path}")
+                except Exception as e:
+                    logger.warning(f"清理临时文件失败: {str(e)}")
+            
+            # 编码结束
+            encoding_end_time = time.time()
+            self.performance_stats["encoding_time"] = encoding_end_time - encoding_start_time
+            
+            # 计算总时间
+            self.performance_stats["total_time"] = encoding_end_time - total_start_time
+            
+            # 估算处理的帧数和帧率
+            self.performance_stats["frames_processed"] = total_frames
+            if self.performance_stats["encoding_time"] > 0:
+                self.performance_stats["fps"] = total_frames / self.performance_stats["encoding_time"]
+            
+            # 输出性能统计
+            logger.info("\n" + "="*50)
+            logger.info("滚动视频生成性能统计 (FFmpeg滤镜方式):")
+            logger.info(f"1. 准备阶段: {self.performance_stats['preparation_time']:.2f}秒 ({self.performance_stats['preparation_time']/self.performance_stats['total_time']*100:.1f}%)")
+            logger.info(f"2. FFmpeg编码: {self.performance_stats['encoding_time']:.2f}秒 ({self.performance_stats['encoding_time']/self.performance_stats['total_time']*100:.1f}%)")
+            logger.info(f"总时间: {self.performance_stats['total_time']:.2f}秒, 估算帧率: {self.performance_stats['fps']:.1f}帧/秒")
+            logger.info("="*50 + "\n")
+            
+            return output_path
+            
+        except Exception as e:
+            logger.error(f"使用FFmpeg滤镜创建滚动视频时出错: {str(e)}")
+            logger.error(traceback.format_exc())
+            # 记录总时间（即使发生错误）
+            self.performance_stats["total_time"] = time.time() - total_start_time
+            raise
