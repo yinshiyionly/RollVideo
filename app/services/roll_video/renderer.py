@@ -12,9 +12,359 @@ import shutil
 import tqdm
 import threading
 import queue
+import gc  # 添加垃圾回收模块
+import time
+import multiprocessing as mp
 from concurrent.futures import ThreadPoolExecutor
+import ctypes  # 用于共享内存优化
+import io
+
+# 添加性能监控
+from collections import deque
+import statistics
+
+try:
+    import mmap
+    HAS_MMAP = True
+except ImportError:
+    HAS_MMAP = False
+
+try:
+    import resource
+    HAS_RESOURCE_MODULE = True
+except ImportError:
+    HAS_RESOURCE_MODULE = False
 
 logger = logging.getLogger(__name__)
+
+# 设置NumPy以使用多线程加速计算
+try:
+    # 针对性能优化的环境变量
+    if 'OMP_NUM_THREADS' not in os.environ:
+        os.environ['OMP_NUM_THREADS'] = '8'  # 使用全部8核心
+    if 'MKL_NUM_THREADS' not in os.environ:
+        os.environ['MKL_NUM_THREADS'] = '8'  # 使用全部8核心
+    if 'NUMEXPR_NUM_THREADS' not in os.environ:
+        os.environ['NUMEXPR_NUM_THREADS'] = '8'  # 使用全部8核心
+    if 'OPENBLAS_NUM_THREADS' not in os.environ:
+        os.environ['OPENBLAS_NUM_THREADS'] = '8'  # 使用全部8核心
+    
+    # 高级线程优化 - 如果系统支持则启用
+    try:
+        os.environ['OMP_WAIT_POLICY'] = 'ACTIVE'  # 主动等待，减少线程唤醒延迟
+        os.environ['OMP_PROC_BIND'] = 'spread'    # 优化线程绑定
+        os.environ['OMP_SCHEDULE'] = 'dynamic,16' # 动态调度，减少线程不平衡
+        
+        # 尝试开启NumPy高级优化
+        np.seterr(all='ignore')                   # 忽略NumPy警告提高性能
+        np.set_printoptions(precision=3, suppress=True)
+    except:
+        pass
+        
+    logger.info(f"已设置NumPy高性能模式: OMP={os.environ.get('OMP_NUM_THREADS')}, MKL={os.environ.get('MKL_NUM_THREADS')}")
+except Exception as e:
+    logger.warning(f"设置NumPy线程优化失败: {e}")
+
+def limit_resources():
+    """尝试限制进程资源使用"""
+    if HAS_RESOURCE_MODULE:
+        try:
+            # 设置内存限制 (30GB)
+            soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+            memory_limit = 30 * 1024 * 1024 * 1024  # 30GB in bytes
+            resource.setrlimit(resource.RLIMIT_AS, (memory_limit, hard))
+            
+            # 设置CPU时间限制 (限制单CPU使用)
+            cpu_time_limit = 24 * 60 * 60  # 24小时（非常宽松的限制）
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu_time_limit, hard))
+            
+            logger.info(f"已设置资源限制: 内存={memory_limit/(1024*1024*1024):.1f}GB, CPU时间={cpu_time_limit/3600:.1f}小时")
+        except Exception as e:
+            logger.warning(f"设置资源限制失败: {e}")
+    else:
+        logger.info("由于缺少resource模块，资源限制将通过其他方式实现")
+
+# 在导入时尝试设置资源限制
+try:
+    limit_resources()
+except Exception as e:
+    logger.warning(f"尝试限制资源时发生错误: {e}")
+
+# 在多线程/多进程中共享的全局变量
+_g_img_array = None  # 全局共享的图像数组
+
+# 性能监控器
+class PerformanceMonitor:
+    """监控和分析渲染性能"""
+    
+    def __init__(self, window_size=30):
+        self.frame_times = deque(maxlen=window_size)
+        self.batch_times = deque(maxlen=window_size)
+        self.last_time = None
+        self.start_time = None
+        self.processed_frames = 0
+        self.current_fps = 0
+    
+    def start(self):
+        """开始监控"""
+        self.start_time = time.time()
+        self.last_time = self.start_time
+    
+    def record_frame(self):
+        """记录单帧处理时间"""
+        now = time.time()
+        if self.last_time:
+            self.frame_times.append(now - self.last_time)
+        self.last_time = now
+        self.processed_frames += 1
+        
+        # 更新当前FPS（每10帧计算一次）
+        if self.processed_frames % 10 == 0 and self.frame_times:
+            avg_time = statistics.mean(self.frame_times)
+            self.current_fps = 1.0 / avg_time if avg_time > 0 else 0
+    
+    def record_batch(self, batch_size):
+        """记录批处理时间"""
+        now = time.time()
+        if self.last_time:
+            elapsed = now - self.last_time
+            self.batch_times.append((elapsed, batch_size))
+        self.last_time = now
+        self.processed_frames += batch_size
+        
+        # 更新当前FPS
+        if self.batch_times:
+            # 计算最近几个批次的平均FPS
+            total_time = sum(t for t, _ in self.batch_times)
+            total_frames = sum(s for _, s in self.batch_times)
+            if total_time > 0:
+                self.current_fps = total_frames / total_time
+    
+    def get_stats(self):
+        """获取性能统计信息"""
+        now = time.time()
+        total_time = now - self.start_time if self.start_time else 0
+        avg_fps = self.processed_frames / total_time if total_time > 0 else 0
+        
+        if self.frame_times:
+            min_time = min(self.frame_times)
+            max_time = max(self.frame_times)
+            avg_time = statistics.mean(self.frame_times)
+            peak_fps = 1.0 / min_time if min_time > 0 else 0
+        else:
+            min_time = max_time = avg_time = peak_fps = 0
+        
+        return {
+            'total_frames': self.processed_frames,
+            'total_time': total_time,
+            'avg_fps': avg_fps,
+            'current_fps': self.current_fps,
+            'min_frame_time': min_time,
+            'max_frame_time': max_time,
+            'avg_frame_time': avg_time,
+            'peak_fps': peak_fps
+        }
+    
+    def log_stats(self, logger):
+        """记录性能统计到日志"""
+        stats = self.get_stats()
+        logger.info(f"渲染性能: {stats['total_frames']}帧, "
+                   f"{stats['total_time']:.2f}秒, "
+                   f"平均{stats['avg_fps']:.2f}帧/秒, "
+                   f"当前{stats['current_fps']:.2f}帧/秒, "
+                   f"峰值{stats['peak_fps']:.2f}帧/秒")
+
+def _process_frame(args):
+    """多进程帧处理函数，高性能优化版本"""
+    global _g_img_array
+    
+    frame_idx, img_start_y, img_height, img_width, self_height, self_width, frame_positions, is_transparent, bg_color = args
+    
+    # 快速路径 - 检查边界条件
+    img_end_y = min(img_height, img_start_y + self_height)
+    frame_start_y = 0
+    frame_end_y = img_end_y - img_start_y
+    
+    # 空帧情况或边界检查失败时直接返回
+    if img_start_y >= img_end_y or frame_start_y >= frame_end_y or frame_end_y > self_height or _g_img_array is None:
+        # 创建空帧
+        if is_transparent:
+            frame = np.zeros((self_height, self_width, 4), dtype=np.uint8)
+        else:
+            # 使用背景色
+            frame = np.ones((self_height, self_width, 3), dtype=np.uint8) * np.array(bg_color, dtype=np.uint8)
+        return frame_idx, frame
+    
+    # 预分配整个帧缓冲区 - 减少内存分配开销
+    if is_transparent:
+        frame = np.zeros((self_height, self_width, 4), dtype=np.uint8)
+    else:
+        # 使用背景色
+        frame = np.ones((self_height, self_width, 3), dtype=np.uint8) * np.array(bg_color, dtype=np.uint8)
+    
+    # 计算切片 - 使用NumPy高效的切片操作
+    img_h_slice = slice(img_start_y, img_end_y)
+    img_w_slice = slice(0, min(self_width, img_width))
+    frame_h_slice = slice(frame_start_y, frame_end_y)
+    frame_w_slice = slice(0, min(self_width, img_width))
+    
+    try:
+        # 获取源数据和目标区域 - 仅引用，不复制
+        source_section = _g_img_array[img_h_slice, img_w_slice]
+        target_area = frame[frame_h_slice, frame_w_slice]
+        
+        # 数据局部性优化 - 确保数据连续布局，加速内存访问
+        source_section = np.ascontiguousarray(source_section)
+        
+        if is_transparent:
+            # 透明背景 - 直接整块复制，避免逐像素操作
+            if target_area.shape[:2] == source_section.shape[:2]:
+                # 使用内存层面的快速复制
+                np.copyto(target_area, source_section)
+            else:
+                # 处理大小不匹配的情况
+                copy_height = min(target_area.shape[0], source_section.shape[0])
+                copy_width = min(target_area.shape[1], source_section.shape[1])
+                if copy_height > 0 and copy_width > 0:
+                    # 使用预先计算的切片提高性能
+                    src_view = source_section[:copy_height, :copy_width]
+                    dst_view = target_area[:copy_height, :copy_width]
+                    np.copyto(dst_view, src_view)
+        else:
+            # 不透明背景 - 使用向量化的alpha混合
+            if target_area.shape[:2] == source_section.shape[:2]:
+                # 向量化操作，一次计算所有像素
+                alpha = source_section[:, :, 3:4].astype(np.float32) / 255.0
+                alpha_inv = 1.0 - alpha
+                # 预分配输出数组，减少临时内存分配
+                blended = np.empty_like(target_area)
+                # 内联计算提高性能
+                np.multiply(source_section[:, :, :3], alpha, out=blended)
+                np.add(blended, target_area * alpha_inv, out=blended, casting='unsafe')
+                np.copyto(target_area, blended.astype(np.uint8))
+            else:
+                # 处理大小不匹配的情况
+                copy_height = min(target_area.shape[0], source_section.shape[0])
+                copy_width = min(target_area.shape[1], source_section.shape[1])
+                if copy_height > 0 and copy_width > 0:
+                    src_crop = source_section[:copy_height, :copy_width]
+                    dst_crop = target_area[:copy_height, :copy_width]
+                    # 使用连续数组提高性能
+                    src_crop = np.ascontiguousarray(src_crop)
+                    dst_crop = np.ascontiguousarray(dst_crop)
+                    alpha = src_crop[:, :, 3:4].astype(np.float32) / 255.0
+                    alpha_inv = 1.0 - alpha
+                    # 预分配输出数组，减少临时内存分配
+                    blended = np.empty_like(dst_crop)
+                    # 内联计算提高性能
+                    np.multiply(src_crop[:, :, :3], alpha, out=blended)
+                    np.add(blended, dst_crop * alpha_inv, out=blended, casting='unsafe')
+                    np.copyto(target_area[:copy_height, :copy_width], blended.astype(np.uint8))
+    except Exception as e:
+        logger.error(f"处理帧 {frame_idx} 时出错: {e}")
+    
+    # 确保返回连续内存布局
+    return frame_idx, np.ascontiguousarray(frame)
+
+# 添加JIT编译支持（如果可用）
+try:
+    import numba
+    # 检查是否可以使用Numba JIT
+    if hasattr(numba, 'jit'):
+        logger.info("启用Numba JIT加速")
+        
+        @numba.jit(nopython=True, parallel=True, fastmath=True, cache=True)
+        def _blend_images_fast(source, target, alpha):
+            """使用JIT编译加速的图像混合函数"""
+            height, width = source.shape[:2]
+            result = np.empty((height, width, 3), dtype=np.uint8)
+            
+            for y in numba.prange(height):
+                for x in range(width):
+                    a = alpha[y, x, 0] / 255.0
+                    for c in range(3):
+                        result[y, x, c] = int(source[y, x, c] * a + target[y, x, c] * (1.0 - a))
+            
+            return result
+        
+        # 创建一个使用Numba优化的帧处理函数
+        def _process_frame_jit(args):
+            """使用JIT编译加速的帧处理函数"""
+            global _g_img_array
+            
+            frame_idx, img_start_y, img_height, img_width, self_height, self_width, frame_positions, is_transparent, bg_color = args
+            
+            # 快速路径和边界检查
+            img_end_y = min(img_height, img_start_y + self_height)
+            frame_start_y = 0
+            frame_end_y = img_end_y - img_start_y
+            
+            if img_start_y >= img_end_y or frame_start_y >= frame_end_y or frame_end_y > self_height or _g_img_array is None:
+                if is_transparent:
+                    frame = np.zeros((self_height, self_width, 4), dtype=np.uint8)
+                else:
+                    frame = np.ones((self_height, self_width, 3), dtype=np.uint8) * np.array(bg_color, dtype=np.uint8)
+                return frame_idx, frame
+            
+            # 创建帧缓冲区
+            if is_transparent:
+                frame = np.zeros((self_height, self_width, 4), dtype=np.uint8)
+            else:
+                frame = np.ones((self_height, self_width, 3), dtype=np.uint8) * np.array(bg_color, dtype=np.uint8)
+            
+            # 计算切片
+            img_h_slice = slice(img_start_y, img_end_y)
+            img_w_slice = slice(0, min(self_width, img_width))
+            frame_h_slice = slice(frame_start_y, frame_end_y)
+            frame_w_slice = slice(0, min(self_width, img_width))
+            
+            try:
+                source_section = _g_img_array[img_h_slice, img_w_slice]
+                target_area = frame[frame_h_slice, frame_w_slice]
+                
+                if target_area.shape[:2] == source_section.shape[:2]:
+                    if is_transparent:
+                        target_area[:] = source_section
+                    else:
+                        # 使用JIT编译的快速混合函数
+                        blended = _blend_images_fast(
+                            source_section[:, :, :3], 
+                            target_area, 
+                            source_section[:, :, 3:4]
+                        )
+                        target_area[:] = blended
+                else:
+                    # 处理形状不匹配的情况
+                    copy_height = min(target_area.shape[0], source_section.shape[0])
+                    copy_width = min(target_area.shape[1], source_section.shape[1])
+                    
+                    if copy_height > 0 and copy_width > 0:
+                        src_crop = source_section[:copy_height, :copy_width]
+                        dst_crop = target_area[:copy_height, :copy_width]
+                        
+                        if is_transparent:
+                            target_area[:copy_height, :copy_width] = src_crop
+                        else:
+                            # 使用JIT编译的快速混合函数
+                            blended = _blend_images_fast(
+                                src_crop[:, :, :3], 
+                                dst_crop, 
+                                src_crop[:, :, 3:4]
+                            )
+                            target_area[:copy_height, :copy_width] = blended
+            except Exception as e:
+                logger.error(f"JIT优化帧处理出错 {frame_idx}: {e}")
+            
+            return frame_idx, frame
+        
+        # 用优化的JIT函数替换原函数
+        _process_frame_original = _process_frame
+        _process_frame = _process_frame_jit
+        logger.info("已启用JIT加速帧处理函数")
+    else:
+        logger.info("Numba可用但JIT不可用，使用标准优化")
+except ImportError:
+    logger.info("Numba未安装，使用标准优化")
 
 class TextRenderer:
     """文字渲染器，负责将文本渲染成图片"""
@@ -165,6 +515,80 @@ class TextRenderer:
         
         return img, text_actual_height # 返回图像和文本实际高度
 
+# 添加内存池管理器 - 提高内存利用效率，减少内存分配开销
+class FrameMemoryPool:
+    """高效内存池管理器，实现零拷贝内存分配"""
+    
+    def __init__(self, width, height, channels, pool_size=240):
+        """
+        初始化帧内存池
+        
+        Args:
+            width: 帧宽度
+            height: 帧高度
+            channels: 颜色通道数(RGB=3, RGBA=4)
+            pool_size: 内存池大小(帧数)
+        """
+        self.width = width
+        self.height = height
+        self.channels = channels
+        self.frame_shape = (height, width, channels)
+        self.frame_size = width * height * channels
+        
+        # 创建大型连续内存块
+        self.buffer_size = self.frame_size * pool_size
+        self.buffer = bytearray(self.buffer_size)
+        self.buffer_view = memoryview(self.buffer)
+        
+        # 跟踪可用/已用帧
+        self.available_frames = queue.Queue(pool_size)
+        self.in_use_frames = set()
+        
+        # 预填充可用帧队列
+        for i in range(pool_size):
+            offset = i * self.frame_size
+            self.available_frames.put((i, offset))
+        
+        logger.info(f"初始化内存池: {pool_size}帧, 每帧{self.frame_size/1024/1024:.2f}MB")
+    
+    def get_frame(self):
+        """获取预分配的帧内存"""
+        try:
+            frame_id, offset = self.available_frames.get(block=False)
+            self.in_use_frames.add(frame_id)
+            # 返回NumPy视图，无需复制
+            array_view = np.frombuffer(
+                self.buffer_view[offset:offset+self.frame_size], 
+                dtype=np.uint8
+            ).reshape(self.frame_shape)
+            return frame_id, array_view
+        except queue.Empty:
+            # 如果池已耗尽，创建新内存
+            logger.warning("内存池耗尽，临时分配新内存")
+            return -1, np.zeros(self.frame_shape, dtype=np.uint8)
+    
+    def release_frame(self, frame_id):
+        """释放帧回内存池"""
+        if frame_id >= 0 and frame_id in self.in_use_frames:
+            self.in_use_frames.remove(frame_id)
+            offset = frame_id * self.frame_size
+            self.available_frames.put((frame_id, offset))
+    
+    def clear(self):
+        """清空并重置内存池"""
+        # 释放所有帧
+        self.in_use_frames.clear()
+        # 清空队列
+        while not self.available_frames.empty():
+            try:
+                self.available_frames.get(block=False)
+            except queue.Empty:
+                break
+        # 重新填充队列
+        for i in range(self.available_frames.maxsize):
+            offset = i * self.frame_size
+            self.available_frames.put((i, offset))
+
 class VideoRenderer:
     """视频渲染器，负责创建滚动效果的视频，使用ffmpeg管道和线程读取优化"""
     
@@ -173,7 +597,7 @@ class VideoRenderer:
         width: int,
         height: int,
         fps: int = 30,
-        scroll_speed: int = 2  # 每帧滚动的像素数
+        scroll_speed: int = 5  # 每帧滚动的像素数（由service层基于行高和每秒滚动行数计算而来）
     ):
         """
         初始化视频渲染器
@@ -182,14 +606,28 @@ class VideoRenderer:
             width: 视频宽度
             height: 视频高度
             fps: 视频帧率
-            scroll_speed: 滚动速度(像素/帧)
+            scroll_speed: 每帧滚动的像素数（由service层基于行高和每秒滚动行数计算而来）
         """
         self.width = width
         self.height = height
         self.fps = fps
         self.scroll_speed = scroll_speed
-        self.num_threads = min(4, os.cpu_count() or 1)  # 使用最多4个线程或可用核心数
-        logger.info(f"视频渲染器初始化: 宽={width}, 高={height}, 帧率={fps}, 滚动速度={scroll_speed}, 线程数={self.num_threads}")
+        self.memory_pool = None
+        self.frame_counter = 0
+        self.total_frames = 0
+    
+    def _init_memory_pool(self, channels, pool_size=240):
+        """初始化或重置内存池"""
+        if self.memory_pool is not None:
+            self.memory_pool.clear()
+        else:
+            self.memory_pool = FrameMemoryPool(
+                width=self.width,
+                height=self.height,
+                channels=channels,
+                pool_size=pool_size
+            )
+        return self.memory_pool
     
     def _get_ffmpeg_command(
         self,
@@ -198,9 +636,14 @@ class VideoRenderer:
         codec_and_output_params: List[str], # 重命名以更清晰
         audio_path: Optional[str]
     ) -> List[str]:
-        """构造基础的ffmpeg命令"""
+        """构造基础的ffmpeg命令 - 高性能优化版"""
         command = [
             "ffmpeg", "-y",
+            # I/O优化参数
+            "-probesize", "20M",       # 增加探测缓冲区大小
+            "-analyzeduration", "20M", # 增加分析时间
+            "-thread_queue_size", "8192", # 大幅增加线程队列大小
+            # 输入格式参数
             "-f", "rawvideo",
             "-vcodec", "rawvideo",
             "-s", f"{self.width}x{self.height}",
@@ -231,68 +674,383 @@ class VideoRenderer:
         finally:
             output_queue.put(None) # 发送结束信号
 
-    def _prepare_frame(self, frame_idx, img_array, img_height, img_width, total_frames, 
-                     padding_frames_start, scroll_frames, scroll_distance,
-                     transparency_required, background_frame_rgb=None):
-        """生成单帧的像素数据"""
-        # 计算当前帧的滚动位置
-        if frame_idx < padding_frames_start: 
-            current_position = 0
-        elif frame_idx < padding_frames_start + scroll_frames:
-            scroll_progress = frame_idx - padding_frames_start
-            current_position = scroll_progress * self.scroll_speed
-            current_position = min(current_position, scroll_distance)
-        else: 
-            current_position = scroll_distance
-            
-        # 计算图像和帧的切片位置
-        img_start_y = int(current_position)
-        img_end_y = min(img_height, img_start_y + self.height)
-        frame_start_y = 0
-        frame_end_y = img_end_y - img_start_y
+    def create_scrolling_video_optimized(
+        self,
+        image: Image.Image,
+        output_path: str,
+        text_actual_height: int,
+        transparency_required: bool,
+        preferred_codec: str, # 仍然接收 h264_nvenc 作为首选
+        audio_path: Optional[str] = None,
+        bg_color: Optional[Tuple[int, int, int, int]] = None
+    ) -> str:
+        """创建滚动视频 - 高性能优化版"""
         
-        # 生成帧数据
-        output_frame_data = None
-        if img_start_y < img_end_y and frame_start_y < frame_end_y and frame_end_y <= self.height:
-            img_h_slice = slice(img_start_y, img_end_y)
-            img_w_slice = slice(0, min(self.width, img_width))
-            frame_h_slice = slice(frame_start_y, frame_end_y)
-            frame_w_slice = slice(0, min(self.width, img_width))
-            source_section = img_array[img_h_slice, img_w_slice]
-            
-            if transparency_required:
-                frame_rgba = np.zeros((self.height, self.width, 4), dtype=np.uint8)
-                target_area = frame_rgba[frame_h_slice, frame_w_slice]
-                if target_area.shape[:2] == source_section.shape[:2]: 
-                    np.copyto(target_area, source_section)
-                else: 
-                    copy_width = min(target_area.shape[1], source_section.shape[1])
-                    target_area[:target_area.shape[0], :copy_width] = source_section[:target_area.shape[0], :copy_width]
-                output_frame_data = frame_rgba.tobytes()
-            else:
-                frame_rgb = background_frame_rgb.copy()
-                target_area = frame_rgb[frame_h_slice, frame_w_slice]
-                if target_area.shape[:2] == source_section.shape[:2]:
-                    alpha = source_section[:, :, 3:4].astype(np.float32) / 255.0
-                    blended = (source_section[:, :, :3].astype(np.float32) * alpha + 
-                              target_area.astype(np.float32) * (1.0 - alpha))
-                    np.copyto(target_area, blended.astype(np.uint8))
-                else:
-                    copy_width = min(target_area.shape[1], source_section.shape[1])
-                    source_section_crop = source_section[:target_area.shape[0], :copy_width]
-                    target_area_crop = target_area[:target_area.shape[0], :copy_width]
-                    alpha = source_section_crop[:, :, 3:4].astype(np.float32) / 255.0
-                    blended = (source_section_crop[:, :, :3].astype(np.float32) * alpha + 
-                              target_area_crop.astype(np.float32) * (1.0 - alpha))
-                    target_area[:target_area.shape[0], :copy_width] = blended.astype(np.uint8)
-                output_frame_data = frame_rgb.tobytes()
+        # 1. 图像预处理优化
+        if transparency_required:
+            img_array = np.ascontiguousarray(np.array(image))
+            channels = 4
         else:
-            if transparency_required:
-                output_frame_data = np.zeros((self.height, self.width, 4), dtype=np.uint8).tobytes()
-            else:
-                output_frame_data = background_frame_rgb.tobytes()
+            # 直接转为RGB以避免后续转换开销
+            if image.mode == 'RGBA':
+                image = image.convert('RGB')
+            img_array = np.ascontiguousarray(np.array(image))
+            channels = 3
+        
+        img_height, img_width = img_array.shape[:2]
+        
+        # 2. 滚动参数计算 - 减少中间变量
+        scroll_distance = max(text_actual_height, img_height - self.height)
+        scroll_frames = int(scroll_distance / self.scroll_speed) if self.scroll_speed > 0 else 0
+        
+        # 确保短文本有合理滚动时间
+        min_scroll_frames = self.fps * 8
+        if scroll_frames < min_scroll_frames and scroll_frames > 0:
+            adjusted_speed = scroll_distance / min_scroll_frames
+            if adjusted_speed < self.scroll_speed:
+                logger.info(f"文本较短，减慢滚动速度: {self.scroll_speed:.2f} → {adjusted_speed:.2f} 像素/帧")
+                self.scroll_speed = adjusted_speed
+                scroll_frames = min_scroll_frames
+        
+        padding_frames_start = int(self.fps * 2.0)
+        padding_frames_end = int(self.fps * 2.0)
+        total_frames = padding_frames_start + scroll_frames + padding_frames_end
+        self.total_frames = total_frames
+        duration = total_frames / self.fps
+        
+        logger.info(f"文本高:{text_actual_height}, 图像高:{img_height}, 视频高:{self.height}")
+        logger.info(f"滚动距离:{scroll_distance}, 滚动帧:{scroll_frames}, 总帧:{total_frames}, 时长:{duration:.2f}s")
+        logger.info(f"输出:{output_path}, 透明:{transparency_required}, 首选编码器:{preferred_codec}")
+        
+        # 3. 设置编码器参数 - 优化p3配置
+        if transparency_required:
+            ffmpeg_pix_fmt = "rgba"
+            output_path = os.path.splitext(output_path)[0] + ".mov"
+            video_codec_and_output_params = [
+                "-c:v", "prores_ks", "-profile:v", "4", 
+                "-pix_fmt", "yuva444p10le", "-alpha_bits", "16", "-vendor", "ap10"
+            ]
+        else:
+            ffmpeg_pix_fmt = "rgb24"
+            output_path = os.path.splitext(output_path)[0] + ".mp4"
+            # NVENC高性能参数 - 保持p3预设 但简化参数
+            video_codec_and_output_params = [
+                "-c:v", preferred_codec,
+                "-preset", "p3",          # 保持p3预设
+                "-rc:v", "vbr",           # 简化为标准vbr
+                "-cq:v", "21",            # 保持质量设置
+                "-b:v", "0",              # 由CQ控制
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                # 移除可能引起问题的参数
+                # "-qmin", "0", 
+                # "-qmax", "51",
+                # "-spatial-aq", "1",
+                # "-aq-strength", "8",
+                "-bufsize", "50M",        # 保留缓冲区大小
+                "-maxrate", "50M"         # 保留最大比特率
+            ]
+            
+            # CPU回退参数保持不变
+            cpu_fallback_codec_and_output_params = [
+                "-c:v", "libx264",
+                "-crf", "21",            
+                "-preset", "medium",
+                "-pix_fmt", "yuv420p",   
+                "-movflags", "+faststart",
+                "-threads", "8"
+            ]
+        
+        # 背景色处理
+        if not transparency_required and bg_color and len(bg_color) >= 3:
+            bg_color_rgb = bg_color[:3]
+        else:
+            bg_color_rgb = (0, 0, 0)
+        
+        # 初始化内存池 - 减小池大小以降低内存压力
+        memory_pool = self._init_memory_pool(channels, pool_size=120)
+        
+        # 4. 高性能处理函数
+        def run_optimized_pipeline(current_codec_params, is_gpu_attempt):
+            try:
+                # 检查ffmpeg命令是否存在
+                ffmpeg_path = shutil.which("ffmpeg")
+                if not ffmpeg_path:
+                    logger.error("找不到ffmpeg命令！请确保已安装并添加到PATH")
+                    return False
                 
-        return output_frame_data
+                ffmpeg_cmd = self._get_ffmpeg_command(
+                    output_path, 
+                    ffmpeg_pix_fmt, 
+                    current_codec_params, 
+                    audio_path
+                )
+                
+                logger.info(f"执行ffmpeg命令: {' '.join(ffmpeg_cmd)}")
+                
+                # 确保输出目录存在
+                output_dir = os.path.dirname(os.path.abspath(output_path))
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir, exist_ok=True)
+                    
+                # 预计算所有帧位置，避免重复计算
+                frame_positions = []
+                for frame_idx in range(total_frames):
+                    if frame_idx < padding_frames_start: 
+                        frame_positions.append(0)
+                    elif frame_idx < padding_frames_start + scroll_frames:
+                        scroll_progress = frame_idx - padding_frames_start
+                        current_position = int(min(scroll_progress * self.scroll_speed, scroll_distance))
+                        frame_positions.append(current_position)
+                    else: 
+                        frame_positions.append(int(scroll_distance))
+                
+                # 优化批处理大小 - 减小以平衡管道传输
+                batch_size = is_gpu_attempt and 60 or 120  # GPU时使用较小批处理
+                num_batches = (total_frames + batch_size - 1) // batch_size
+                
+                # 确定最佳进程数 - 考虑批处理大小
+                try:
+                    cpu_count = mp.cpu_count()
+                    # 限制在8核以内
+                    raw_processes = min(8, max(1, cpu_count - 1))
+                    
+                    # 根据批处理大小优化进程数
+                    if batch_size >= 180:
+                        # 大批处理使用较少但效率更高的进程
+                        num_processes = max(3, min(raw_processes - 1, 6))
+                    else:
+                        num_processes = max(2, min(raw_processes - 1, 4))  # 减少进程数以平衡管道
+                        
+                    logger.info(f"检测到{cpu_count}个CPU核心，优化使用{num_processes}个进程进行渲染，批处理大小:{batch_size}")
+                except Exception as e:
+                    num_processes = 4  # 降低默认值
+                    logger.info(f"使用默认4个进程: {e}")
+                
+                # 全局图像数组
+                global _g_img_array
+                _g_img_array = img_array
+                
+                # 准备批帧参数 - 使用简化参数列表
+                frame_batch_params = []
+                for batch_idx in range(num_batches):
+                    start_frame = batch_idx * batch_size
+                    end_frame = min(start_frame + batch_size, total_frames)
+                    batch_frames = []
+                    
+                    for frame_idx in range(start_frame, end_frame):
+                        img_start_y = frame_positions[frame_idx]
+                        # 参数优化 - 减少不必要参数
+                        frame_params = (frame_idx, img_start_y, img_height, img_width, 
+                                       self.height, self.width, transparency_required, bg_color_rgb)
+                        batch_frames.append(frame_params)
+                    
+                    frame_batch_params.append(batch_frames)
+                
+                # 添加性能监控
+                perf_monitor = PerformanceMonitor()
+                perf_monitor.start()
+                
+                # 重置帧计数器
+                self.frame_counter = 0
+                
+                # 启动ffmpeg进程，设置较大buffer
+                process = subprocess.Popen(
+                    ffmpeg_cmd, 
+                    stdin=subprocess.PIPE, 
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.PIPE,
+                    bufsize=20*1024*1024  # 20MB缓冲区
+                )
+                
+                # 创建输出读取线程
+                stdout_q = queue.Queue()
+                stderr_q = queue.Queue()
+                stdout_thread = threading.Thread(target=self._reader_thread, args=(process.stdout, stdout_q), daemon=True)
+                stderr_thread = threading.Thread(target=self._reader_thread, args=(process.stderr, stderr_q), daemon=True)
+                stdout_thread.start()
+                stderr_thread.start()
+                
+                # 流量控制 - 添加处理平衡机制
+                max_queue_size = 10  # 最大处理中帧数
+                frames_queue = queue.Queue(maxsize=max_queue_size)
+                processing_done = threading.Event()
+                
+                # 消费者线程 - 将处理好的帧写入ffmpeg
+                def frame_consumer():
+                    try:
+                        while not (processing_done.is_set() and frames_queue.empty()):
+                            try:
+                                # 等待新帧，但不要无限等待
+                                frame_data = frames_queue.get(timeout=1.0)
+                                process.stdin.write(frame_data)
+                                frames_queue.task_done()
+                                
+                                # 周期性刷新，避免缓冲区积累
+                                if frames_queue.qsize() < 2:
+                                    try:
+                                        process.stdin.flush()
+                                    except BrokenPipeError:
+                                        logger.error("管道已断开，停止写入")
+                                        break
+                            except queue.Empty:
+                                if processing_done.is_set():
+                                    break
+                                continue
+                        
+                        # 最终刷新
+                        try:
+                            process.stdin.flush()
+                        except (BrokenPipeError, IOError):
+                            pass
+                            
+                    except Exception as e:
+                        logger.error(f"写入线程异常: {e}")
+                
+                # 启动消费者线程
+                consumer_thread = threading.Thread(target=frame_consumer, daemon=True)
+                consumer_thread.start()
+                
+                # 用tqdm显示进度
+                desc = f"编码 ({current_codec_params[current_codec_params.index('-c:v') + 1]})"
+                with tqdm.tqdm(range(num_batches), desc=desc) as pbar:
+                    try:
+                        # 使用进程池处理帧
+                        with mp.Pool(processes=num_processes) as pool:
+                            for batch_idx in pbar:
+                                batch_frames = frame_batch_params[batch_idx]
+                                
+                                # 检查管道是否正常
+                                if process.poll() is not None:
+                                    logger.error(f"ffmpeg进程意外退出，返回码: {process.returncode}")
+                                    # 收集错误输出
+                                    stderr_data = []
+                                    while not stderr_q.empty():
+                                        line = stderr_q.get_nowait()
+                                        if line: stderr_data.append(line.decode('utf-8', errors='ignore'))
+                                    if stderr_data:
+                                        logger.error(f"ffmpeg错误: {' '.join(stderr_data[-5:])}")
+                                    break
+                                
+                                # 根据批次大小选择处理策略
+                                if batch_size > 60 and num_processes > 1:
+                                    # 方法1: 分块并行处理
+                                    chunk_size = max(20, len(batch_frames) // num_processes)
+                                    chunks = [batch_frames[i:i+chunk_size] for i in range(0, len(batch_frames), chunk_size)]
+                                    
+                                    # 多进程并行处理
+                                    results = []
+                                    for chunk_frames in pool.map(_process_frame_optimized, [p for chunk in chunks for p in chunk]):
+                                        # 保存处理结果
+                                        frame_idx, frame = chunk_frames
+                                        results.append((frame_idx, frame))
+                                    
+                                    # 排序并按顺序加入队列
+                                    for _, frame in sorted(results, key=lambda x: x[0]):
+                                        # 平衡控制，避免队列过满
+                                        while not processing_done.is_set() and frames_queue.full():
+                                            time.sleep(0.01)
+                                        if processing_done.is_set():
+                                            break
+                                        
+                                        # 放入队列
+                                        frames_queue.put(frame.tobytes())
+                                        self.frame_counter += 1
+                                else:
+                                    # 方法2: 小批次串行处理
+                                    for frame_params in batch_frames:
+                                        frame_idx, frame = _process_frame_optimized(frame_params)
+                                        
+                                        # 平衡控制，避免队列过满
+                                        while not processing_done.is_set() and frames_queue.full():
+                                            time.sleep(0.01)
+                                        if processing_done.is_set():
+                                            break
+                                            
+                                        # 放入队列
+                                        frames_queue.put(frame.tobytes())
+                                        self.frame_counter += 1
+                                
+                                # 每批次记录性能
+                                if batch_idx % 5 == 0:
+                                    perf_monitor.log_stats(logger)
+                                    
+                                # 定期垃圾回收
+                                if batch_idx % 10 == 9:
+                                    gc.collect()
+                    except BrokenPipeError as e:
+                        logger.error(f"管道断开: {e}")
+                        processing_done.set()
+                    except Exception as e:
+                        logger.error(f"处理异常: {e}")
+                        processing_done.set()
+                        raise
+                    finally:
+                        # 标记处理完成，等待写入线程结束
+                        processing_done.set()
+                        consumer_thread.join(timeout=10.0)
+                        
+                        # 关闭输入并等待ffmpeg完成
+                        try:
+                            if not process.stdin.closed:
+                                process.stdin.close()
+                        except:
+                            pass
+                        
+                        # 等待处理完成
+                        try:
+                            return_code = process.wait(timeout=30.0)
+                        except subprocess.TimeoutExpired:
+                            logger.warning("ffmpeg进程超时，尝试强制终止")
+                            process.kill()
+                            return_code = process.wait()
+                
+                # 记录最终性能
+                perf_monitor.log_stats(logger)
+                
+                # 计算实际帧速率
+                end_time = time.time()
+                total_time = end_time - perf_monitor.start_time
+                frames_per_second = self.frame_counter / total_time if total_time > 0 else 0
+                
+                logger.info(f"总渲染性能: 渲染了{self.frame_counter}帧，"
+                           f"耗时{total_time:.2f}秒，"
+                           f"平均{frames_per_second:.2f}帧/秒")
+                
+                # 收集输出日志
+                stderr_lines = []
+                while not stderr_q.empty():
+                    line = stderr_q.get()
+                    if line is not None: 
+                        stderr_lines.append(line.decode(errors='ignore').strip())
+                
+                # 如果有错误，记录到日志
+                if stderr_lines and return_code != 0:
+                    stderr_content = "\n".join(stderr_lines)
+                    logger.error(f"ffmpeg错误输出:\n{stderr_content}")
+                
+                return return_code == 0
+                
+            except Exception as e:
+                logger.error(f"渲染过程出错: {e}", exc_info=True)
+                return False
+            finally:
+                # 清理资源
+                _g_img_array = None
+                gc.collect()
+        
+        # 5. 执行渲染
+        success = run_optimized_pipeline(video_codec_and_output_params, True)
+        
+        # 如果GPU编码失败，尝试CPU
+        if not success:
+            logger.info(f"GPU编码失败，尝试CPU编码...")
+            success = run_optimized_pipeline(cpu_fallback_codec_and_output_params, False)
+        
+        if not success:
+            raise RuntimeError("视频编码失败")
+        
+        return output_path
 
     def create_scrolling_video(
         self,
@@ -302,328 +1060,103 @@ class VideoRenderer:
         transparency_required: bool,
         preferred_codec: str, # 仍然接收 h264_nvenc 作为首选
         audio_path: Optional[str] = None,
-        bg_color: Optional[Tuple[int, int, int, int]] = None,
-        frame_skip: int = 1  # 新增参数：每x帧渲染1帧，然后让ffmpeg复制
+        bg_color: Optional[Tuple[int, int, int, int]] = None
     ) -> str:
-        """创建滚动视频，使用ffmpeg管道优化，并应用推荐的编码参数"""
-        
-        img_array = np.array(image)
-        img_height, img_width = img_array.shape[:2]
-        if img_array.shape[2] != 4:
-             logger.warning("输入图像非RGBA，尝试转换")
-             image = image.convert("RGBA")
-             img_array = np.array(image)
-             if img_array.shape[2] != 4: raise ValueError("无法转换图像为RGBA")
-        
-        # 修改滚动距离计算，确保最后一行能滚动到视频顶部再结束
-        # 原来: scroll_distance = max(0, text_actual_height - self.height)
-        scroll_distance = text_actual_height + self.height
-        
-        scroll_frames = int(scroll_distance / self.scroll_speed) if self.scroll_speed > 0 else 0
-        padding_frames_start = int(self.fps * 0.5)
-        padding_frames_end = int(self.fps * 0.5)
-        total_frames = padding_frames_start + scroll_frames + padding_frames_end
-        duration = total_frames / self.fps
-        logger.info(f"文本高:{text_actual_height}, 图像高:{img_height}, 视频高:{self.height}")
-        logger.info(f"滚动距离:{scroll_distance}, 滚动帧:{scroll_frames}, 总帧:{total_frames}, 时长:{duration:.2f}s")
-        
-        # 针对透明视频的特殊处理
-        actual_frame_skip = frame_skip
-        actual_threads = self.num_threads
-        vf_filters = []  # 用于存储视频滤镜
-        
-        # 优化所有视频类型的滚动平滑度
-        if frame_skip > 1:
-            # 无论透明与否，平衡速度和平滑度
-            actual_frame_skip = frame_skip  # 恢复用户设置的跳帧率以提高速度
-            logger.info(f"使用跳帧率{actual_frame_skip}以提高处理速度")
-            
-            # 使用更高效的平滑处理 - 只使用简单可靠的tblend滤镜
-            vf_filters.append("tblend=all_mode=average")  # 轻量级平滑，不使用复杂参数
-            
-        # 透明视频的额外处理
-        if transparency_required:
-            if frame_skip > 1:
-                # 提高透明视频的跳帧率以提高速度
-                actual_frame_skip = min(4, frame_skip * 2)  # 允许更高跳帧率
-                logger.info(f"透明视频增加跳帧率至{actual_frame_skip}以提高速度")
-            # 减少线程数以优化CPU使用
-            actual_threads = max(2, self.num_threads - 1)  # 减少CPU竞争，只减少1个线程
-            logger.info(f"透明视频特殊处理: 使用{actual_threads}个线程")
-        
-        logger.info(f"输出:{output_path}, 透明:{transparency_required}, 首选编码器:{preferred_codec}, 跳帧率:{actual_frame_skip}")
-        # --- 结束滚动参数计算 --- 
-        
-        ffmpeg_pix_fmt = ""
-        video_codec_and_output_params = [] 
-        cpu_fallback_codec_and_output_params = []
-        final_bg_color_rgb = None
-        background_frame_rgb = None
-        
-        # 计算实际渲染帧率
-        render_fps = self.fps
-        if actual_frame_skip > 1:
-            render_fps = max(1, self.fps // actual_frame_skip)
-            logger.info(f"启用跳帧: 输出帧率={self.fps}, 实际渲染帧率={render_fps}")
-            
-        if transparency_required:
-            ffmpeg_pix_fmt = "rgba"
-            output_path = os.path.splitext(output_path)[0] + ".mov"
-            # 透明视频编码参数优化 - 降低质量换取速度
-            video_codec_and_output_params = [
-                "-c:v", "prores_ks", 
-                "-profile:v", "0",        # 从4(高质量)改为0(代理质量)
-                "-pix_fmt", "yuva444p",   # 降低位深度
-                "-alpha_bits", "8",       # 降低alpha通道质量
-                "-vendor", "ap10"
-            ]
-            logger.info(f"设置ffmpeg(透明): 输入={ffmpeg_pix_fmt}, 输出={output_path}, 参数={' '.join(video_codec_and_output_params)}")
-        else:
-            ffmpeg_pix_fmt = "rgb24"
-            output_path = os.path.splitext(output_path)[0] + ".mp4"
-            # GPU 参数优化: 降低质量换取速度
-            video_codec_and_output_params = [
-                "-c:v", preferred_codec,  # h264_nvenc
-                "-preset", "p4",          # 更快速度的preset (p4比p3更快)
-                "-rc:v", "vbr",
-                "-cq:v", "28",            # 降低质量 (21→28)，值越大质量越低
-                "-b:v", "0",
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart"
-            ]
-            # 添加NVENC特别参数以提高性能
-            if preferred_codec == "h264_nvenc":
-                video_codec_and_output_params.extend([
-                    "-gpu", "0",  # 明确指定GPU
-                    "-surfaces", "64",  # 增加表面缓冲数
-                    "-delay", "0",  # 降低延迟
-                    "-no-scenecut", "1"  # 禁用场景切换检测以提高速度
-                ])
-            
-            # CPU 回退参数优化: 降低质量换取速度
-            cpu_fallback_codec_and_output_params = [
-                "-c:v", "libx264",
-                "-crf", "28",            # 降低质量 (21→28)
-                "-preset", "ultrafast",  # 速度最快的preset
-                "-tune", "fastdecode",   # 优化解码速度
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart"
-            ]
-            logger.info(f"设置ffmpeg(不透明): 输入={ffmpeg_pix_fmt}, 输出={output_path}")
-            logger.info(f"  首选GPU参数: {' '.join(video_codec_and_output_params)}")
-            logger.info(f"  回退CPU参数: {' '.join(cpu_fallback_codec_and_output_params)}")
-            # 准备背景色 (RGB)
-            final_bg_color_rgb = (0, 0, 0)
-            if bg_color and len(bg_color) >= 3:
-                 final_bg_color_rgb = bg_color[:3]
-            background_frame_rgb = np.ones((self.height, self.width, 3), dtype=np.uint8) * np.array(final_bg_color_rgb, dtype=np.uint8)
-        
-        # --- 重构 run_ffmpeg_with_pipe 使用线程和多线程帧生成 --- 
-        def run_ffmpeg_with_pipe(current_codec_params: List[str], is_gpu_attempt: bool) -> bool:
-            ffmpeg_cmd = self._get_ffmpeg_command(output_path, ffmpeg_pix_fmt, current_codec_params, audio_path)
-            # 添加帧率转换参数（如果启用跳帧）
-            if actual_frame_skip > 1:
-                # 修改输入帧率（之前的ffmpeg参数中的-r值）
-                r_index = ffmpeg_cmd.index("-r")
-                ffmpeg_cmd[r_index+1] = str(render_fps)
-                # 添加输出帧率参数
-                ffmpeg_cmd.insert(-1, "-r")  # 在输出文件前插入
-                ffmpeg_cmd.insert(-1, str(self.fps))  # 在输出文件前插入
-            
-            # 添加视频滤镜（如果需要）
-            if vf_filters:
-                # 检查是否已有-vf参数
-                has_vf = False
-                for i, param in enumerate(ffmpeg_cmd):
-                    if param == "-vf" and i < len(ffmpeg_cmd) - 1:
-                        ffmpeg_cmd[i+1] = ffmpeg_cmd[i+1] + "," + ",".join(vf_filters)
-                        has_vf = True
-                        break
-                
-                # 如果没有-vf参数，添加新的
-                if not has_vf:
-                    ffmpeg_cmd.insert(-1, "-vf")
-                    ffmpeg_cmd.insert(-1, ",".join(vf_filters))
-                
-                logger.info(f"添加视频滤镜: {','.join(vf_filters)}")
-            
-            logger.info(f"执行ffmpeg命令: {' '.join(ffmpeg_cmd)}")
-            process = None
-            stdout_q = queue.Queue()
-            stderr_q = queue.Queue()
-            stdout_thread = None
-            stderr_thread = None
-            
-            try:
-                process = subprocess.Popen(
-                    ffmpeg_cmd, stdin=subprocess.PIPE, 
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-                    # bufsize=0 might help with pipe buffering, but default is usually fine
-                )
-                
-                # --- 启动 stdout 和 stderr 读取线程 ---
-                stdout_thread = threading.Thread(target=self._reader_thread, args=(process.stdout, stdout_q), daemon=True)
-                stderr_thread = threading.Thread(target=self._reader_thread, args=(process.stderr, stderr_q), daemon=True)
-                stdout_thread.start()
-                stderr_thread.start()
-                # --- 结束线程启动 ---
-                
-                # --- 多线程帧生成和管道写入 --- 
-                codec_name = "unknown"
-                try: codec_name = current_codec_params[current_codec_params.index("-c:v") + 1]
-                except (ValueError, IndexError): pass
-                
-                # 实际渲染的帧数（考虑跳帧）
-                render_frame_count = total_frames
-                if actual_frame_skip > 1:
-                    render_frame_count = total_frames // actual_frame_skip
-                    if total_frames % actual_frame_skip > 0:
-                        render_frame_count += 1  # 确保渲染所有必要帧
-                
-                # 创建帧生成线程池和队列
-                frame_queue = queue.Queue(maxsize=24)  # 限制队列大小防止内存溢出
-                frame_pool = ThreadPoolExecutor(max_workers=actual_threads)
-                
-                # 帧生成函数
-                def generate_frame(idx):
-                    actual_frame_idx = idx * actual_frame_skip if actual_frame_skip > 1 else idx
-                    actual_frame_idx = min(actual_frame_idx, total_frames - 1)  # 确保不超过总帧数
-                    frame_data = self._prepare_frame(
-                        actual_frame_idx, img_array, img_height, img_width, 
-                        total_frames, padding_frames_start, scroll_frames, 
-                        scroll_distance, transparency_required, background_frame_rgb
-                    )
-                    frame_queue.put(frame_data)
-                
-                # 预填充队列（启动初始帧生成任务）
-                prefill_count = min(12, render_frame_count)
-                logger.info(f"启动{prefill_count}个预填充帧生成任务，使用{actual_threads}个线程")
-                for i in range(prefill_count):
-                    frame_pool.submit(generate_frame, i)
-                
-                # 主循环：处理帧队列和提交新任务
-                frame_iterator = tqdm.tqdm(range(render_frame_count), desc=f"编码 ({codec_name}) ")
-                for frame_idx in frame_iterator:
-                    # 提交下一批帧的生成任务
-                    next_frame_idx = frame_idx + prefill_count
-                    if next_frame_idx < render_frame_count:
-                        frame_pool.submit(generate_frame, next_frame_idx)
-                    
-                    # 从队列获取当前帧数据
-                    try:
-                        output_frame_data = frame_queue.get(timeout=60)  # 添加超时防止死锁
-                        if output_frame_data:
-                            try:
-                                process.stdin.write(output_frame_data)
-                            except (IOError, BrokenPipeError) as e:
-                                logger.error(f"写入ffmpeg管道时出错: {e}")
-                                # 写入失败时，尝试获取stderr
-                                stderr_lines_on_error = []
-                                while True:
-                                    try: line = stderr_q.get(timeout=0.1)
-                                    except queue.Empty: break
-                                    if line is None: break
-                                    stderr_lines_on_error.append(line.decode(errors='ignore').strip())
-                                stderr_content_on_error = "\n".join(stderr_lines_on_error)
-                                logger.error(f"ffmpeg stderr (写入时):\n{stderr_content_on_error}")
-                                raise Exception(f"ffmpeg进程意外终止: {e}") from e
-                    except queue.Empty:
-                        logger.error("等待帧数据超时，可能是帧生成线程卡住了")
-                        raise Exception("帧生成超时")
-                
-                # 关闭线程池和清理
-                frame_pool.shutdown(wait=False)
-                logger.info("所有帧已生成并写入管道，关闭stdin...")
-                process.stdin.close()
-                
-                # --- 等待 ffmpeg 进程结束 --- 
-                logger.info("等待ffmpeg进程结束...")
-                process.wait() 
-                return_code = process.returncode
-                # --- 结束等待 --- 
-                
-                # --- 等待读取线程结束并收集输出 --- 
-                logger.info("等待输出读取线程结束...")
-                stdout_thread.join()
-                stderr_thread.join()
-                
-                stdout_lines = []
-                while not stdout_q.empty():
-                    line = stdout_q.get()
-                    if line is not None: stdout_lines.append(line.decode(errors='ignore').strip())
-                    
-                stderr_lines = []
-                while not stderr_q.empty():
-                    line = stderr_q.get()
-                    if line is not None: stderr_lines.append(line.decode(errors='ignore').strip())
-                
-                # 记录输出
-                if stdout_lines: 
-                    stdout_content = "\n".join(stdout_lines)
-                    logger.info(f"ffmpeg stdout:\n{stdout_content}")
-                if stderr_lines: 
-                    stderr_content = "\n".join(stderr_lines)
-                    logger.info(f"ffmpeg stderr:\n{stderr_content}")
-                # --- 结束收集输出 --- 
-                
-                if return_code == 0:
-                    logger.info(f"使用 {codec_name} 编码成功完成。")
-                    return True
-                else:
-                    logger.error(f"ffmpeg ({codec_name}) 执行失败，返回码: {return_code}")
-                    if is_gpu_attempt: logger.warning("GPU编码失败提示：检查ffmpeg版本/驱动/显存。")
-                    return False
-            
-            except FileNotFoundError: logger.error("ffmpeg 未找到。请确保已安装并加入PATH。"); raise
-            except Exception as e: 
-                logger.error(f"执行 ffmpeg ({codec_name}) 时出错: {e}", exc_info=True)
-                logger.error(f"命令: {' '.join(ffmpeg_cmd)}")
-                # 尝试收集最后的 stderr
-                stderr_lines_on_except = []
-                while True:
-                    try: line = stderr_q.get(timeout=0.1)
-                    except queue.Empty: break
-                    if line is None: break
-                    stderr_lines_on_except.append(line.decode(errors='ignore').strip())
-                # 修正：先 join 再放入 f-string
-                if stderr_lines_on_except: 
-                    stderr_content_on_except = "\n".join(stderr_lines_on_except)
-                    logger.error(f"ffmpeg stderr (异常时):\n{stderr_content_on_except}")
-                # 不返回 False，让异常传播
-            finally: 
-                # 清理：确保进程终止和管道关闭
-                if process and process.poll() is None: 
-                    logger.warning("尝试终止 ffmpeg 进程 (finally)...")
-                    try: process.terminate() 
-                    except ProcessLookupError: pass # 进程可能已经结束
-                    try: process.wait(timeout=1) 
-                    except subprocess.TimeoutExpired: 
-                        logger.warning("ffmpeg 进程超时，强制终止 (kill)")
-                        try: process.kill() 
-                        except ProcessLookupError: pass
-                    except Exception as e_wait: logger.error(f"等待终止时出错: {e_wait}")
-                    logger.warning("已终止 ffmpeg 进程")
-                # 关闭管道句柄（如果它们还打开着）
-                for pipe in [process.stdin, process.stdout, process.stderr] if process else []:
-                    if pipe and not pipe.closed:
-                        try: pipe.close()
-                        except: pass
-                # 确保线程已结束 (即使之前出错)
-                if stdout_thread and stdout_thread.is_alive(): stdout_thread.join(timeout=0.5)
-                if stderr_thread and stderr_thread.is_alive(): stderr_thread.join(timeout=0.5)
-        # --- 结束 run_ffmpeg_with_pipe 函数定义 ---
+        """创建滚动视频，使用高性能版本"""
+        # 使用优化版本实现
+        return self.create_scrolling_video_optimized(
+            image=image,
+            output_path=output_path,
+            text_actual_height=text_actual_height,
+            transparency_required=transparency_required,
+            preferred_codec=preferred_codec,
+            audio_path=audio_path,
+            bg_color=bg_color
+        )
 
-        # --- 执行编码 --- 
-        success = run_ffmpeg_with_pipe(video_codec_and_output_params, is_gpu_attempt=(not transparency_required))
-        if not success and not transparency_required and cpu_fallback_codec_and_output_params:
-            logger.info(f"GPU ({preferred_codec}) 编码失败，尝试回退到 CPU ({cpu_fallback_codec_and_output_params[1]})...")
-            success = run_ffmpeg_with_pipe(cpu_fallback_codec_and_output_params, is_gpu_attempt=False)
-            if not success:
-                 logger.error("CPU 回退编码也失败了。")
-                 raise Exception("视频编码失败（GPU和CPU均失败）")
-        elif not success and transparency_required:
-             logger.error("透明视频 (CPU prores_ks) 编码失败。")
-             raise Exception("透明视频编码失败")
-             
-        logger.info(f"视频渲染流程完成。输出文件: {output_path}")
-        return output_path 
+def _process_frame_optimized(args):
+    """极度优化的帧处理函数"""
+    global _g_img_array
+    
+    frame_idx, img_start_y, img_height, img_width, self_height, self_width, is_transparent, bg_color = args
+    
+    # 快速路径 - 直接计算切片位置
+    img_end_y = min(img_height, img_start_y + self_height)
+    visible_height = img_end_y - img_start_y
+    
+    # 零边界检查 - 极端情况直接返回背景
+    if visible_height <= 0 or _g_img_array is None:
+        if is_transparent:
+            return frame_idx, np.zeros((self_height, self_width, 4), dtype=np.uint8)
+        else:
+            return frame_idx, np.ones((self_height, self_width, 3), dtype=np.uint8) * np.array(bg_color, dtype=np.uint8)
+    
+    # 预分配帧缓冲区 - 提高效率
+    if is_transparent:
+        # 创建空的透明帧
+        frame = np.zeros((self_height, self_width, 4), dtype=np.uint8)
+    else:
+        # 用背景色填充帧
+        frame = np.ones((self_height, self_width, 3), dtype=np.uint8) * np.array(bg_color, dtype=np.uint8)
+    
+    # 计算切片 - 超高效版
+    source_height = min(visible_height, self_height)
+    source_width = min(img_width, self_width)
+    
+    # 使用直接视图赋值，避免任何额外复制
+    if source_height > 0 and source_width > 0:
+        # 单一高效赋值操作
+        frame[:source_height, :source_width] = _g_img_array[img_start_y:img_start_y+source_height, :source_width]
+    
+    # 确保返回内存连续的帧数据 - 此步骤对于管道通信至关重要
+    if not frame.flags.c_contiguous:
+        frame = np.ascontiguousarray(frame)
+        
+    return frame_idx, frame
+
+def fast_frame_processor(frame_batch, memory_pool, process):
+    """高速批量帧处理写入器，极大减少多进程通信开销"""
+    global _g_img_array
+    
+    frames_processed = 0
+    
+    # 处理整个批次
+    for params in frame_batch:
+        frame_idx, img_start_y, img_height, img_width, height, width, is_transparent, bg_color = params
+        
+        # 优化的帧边界计算
+        img_end_y = min(img_height, img_start_y + height)
+        visible_height = img_end_y - img_start_y
+        
+        # 从内存池获取预分配的帧
+        pool_id, frame = memory_pool.get_frame()
+        
+        # 极速内联处理核心
+        if visible_height <= 0 or _g_img_array is None:
+            # 边界情况 - 直接使用背景
+            if is_transparent:
+                frame.fill(0)  # 全透明
+            else:
+                frame[:] = np.array(bg_color, dtype=np.uint8)  # 背景色
+        else:
+            # 有效内容 - 执行复制
+            if is_transparent:
+                frame.fill(0)  # 先清空
+            else:
+                frame[:] = np.array(bg_color, dtype=np.uint8)  # 先填充背景
+                
+            # 单次高效复制
+            source_height = min(visible_height, height)
+            source_width = min(img_width, width)
+            frame[:source_height, :source_width] = _g_img_array[img_start_y:img_start_y+source_height, :source_width]
+        
+        # 直接写入管道 - 零中间缓冲
+        process.stdin.write(frame.tobytes())
+        
+        # 释放帧回内存池
+        memory_pool.release_frame(pool_id)
+        frames_processed += 1
+    
+    # 强制刷新确保所有数据写入
+    process.stdin.flush()
+    return frames_processed 

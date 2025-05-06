@@ -19,8 +19,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def main():
-    # 示例文本
-    sample_text = open("example.txt", "r").read()
+    # 示例文本 - 使用绝对路径
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    sample_text_path = os.path.join(current_dir, "example.txt")
+    sample_text = open(sample_text_path, "r").read()
 
     # 路径
     output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
@@ -30,7 +32,7 @@ def main():
     service = RollVideoService()
 
     # 定义测试场景参数列表
-    # todo 待测试不通编码的情况
+    # 2025-05-02 22:12:00 旧版方案升级版 2025-05-02 14:10:52,850 - renderer - INFO - 总渲染性能: 渲染了5628帧，耗时28.91秒，平均194.70帧/秒
     test_cases = [
         {
             # 不透明 -> 自动尝试 GPU (h264_nvenc) -> 输出 .mp4
@@ -48,58 +50,58 @@ def main():
                 "fps": 30,
                 "scroll_speed": 1,
             }
-        },
-        {
-            # 透明背景 -> 使用 ProRes 4444 -> 输出 .mov (高质量，大文件)
-            "description": "透明背景黑字（ProRes 4444 -> MOV）",
-            "params": {
-                "text": sample_text[:2000],  # 使用较少文字以加快测试
-                "width": 720,
-                "height": 1280,
-                "font_path": "方正黑体简体.ttf",
-                "font_size": 24,
-                "font_color": [0,0,0],
-                "bg_color": [255,255,255,0.5],  # 半透明背景
-                "line_spacing": 1.5,
-                "char_spacing": 5,
-                "fps": 30,
-                "scroll_speed": 1,  # 较快的滚动速度
-            }
-        },
-        {
-            # 透明背景 -> 使用 ProRes 422HQ -> 输出 .mov (中等质量，中等文件大小)
-            "description": "透明背景黑字（ProRes 422HQ -> MOV）",
-            "params": {
-                "text": sample_text[:2000],  # 使用较少文字以加快测试
-                "width": 720,
-                "height": 1280,
-                "font_path": "方正黑体简体.ttf",
-                "font_size": 24,
-                "font_color": [0,0,0],
-                "bg_color": [255,255,255,0.5],  # 半透明背景
-                "line_spacing": 1.5,
-                "char_spacing": 5,
-                "fps": 30,
-                "scroll_speed": 1, 
-            }
-        },
-        {
-            # 透明背景 -> 使用 VP9 -> 输出 .webm (较低质量，小文件)
-            "description": "透明背景黑字（VP9 -> WEBM）",
-            "params": {
-                "text": sample_text[:2000],  # 使用较少文字以加快测试
-                "width": 720,
-                "height": 1280,
-                "font_path": "方正黑体简体.ttf",
-                "font_size": 24,
-                "font_color": [0,0,0],
-                "bg_color": [255,255,255,0.5],  # 半透明背景
-                "line_spacing": 1.5,
-                "char_spacing": 5,
-                "fps": 30,
-                "scroll_speed": 1,  # 更快的滚动速度
-            }
         }
+        # ,{
+        #     # 透明背景 -> 使用 ProRes 4444 -> 输出 .mov (高质量，大文件)
+        #     "description": "透明背景黑字（ProRes 4444 -> MOV）",
+        #     "params": {
+        #         "text": sample_text[:2000],  # 使用较少文字以加快测试
+        #         "width": 720,
+        #         "height": 1280,
+        #         "font_path": "方正黑体简体.ttf",
+        #         "font_size": 24,
+        #         "font_color": [0,0,0],
+        #         "bg_color": [255,255,255,0.5],  # 半透明背景
+        #         "line_spacing": 1.5,
+        #         "char_spacing": 5,
+        #         "fps": 30,
+        #         "scroll_speed": 1,  # 较快的滚动速度
+        #     }
+        # },
+        # {
+        #     # 透明背景 -> 使用 ProRes 422HQ -> 输出 .mov (中等质量，中等文件大小)
+        #     "description": "透明背景黑字（ProRes 422HQ -> MOV）",
+        #     "params": {
+        #         "text": sample_text[:2000],  # 使用较少文字以加快测试
+        #         "width": 720,
+        #         "height": 1280,
+        #         "font_path": "方正黑体简体.ttf",
+        #         "font_size": 24,
+        #         "font_color": [0,0,0],
+        #         "bg_color": [255,255,255,0.5],  # 半透明背景
+        #         "line_spacing": 1.5,
+        #         "char_spacing": 5,
+        #         "fps": 30,
+        #         "scroll_speed": 1, 
+        #     }
+        # },
+        # {
+        #     # 透明背景 -> 使用 VP9 -> 输出 .webm (较低质量，小文件)
+        #     "description": "透明背景黑字（VP9 -> WEBM）",
+        #     "params": {
+        #         "text": sample_text[:2000],  # 使用较少文字以加快测试
+        #         "width": 720,
+        #         "height": 1280,
+        #         "font_path": "方正黑体简体.ttf",
+        #         "font_size": 24,
+        #         "font_color": [0,0,0],
+        #         "bg_color": [255,255,255,0.5],  # 半透明背景
+        #         "line_spacing": 1.5,
+        #         "char_spacing": 5,
+        #         "fps": 30,
+        #         "scroll_speed": 1,  # 更快的滚动速度
+        #     }
+        # }
     ]
 
     # 循环生成不同场景的视频
@@ -120,11 +122,11 @@ def main():
         )
 
         # 输出结果
-        if result["status"] == "success":
-            logger.info(f"场景 {i+1} 成功: {result['message']}")
-            logger.info(f"最终输出视频路径: {result['output_path']}") # 注意这里是最终路径
+        if result:
+            logger.info(f"场景 {i+1} 成功: 视频创建完成")
+            logger.info(f"最终输出视频路径: {result}") # 注意这里是最终路径
         else:
-            logger.error(f"场景 {i+1} 失败: {result['message']}")
+            logger.error(f"场景 {i+1} 失败: 未能创建视频")
 
         logger.info(f"--- 场景 {i+1} 生成结束 ---")
 
