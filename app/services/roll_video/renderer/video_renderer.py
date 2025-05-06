@@ -104,6 +104,123 @@ class VideoRenderer:
                 self._init_memory_pool(channels, 30)
         return self.memory_pool
 
+    def _get_codec_parameters(self, preferred_codec, transparency_required, channels):
+        """
+        获取适合当前平台和需求的编码器参数
+        
+        Args:
+            preferred_codec: 首选编码器
+            transparency_required: 是否需要透明支持
+            channels: 通道数（3=RGB, 4=RGBA）
+            
+        Returns:
+            (codec_params, pix_fmt): 编码器参数列表和像素格式
+        """
+        # 检查系统平台
+        is_macos = platform.system() == "Darwin"
+        is_windows = platform.system() == "Windows"
+        is_linux = platform.system() == "Linux"
+        
+        # 透明背景需要特殊处理
+        if transparency_required or channels == 4:
+            # 透明背景需要特殊处理
+            pix_fmt = "rgba"
+            # ProRes 4444保留Alpha
+            codec_params = [
+                "-c:v", "prores_ks", 
+                "-profile:v", "4444",
+                "-pix_fmt", "yuva444p10le", 
+                "-alpha_bits", "16",
+                "-vendor", "ap10", 
+                "-colorspace", "bt709",
+            ]
+            logger.info("使用ProRes 4444编码器处理透明视频")
+            return codec_params, pix_fmt
+        
+        # 不透明视频处理
+        pix_fmt = "rgb24"
+        
+        # 检查是否强制使用CPU
+        force_cpu = "NO_GPU" in os.environ
+        
+        # 根据平台和编码器选择参数
+        if preferred_codec == "h264_nvenc" and not force_cpu:
+            # NVIDIA GPU加速
+            if is_windows or is_linux:
+                codec_params = [
+                    "-c:v", "h264_nvenc",
+                    "-preset", "p4",
+                    "-rc", "vbr",
+                    "-cq", "23",
+                    "-b:v", "5M",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                ]
+                logger.info("使用NVIDIA GPU加速编码器")
+            else:
+                # 不支持NVIDIA，回退到CPU
+                logger.info("平台不支持NVIDIA编码，切换到libx264")
+                codec_params = [
+                    "-c:v", "libx264",
+                    "-preset", "fast",
+                    "-crf", "23",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                ]
+        elif preferred_codec == "h264_qsv" and not force_cpu:
+            # Intel QuickSync加速
+            if is_windows or is_linux:
+                codec_params = [
+                    "-c:v", "h264_qsv",
+                    "-preset", "medium",
+                    "-b:v", "5M",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                ]
+                logger.info("使用Intel QuickSync加速编码器")
+            else:
+                # 不支持QSV，回退到CPU
+                logger.info("平台不支持Intel QuickSync，切换到libx264")
+                codec_params = [
+                    "-c:v", "libx264",
+                    "-preset", "fast",
+                    "-crf", "23",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                ]
+        elif preferred_codec == "h264_videotoolbox" and is_macos and not force_cpu:
+            # macOS VideoToolbox加速
+            codec_params = [
+                "-c:v", "h264_videotoolbox",
+                "-b:v", "5M",
+                "-allow_sw", "1",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+            ]
+            logger.info("使用macOS VideoToolbox加速编码器")
+        elif preferred_codec == "prores_ks":
+            # ProRes (非透明)
+            codec_params = [
+                "-c:v", "prores_ks",
+                "-profile:v", "3",  # ProRes 422 HQ
+                "-pix_fmt", "yuv422p10le",
+                "-vendor", "ap10",
+                "-colorspace", "bt709",
+            ]
+            logger.info("使用ProRes编码器 (非透明)")
+        else:
+            # 默认使用libx264 (高质量CPU编码)
+            codec_params = [
+                "-c:v", "libx264",
+                "-preset", "medium",  # 平衡速度和质量的预设
+                "-crf", "23",         # 恒定质量因子 (0-51, 越低质量越高)
+                "-pix_fmt", "yuv420p", # 兼容大多数播放器
+                "-movflags", "+faststart", # MP4优化
+            ]
+            logger.info(f"使用CPU编码器: libx264")
+        
+        return codec_params, pix_fmt
+
     def _get_ffmpeg_command(
         self,
         output_path: str,
@@ -181,7 +298,7 @@ class VideoRenderer:
             transparency_required: 是否需要透明度支持
             preferred_codec: 首选视频编码器
             audio_path: 可选音频文件路径
-            bg_color: 背景颜色元组(R,G,B)
+            bg_color: 背景颜色元组(R,G,B)或(R,G,B,A)
         """
         try:
             # 初始化性能统计
@@ -220,8 +337,14 @@ class VideoRenderer:
                     rgb_array = np.zeros((img_array.shape[0], img_array.shape[1], 3), dtype=np.uint8)
                     alpha = img_array[:, :, 3].astype(float) / 255.0
                     
-                    # 背景色
-                    bg_r, bg_g, bg_b = bg_color
+                    # 安全处理背景色，确保是RGB格式
+                    if isinstance(bg_color, (list, tuple)):
+                        if len(bg_color) >= 3:
+                            bg_r, bg_g, bg_b = bg_color[0], bg_color[1], bg_color[2]
+                        else:
+                            bg_r, bg_g, bg_b = 255, 255, 255  # 默认白色
+                    else:
+                        bg_r, bg_g, bg_b = 255, 255, 255  # 默认白色
                     
                     # 将RGB通道从RGBA转换出来，使用背景色填充
                     rgb_array[:, :, 0] = (img_array[:, :, 0] * alpha + bg_r * (1 - alpha)).astype(np.uint8)
@@ -308,7 +431,32 @@ class VideoRenderer:
             cpu_count = mp.cpu_count()
             pool_size = max(2, min(cpu_count - 1, 8))  # 至少2个，最多8个，保留1个核心给主进程
 
-            logger.info(f"创建{pool_size}个进程的进程池（共享内存：{shm_name}）")
+            # 初始化共享内存
+            shm = None
+            shm_name = f"shm_image_{int(time.time())}_{random.randint(1000, 9999)}"
+            try:
+                # 创建共享内存
+                shm = shared_memory.SharedMemory(name=shm_name, create=True, size=img_array.nbytes)
+                # 创建Numpy数组视图并复制数据
+                shm_array = np.ndarray(img_array.shape, dtype=img_array.dtype, buffer=shm.buf)
+                np.copyto(shm_array, img_array)
+                logger.info(f"已将图像数据复制到共享内存 {shm_name}")
+                
+                # 储存共享内存信息
+                shared_dict = {
+                    'shm_name': shm_name,
+                    'img_shape': img_array.shape,
+                    'dtype': img_array.dtype.name,
+                }
+                
+                # 初始化本进程的共享内存
+                init_shared_memory(shared_dict)
+            except Exception as e:
+                logger.error(f"创建共享内存失败: {str(e)}")
+                shm_name = None
+                shared_dict = None
+            
+            logger.info(f"创建{pool_size}个进程的进程池（共享内存：{shm_name or '无'}）")
             
             # 记录准备阶段结束，帧处理阶段开始
             preparation_end_time = time.time()
@@ -320,10 +468,22 @@ class VideoRenderer:
             read_stderr, write_stderr = os.pipe()
             stdout_queue = queue.Queue()
             stderr_queue = queue.Queue()
-
+            
+            # 获取编码器参数和像素格式
+            codec_params, pix_fmt = self._get_codec_parameters(preferred_codec, transparency_required, 
+                                                              4 if transparency_required else 3)
+                
+            # 构建完整的ffmpeg命令
+            ffmpeg_cmd = self._get_ffmpeg_command(output_path, pix_fmt, codec_params, audio_path)
+            
             # 创建进程池和帧生成器
             try:
+                # 如果shared_dict为None，使用最小化的字典
+                if shared_dict is None:
+                    shared_dict = {'dummy': True}
+                
                 # 创建进程池（使用spawn确保共享内存兼容性）
+                mp_context = mp.get_context("spawn")
                 with mp_context.Pool(processes=pool_size, initializer=init_worker, initargs=(shared_dict,)) as pool:
                     
                     # 启动FFmpeg进程
@@ -508,9 +668,6 @@ class VideoRenderer:
                                     
                                     # 报告进度
                                     report_progress()
-                                else:
-                                    logger.warning(f"批次 {batch_idx+1}/{total_batches} 中有帧处理失败")
-                        
                         except Exception as e:
                             logger.error(f"处理批次 {batch_idx+1}/{total_batches} 时出错: {str(e)}\n{traceback.format_exc()}")
                             # 继续尝试处理其他批次
@@ -568,7 +725,7 @@ class VideoRenderer:
                                 logger.warning(f"FFmpeg: {err_str}")
                         except queue.Empty:
                             break
-                    
+
                     # 等待读取线程
                     stdout_thread.join(timeout=2)
                     stderr_thread.join(timeout=2)
@@ -593,26 +750,9 @@ class VideoRenderer:
                 try:
                     if 'proc' in locals() and proc.poll() is None:
                         proc.terminate()
-                        proc.wait(timeout=2)
                 except:
                     pass
-                return None
-                
-            finally:
-                # 清理共享内存
-                try:
-                    if shm_name:
-                        cleanup_shared_memory(shm_name)
-                except Exception as e:
-                    logger.warning(f"清理共享内存失败: {str(e)}")
-                
-                # 确保管道已关闭
-                try:
-                    if 'proc' in locals() and proc.poll() is None:
-                        proc.terminate()
-                except:
-                    pass
-                
+
                 # 垃圾回收
                 gc.collect()
         
@@ -631,6 +771,9 @@ class VideoRenderer:
                     audio_path=audio_path,
                     bg_color=bg_color,
                 )
+            except Exception as e2:
+                logger.error(f"回退渲染也失败: {str(e2)}")
+                return None
             finally:
                 # 恢复环境变量
                 if "NO_GPU" in os.environ:
