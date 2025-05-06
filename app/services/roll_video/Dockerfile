@@ -1,79 +1,152 @@
-### ===== 阶段 1：构建带 CUDA 的 FFmpeg =====
+###############################################################
+# 第一阶段: 编译支持NVIDIA GPU的FFmpeg
+###############################################################
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS ffmpeg-builder
 
-# 设置非交互式环境和工作目录
 ENV DEBIAN_FRONTEND=noninteractive
 
-WORKDIR /build
-
+# 修改镜像源并安装FFmpeg编译所需的最小依赖
 RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' /etc/apt/sources.list && \
     apt-get update && apt-get install -y --no-install-recommends \
-    build-essential pkg-config yasm nasm wget git cmake \
-    libx264-dev libx265-dev libfdk-aac-dev libvpx-dev libass-dev libopus-dev \
-    libmp3lame-dev libvorbis-dev libfreetype6-dev libtheora-dev \
-    zlib1g-dev cuda-nvcc-12-4 cuda-nvrtc-12-4 cuda-nvrtc-dev-12-4 \
-    cuda-nvml-dev-12-4 cuda-command-line-tools-12-4 cuda-libraries-dev-12-4 \
-    ca-certificates && \
-    # 安装 cuDNN
-    wget https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz && \
-    tar -xf cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz && \
-    cp -r cudnn-linux-x86_64-8.9.4.25_cuda12-archive/lib/* /usr/local/cuda/lib64/ && \
-    cp -r cudnn-linux-x86_64-8.9.4.25_cuda12-archive/include/* /usr/local/cuda/include/ && \
-    rm -rf cudnn* && \
-    ldconfig && \
-    # 编译 nv-codec-headers
-    git clone https://github.com/FFmpeg/nv-codec-headers.git && \
-    cd nv-codec-headers && git checkout sdk/12.0 && make && make install && \
-    cd /build && \
-    # 下载并构建 FFmpeg
-    wget https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz && \
-    tar -xf ffmpeg-7.1.tar.gz && cd ffmpeg-7.1 && \
-    ./configure \
-      --prefix=/ffmpeg-build \
-      --disable-debug \
-      --disable-doc \
-      --disable-ffplay \
-      --enable-shared \
-      --enable-gpl --enable-nonfree \
-      --enable-cuda --enable-cuvid --enable-nvenc --enable-libnpp \
-      --enable-libx264 --enable-libx265 --enable-libfdk-aac --enable-libvpx \
-      --enable-libmp3lame --enable-libopus --enable-libvorbis \
-      --enable-libfreetype --enable-libass \
-      --extra-cflags="-I/usr/local/cuda/include" \
-      --extra-ldflags="-L/usr/local/cuda/lib64" && \
-    make -j$(nproc) && make install
+    build-essential wget pkg-config yasm nasm \
+    libx264-dev libx265-dev libvpx-dev libfdk-aac-dev \
+    libva-dev libvdpau-dev git ca-certificates \
+    zlib1g-dev libass-dev libmp3lame-dev libopus-dev \
+    && apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-### ===== 阶段 2：运行环境 + Python 服务端 =====
+# 安装nv-codec-headers
+RUN git clone --depth 1 https://github.com/FFmpeg/nv-codec-headers.git && \
+    cd nv-codec-headers && \
+    git checkout sdk/12.0 && \
+    make -j$(nproc) && \
+    make install && \
+    cd .. && rm -rf nv-codec-headers
+
+# 编译FFmpeg
+RUN mkdir -p /tmp/ffmpeg_sources && \
+    cd /tmp/ffmpeg_sources && \
+    wget -O ffmpeg-7.1.tar.gz https://ffmpeg.org/releases/ffmpeg-7.1.tar.gz && \
+    tar xvf ffmpeg-7.1.tar.gz && \
+    cd ffmpeg-7.1 && \
+    PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/cuda/lib64/pkgconfig" \
+    ./configure \
+    --prefix=/usr/local \
+    --disable-debug \
+    --disable-doc \
+    --disable-ffplay \
+    --enable-shared \
+    --enable-gpl \
+    --enable-nonfree \
+    --enable-libfdk-aac \
+    --enable-libx264 \
+    --enable-libx265 \
+    --enable-cuda \
+    --enable-cuda-llvm \
+    --enable-cuvid \
+    --enable-nvenc \
+    --enable-libnpp \
+    --enable-pthreads \
+    --extra-cflags="-I/usr/local/cuda/include -I/usr/local/include" \
+    --extra-ldflags="-L/usr/local/cuda/lib64 -L/usr/local/lib" \
+    --extra-libs="-lpthread -lm -lcuda -lcudart" && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
+
+###############################################################
+# 第二阶段: 安装cuDNN
+###############################################################
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS cudnn-builder
+
+RUN mkdir -p /cudnn-install
+WORKDIR /cudnn-install
+
+# 下载和安装cuDNN
+RUN apt-get update && apt-get install -y --no-install-recommends wget && \
+    wget --no-check-certificate https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz && \
+    mkdir -p /cudnn-extract && \
+    tar -xf cudnn-linux-x86_64-8.9.4.25_cuda12-archive.tar.xz -C /cudnn-extract && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+###############################################################
+# 第三阶段: Python依赖 (CPU版本)
+###############################################################
+FROM python:3.10-slim AS python-deps
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 安装Python依赖
+RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple \
+    ffmpeg-python==0.2.0 \
+    opencv-python-headless==4.11.0.86 \
+    numpy==1.26.4 \
+    flask==3.1.0 \
+    gunicorn==23.0.0 \
+    pillow==10.4.0 \
+    tqdm==4.67.1 \
+    moviepy==2.1.2 \
+    psutil==7.0.0 \
+    && find /usr/local/lib/python3.*/site-packages/ -name "*.pyc" -delete \
+    && find /usr/local/lib/python3.*/site-packages/ -name "__pycache__" -delete
+
+###############################################################
+# 最终阶段: 组装最终镜像
+###############################################################
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/usr/local/cuda/bin:${PATH}" \
     LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/lib:${LD_LIBRARY_PATH}" \
     CUDA_HOME="/usr/local/cuda" \
+    CUDA_PATH="/usr/local/cuda" \
+    FFMPEG_BINARY="/usr/local/bin/ffmpeg" \
     NVIDIA_VISIBLE_DEVICES=all \
-    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility,graphics
+    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility,graphics \
+    NVIDIA_REQUIRE_CUDA="cuda>=12.0"
 
 WORKDIR /app
 
-# 安装运行环境依赖和 Python 3
+# 安装运行时必要的包，尽量精简
 RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' /etc/apt/sources.list && \
     apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-dev libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 \
-    libxrender1 wget curl unzip pciutils net-tools supervisor && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+    python3-dev \
+    python3-pip \
+    python3-setuptools \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libglib2.0-0 \
+    nvidia-driver-525-server \
+    && apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# 拷贝编译好的 FFmpeg 二进制
-COPY --from=ffmpeg-builder /ffmpeg-build/ /usr/local/
+# 从cuDNN构建阶段复制文件
+COPY --from=cudnn-builder /cudnn-extract/cudnn-linux-x86_64-8.9.4.25_cuda12-archive/lib/* /usr/local/cuda/lib64/
+COPY --from=cudnn-builder /cudnn-extract/cudnn-linux-x86_64-8.9.4.25_cuda12-archive/include/* /usr/local/cuda/include/
 
-# 安装 Python 依赖（注意已用阿里云源）
-RUN pip3 install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple -r dockerfile-requirements.txt
+# 从FFmpeg构建阶段复制文件
+COPY --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/
+COPY --from=ffmpeg-builder /usr/local/bin/ffprobe /usr/local/bin/
+COPY --from=ffmpeg-builder /usr/local/lib/lib*so* /usr/local/lib/
+
+# 从Python依赖阶段复制文件
+COPY --from=python-deps /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/dist-packages
+
+# 安装NVIDIA ML Python包和TensorFlow
+RUN pip3 install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple -r dockerfile-requirements.txt \
+    && find /usr/local/lib/python3.*/dist-packages/ -name "*.pyc" -delete \
+    && find /usr/local/lib/python3.*/dist-packages/ -name "__pycache__" -delete
+
+# 设置动态链接库配置
+RUN ldconfig
+
+# 验证FFmpeg是否支持NVIDIA编码器
+# RUN ffmpeg -encoders | grep nvenc || echo "Warning: NVENC support not found"
 
 # 暴露API端口
 EXPOSE 5000
-
-# 启动命令
-# 5. 用 supervisor 启动主程序和 celery 队列
-# CMD ["supervisord", "-c", "/roll-video/supervisor-conf/supervisord.conf"]
 
 # 启动命令
 # CMD ["python3", "/app/server/api_server.py"]
