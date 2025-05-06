@@ -65,6 +65,16 @@ class VideoRenderer:
         self.memory_pool = None
         self.frame_counter = 0
         self.total_frames = 0
+        
+        # 性能统计数据
+        self.performance_stats = {
+            "preparation_time": 0,     # 准备阶段时间
+            "frame_processing_time": 0, # 帧处理阶段时间
+            "encoding_time": 0,         # 视频编码阶段时间
+            "total_time": 0,            # 总时间
+            "frames_processed": 0,      # 处理的帧数
+            "fps": 0,                   # 平均每秒处理的帧数
+        }
 
     def _init_memory_pool(self, channels=3, pool_size=120):
         """
@@ -153,307 +163,145 @@ class VideoRenderer:
 
     def create_scrolling_video_optimized(
         self,
-        image: Image.Image,
-        output_path: str,
-        text_actual_height: int,
-        transparency_required: bool,
-        preferred_codec: str,
-        audio_path: Optional[str] = None,
-        bg_color: Optional[Tuple[int, int, int, int]] = None,
-    ) -> str:
-        """创建滚动视频 - 高性能优化版 (共享内存 + 异步处理)"""
-
-        # 1. 图像预处理优化
-        if transparency_required:
-            img_array = np.ascontiguousarray(np.array(image))
-            channels = 4
-        else:
-            # 直接转为RGB以避免后续转换开销
-            if image.mode == "RGBA":
-                image = image.convert("RGB")
-            img_array = np.ascontiguousarray(np.array(image))
-            channels = 3
-
-        img_height, img_width = img_array.shape[:2]
-
-        # 2. 滚动参数计算 - 减少中间变量
-        scroll_distance = max(text_actual_height, img_height - self.height)
-        scroll_frames = (
-            int(scroll_distance / self.scroll_speed) if self.scroll_speed > 0 else 0
-        )
-
-        # 确保短文本有合理滚动时间
-        min_scroll_frames = self.fps * 8
-        if scroll_frames < min_scroll_frames and scroll_frames > 0:
-            adjusted_speed = scroll_distance / min_scroll_frames
-            if adjusted_speed < self.scroll_speed:
-                logger.info(
-                    f"文本较短，减慢滚动速度: {self.scroll_speed:.2f} → {adjusted_speed:.2f} 像素/帧"
-                )
-                self.scroll_speed = adjusted_speed
-                scroll_frames = min_scroll_frames
-
-        padding_frames_start = int(self.fps * 2.0)
-        padding_frames_end = int(self.fps * 2.0)
-        total_frames = padding_frames_start + scroll_frames + padding_frames_end
-        self.total_frames = total_frames
-        duration = total_frames / self.fps
-
-        logger.info(
-            f"文本高:{text_actual_height}, 图像高:{img_height}, 视频高:{self.height}"
-        )
-        logger.info(
-            f"滚动距离:{scroll_distance}, 滚动帧:{scroll_frames}, 总帧:{total_frames}, 时长:{duration:.2f}s"
-        )
-        logger.info(
-            f"输出:{output_path}, 透明:{transparency_required}, 首选编码器:{preferred_codec}"
-        )
-
-        # 创建输出目录
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-
-        # 删除旧的输出文件
-        if os.path.exists(output_path):
-            try:
-                os.remove(output_path)
-                logger.info(f"已删除旧的输出文件: {output_path}")
-            except Exception as e:
-                logger.warning(f"删除旧输出文件失败: {e}")
-
-        # 3. 确定最适合的处理模式
-        is_macos = platform.system() == "Darwin"
-        is_windows = platform.system() == "Windows"
-        is_linux = platform.system() == "Linux"
-
-        # 根据平台选择最佳编码器
-        final_codec = preferred_codec
+        image,
+        output_path,
+        text_actual_height,
+        transparency_required=False,
+        preferred_codec="libx264",
+        audio_path=None,
+        bg_color=(255, 255, 255),
+    ):
+        """
+        使用优化版本创建滚动视频，支持直接传入图像
         
-        # 检查是否强制关闭GPU
-        if "NO_GPU" in os.environ:
-            if preferred_codec.endswith("_nvenc") or preferred_codec.endswith("_qsv"):
-                final_codec = "libx264"
-                logger.info("环境变量禁用GPU，切换到CPU编码器")
-                
-        # 编码器和输出参数
-        if transparency_required:
-            # 透明背景需要特殊处理
-            pix_fmt = "rgba"
-            if preferred_codec == "prores_ks":
-                # ProRes 4444保留Alpha
-                codec_params = [
-                    "-c:v", "prores_ks", 
-                    "-profile:v", "4444",
-                    "-pix_fmt", "yuva444p10le", 
-                    "-alpha_bits", "16",
-                    "-vendor", "ap10", 
-                    "-colorspace", "bt709",
-                ]
-                # .mov容器
-                if not output_path.lower().endswith(".mov"):
-                    output_path = os.path.splitext(output_path)[0] + ".mov"
-                    logger.info(f"透明视频必须使用.mov格式，已修改路径: {output_path}")
-            else:
-                # 无法使用其他编码器处理透明度，强制使用ProRes
-                logger.warning(f"透明视频不支持编码器 {preferred_codec}，强制使用ProRes")
-                codec_params = [
-                    "-c:v", "prores_ks", 
-                    "-profile:v", "4444",
-                    "-pix_fmt", "yuva444p10le", 
-                    "-alpha_bits", "16",
-                    "-vendor", "ap10", 
-                    "-colorspace", "bt709",
-                ]
-                # .mov容器
-                if not output_path.lower().endswith(".mov"):
-                    output_path = os.path.splitext(output_path)[0] + ".mov"
-                    logger.info(f"透明视频必须使用.mov格式，已修改路径: {output_path}")
-        else:
-            # 非透明视频，尝试优化编码器
-            pix_fmt = "rgb24"
-            
-            # 根据平台和编码器选择参数
-            if preferred_codec == "h264_nvenc":
-                # NVIDIA GPU加速
-                if is_windows or is_linux:
-                    codec_params = [
-                        "-c:v", "h264_nvenc",
-                        "-preset", "p4",
-                        "-rc", "vbr",
-                        "-cq", "23",
-                        "-b:v", "5M",
-                        "-pix_fmt", "yuv420p",
-                        "-movflags", "+faststart",
-                    ]
-                else:
-                    # 不支持NVIDIA，回退到CPU
-                    logger.info("平台不支持NVIDIA编码，切换到libx264")
-                    codec_params = [
-                        "-c:v", "libx264",
-                        "-preset", "fast",
-                        "-crf", "23",
-                        "-pix_fmt", "yuv420p",
-                        "-movflags", "+faststart",
-                    ]
-            elif preferred_codec == "h264_qsv":
-                # Intel QuickSync加速
-                if is_windows or is_linux:
-                    codec_params = [
-                        "-c:v", "h264_qsv",
-                        "-preset", "medium",
-                        "-b:v", "5M",
-                        "-pix_fmt", "yuv420p",
-                        "-movflags", "+faststart",
-                    ]
-                else:
-                    # 不支持QSV，回退到CPU
-                    logger.info("平台不支持Intel QuickSync，切换到libx264")
-                    codec_params = [
-                        "-c:v", "libx264",
-                        "-preset", "fast",
-                        "-crf", "23",
-                        "-pix_fmt", "yuv420p",
-                        "-movflags", "+faststart",
-                    ]
-            elif preferred_codec == "h264_videotoolbox" and is_macos:
-                # macOS VideoToolbox加速
-                codec_params = [
-                    "-c:v", "h264_videotoolbox",
-                    "-b:v", "5M",
-                    "-allow_sw", "1",
-                    "-pix_fmt", "yuv420p",
-                    "-movflags", "+faststart",
-                ]
-            elif preferred_codec == "prores_ks":
-                # ProRes (非透明)
-                codec_params = [
-                    "-c:v", "prores_ks",
-                    "-profile:v", "3",  # ProRes 422 HQ
-                    "-pix_fmt", "yuv422p10le",
-                    "-vendor", "ap10",
-                    "-colorspace", "bt709",
-                ]
-                # .mov容器
-                if not output_path.lower().endswith(".mov"):
-                    output_path = os.path.splitext(output_path)[0] + ".mov"
-            else:
-                # 默认使用libx264 (高质量CPU编码)
-                codec_params = [
-                    "-c:v", "libx264",
-                    "-preset", "medium",  # 平衡速度和质量的预设
-                    "-crf", "23",         # 恒定质量因子 (0-51, 越低质量越高)
-                    "-pix_fmt", "yuv420p", # 兼容大多数播放器
-                    "-movflags", "+faststart", # MP4优化
-                ]
-        
-        # 组合核心参数
-        ffmpeg_cmd = self._get_ffmpeg_command(
-            output_path=output_path,
-            pix_fmt=pix_fmt,
-            codec_and_output_params=codec_params,
-            audio_path=audio_path,
-        )
-        
-        # 记录实际命令行
-        cmd_str = " ".join(ffmpeg_cmd)
-        logger.info(f"FFmpeg命令: {cmd_str}")
-
-        # 4. 共享内存初始化
-        logger.info(f"初始化共享内存并上传图像数据 ({img_width}x{img_height}x{channels})...")
-        self._init_memory_pool(channels=channels, pool_size=min(30, total_frames))
-
-        shm = None
-        shm_name = None
-        mp_context = mp.get_context("spawn")  # 使用spawn避免fork问题
-
+        参数:
+            image: 要滚动显示的图像（PIL.Image或NumPy数组）
+            output_path: 输出视频文件路径
+            text_actual_height: 文本实际高度（像素）
+            transparency_required: 是否需要透明度支持
+            preferred_codec: 首选视频编码器
+            audio_path: 可选音频文件路径
+            bg_color: 背景颜色元组(R,G,B)
+        """
         try:
-            # 创建共享内存
-            try:
-                shm_name = f"shm_image_{int(time.time())}_{random.randint(1000, 9999)}"
-                shm = shared_memory.SharedMemory(name=shm_name, create=True, size=img_array.nbytes)
+            # 初始化性能统计
+            self.performance_stats = {
+                "preparation_time": 0,   # 准备阶段时间
+                "frame_processing_time": 0,  # 帧处理时间
+                "encoding_time": 0,      # 编码时间
+                "total_time": 0,         # 总时间
+                "frames_processed": 0,   # 处理的帧数
+                "fps": 0                 # 平均每秒帧数
+            }
+            
+            # 记录总开始时间
+            preparation_start_time = time.time()
+            total_start_time = preparation_start_time
+            
+            # 1. 视频参数准备
+            logger.info(f"准备创建滚动视频: {output_path}")
+            
+            # 将图像转换为numpy数组
+            if isinstance(image, np.ndarray):
+                img_array = image.copy()
+                if len(img_array.shape) == 2:  # 扩展成3通道
+                    img_array = np.stack([img_array] * 3, axis=2)
+            else:  # PIL.Image
+                img_array = np.array(image)
                 
-                # 创建Numpy数组视图并复制数据
-                shm_array = np.ndarray(img_array.shape, dtype=img_array.dtype, buffer=shm.buf)
-                np.copyto(shm_array, img_array)
-                
-                logger.info(f"已将图像数据复制到共享内存 {shm_name}")
-                
-                # 储存共享内存信息
-                shared_dict = {
-                    'shm_name': shm_name,
-                    'img_shape': img_array.shape,
-                    'dtype': img_array.dtype.name,
-                }
-                
-                # 初始化本进程的共享内存
-                init_shared_memory(shared_dict)
-                
-                # 测试共享内存访问
-                test_result = test_worker_shared_memory(shared_dict)
-                if not test_result:
-                    logger.warning("主进程中测试共享内存失败，尝试重建...")
-                    # 清理并重建
-                    cleanup_shared_memory(shm_name)
-                    time.sleep(0.5)
-                    
-                    # 重建共享内存
-                    shm = shared_memory.SharedMemory(name=shm_name, create=True, size=img_array.nbytes)
-                    shm_array = np.ndarray(img_array.shape, dtype=img_array.dtype, buffer=shm.buf)
-                    np.copyto(shm_array, img_array)
-                    
-                    # 更新共享内存信息
-                    shared_dict = {
-                        'shm_name': shm_name,
-                        'img_shape': img_array.shape,
-                        'dtype': img_array.dtype.name,
-                    }
-                    
-                    # 再次初始化
-                    init_shared_memory(shared_dict)
-                    logger.info("共享内存已重建")
-                    
-            except Exception as e:
-                logger.error(f"创建共享内存失败: {str(e)}")
-                # 尝试清理后重试一次
-                try:
-                    if shm_name:
-                        cleanup_shared_memory(shm_name)
-                except:
+            # 确保图像是RGBA或RGB
+            if img_array.shape[2] == 4:  # RGBA
+                # 有Alpha通道，保留透明度
+                if transparency_required:
+                    # 不改变，使用RGBA
                     pass
-                
-                # 重新生成随机名称避免冲突
-                shm_name = f"shm_retry_{int(time.time())}_{random.randint(1000, 9999)}"
-                time.sleep(0.5)  # 等待一下以确保清理完成
-                
-                try:
-                    # 第二次尝试创建共享内存
-                    shm = shared_memory.SharedMemory(name=shm_name, create=True, size=img_array.nbytes)
-                    shm_array = np.ndarray(img_array.shape, dtype=img_array.dtype, buffer=shm.buf)
-                    np.copyto(shm_array, img_array)
+                else:
+                    # 将RGBA转换为RGB（用背景色填充）
+                    rgb_array = np.zeros((img_array.shape[0], img_array.shape[1], 3), dtype=np.uint8)
+                    alpha = img_array[:, :, 3].astype(float) / 255.0
                     
-                    # 储存共享内存信息
-                    shared_dict = {
-                        'shm_name': shm_name,
-                        'img_shape': img_array.shape,
-                        'dtype': img_array.dtype.name,
-                    }
+                    # 背景色
+                    bg_r, bg_g, bg_b = bg_color
                     
-                    # 再次初始化
-                    init_shared_memory(shared_dict)
-                    logger.info("第二次尝试创建共享内存成功")
+                    # 将RGB通道从RGBA转换出来，使用背景色填充
+                    rgb_array[:, :, 0] = (img_array[:, :, 0] * alpha + bg_r * (1 - alpha)).astype(np.uint8)
+                    rgb_array[:, :, 1] = (img_array[:, :, 1] * alpha + bg_g * (1 - alpha)).astype(np.uint8)
+                    rgb_array[:, :, 2] = (img_array[:, :, 2] * alpha + bg_b * (1 - alpha)).astype(np.uint8)
                     
-                except Exception as e2:
-                    logger.error(f"第二次尝试创建共享内存也失败: {str(e2)}")
-                    # 如果共享内存无法使用，回退到非共享内存方法
-                    logger.info("共享内存无法使用，回退到标准CPU处理")
-                    return self.create_scrolling_video(
-                        image=image,
-                        output_path=output_path,
-                        text_actual_height=text_actual_height,
-                        transparency_required=transparency_required,
-                        preferred_codec=preferred_codec,
-                        audio_path=audio_path,
-                        bg_color=bg_color
+                    img_array = rgb_array
+            
+            # 获取图像尺寸和通道数
+            img_height, img_width = img_array.shape[:2]
+            channels = img_array.shape[2] if len(img_array.shape) > 2 else 1
+            
+            # 2. 计算滚动参数
+            scroll_height = img_height
+            fps = 30
+            scroll_duration = max(int(scroll_height / 60), 10)  # 至少10秒
+            
+            # 至少滚动100像素，确保内容可见
+            if scroll_height < 100:
+                logger.warning(f"图像高度太小 ({scroll_height}px)，已调整为最小高度100px")
+                scroll_height = 100
+            
+            # 每帧滚动的像素数
+            pixels_per_second = scroll_height / scroll_duration
+            pixels_per_frame = pixels_per_second / fps
+            
+            # 视频高度 = 实际文本高度（可视区域）
+            video_height = min(text_actual_height, 720)  # 限制最大高度
+            
+            # 计算总帧数
+            total_frames = int(fps * scroll_duration) + 1
+            
+            # 3. 确定编码器参数
+            codec_params, pix_fmt = self._get_codec_parameters(
+                preferred_codec, transparency_required, channels
+            )
+
+            # 4. 滚动参数计算 - 减少中间变量
+            scroll_distance = max(text_actual_height, img_height - self.height)
+            scroll_frames = (
+                int(scroll_distance / self.scroll_speed) if self.scroll_speed > 0 else 0
+            )
+
+            # 确保短文本有合理滚动时间
+            min_scroll_frames = self.fps * 8
+            if scroll_frames < min_scroll_frames and scroll_frames > 0:
+                adjusted_speed = scroll_distance / min_scroll_frames
+                if adjusted_speed < self.scroll_speed:
+                    logger.info(
+                        f"文本较短，减慢滚动速度: {self.scroll_speed:.2f} → {adjusted_speed:.2f} 像素/帧"
                     )
+                    self.scroll_speed = adjusted_speed
+                    scroll_frames = min_scroll_frames
+
+            padding_frames_start = int(self.fps * 2.0)
+            padding_frames_end = int(self.fps * 2.0)
+            total_frames = padding_frames_start + scroll_frames + padding_frames_end
+            self.total_frames = total_frames
+            duration = total_frames / self.fps
+
+            logger.info(
+                f"文本高:{text_actual_height}, 图像高:{img_height}, 视频高:{self.height}"
+            )
+            logger.info(
+                f"滚动距离:{scroll_distance}, 滚动帧:{scroll_frames}, 总帧:{total_frames}, 时长:{duration:.2f}s"
+            )
+            logger.info(
+                f"输出:{output_path}, 透明:{transparency_required}, 首选编码器:{preferred_codec}"
+            )
+
+            # 创建输出目录
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+            # 删除旧的输出文件
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                    logger.info(f"已删除旧的输出文件: {output_path}")
+                except Exception as e:
+                    logger.warning(f"删除旧输出文件失败: {e}")
 
             # 5. 创建子进程池
             # 核心数和池大小计算
@@ -461,6 +309,11 @@ class VideoRenderer:
             pool_size = max(2, min(cpu_count - 1, 8))  # 至少2个，最多8个，保留1个核心给主进程
 
             logger.info(f"创建{pool_size}个进程的进程池（共享内存：{shm_name}）")
+            
+            # 记录准备阶段结束，帧处理阶段开始
+            preparation_end_time = time.time()
+            self.performance_stats["preparation_time"] = preparation_end_time - preparation_start_time
+            logger.info(f"准备阶段完成，用时: {self.performance_stats['preparation_time']:.2f}秒")
             
             # 创建管道和队列
             read_stdout, write_stdout = os.pipe()
@@ -472,6 +325,7 @@ class VideoRenderer:
             try:
                 # 创建进程池（使用spawn确保共享内存兼容性）
                 with mp_context.Pool(processes=pool_size, initializer=init_worker, initargs=(shared_dict,)) as pool:
+                    
                     # 启动FFmpeg进程
                     proc = subprocess.Popen(
                         ffmpeg_cmd,
@@ -480,18 +334,9 @@ class VideoRenderer:
                         stderr=subprocess.PIPE,
                         bufsize=10 * 1024 * 1024,  # 大缓冲区
                     )
-
-                    # 启动读取线程
-                    stdout_thread = threading.Thread(
-                        target=self._reader_thread, args=(proc.stdout, stdout_queue)
-                    )
-                    stderr_thread = threading.Thread(
-                        target=self._reader_thread, args=(proc.stderr, stderr_queue)
-                    )
-                    stdout_thread.daemon = True
-                    stderr_thread.daemon = True
-                    stdout_thread.start()
-                    stderr_thread.start()
+                    
+                    # 帧处理阶段正式开始（从FFmpeg启动开始计时）
+                    frame_processing_start_time = time.time()
 
                     # 创建帧任务列表
                     frame_tasks = []
@@ -538,6 +383,15 @@ class VideoRenderer:
                     # 异步处理帧
                     logger.info(f"开始处理{len(frame_tasks)}帧...")
                     
+                    # 创建进度条
+                    pbar = tqdm(
+                        total=len(frame_tasks), 
+                        desc=f"渲染视频 ({os.path.basename(output_path)})", 
+                        unit="帧",
+                        bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]',
+                        postfix={"fps": 0.0, "eta": "未知"}
+                    )
+                    
                     # 进度报告函数
                     last_report_time = time.time()
                     frames_processed = 0
@@ -546,9 +400,9 @@ class VideoRenderer:
                     watchdog_event = threading.Event()
                     
                     def report_progress():
-                        nonlocal last_report_time, frames_processed, processing_start_time
+                        nonlocal last_report_time, frames_processed, processing_start_time, pbar
                         current_time = time.time()
-                        if current_time - last_report_time >= 2.0:  # 每2秒更新一次
+                        if current_time - last_report_time >= 0.5:  # 更频繁更新，每0.5秒一次
                             elapsed = current_time - processing_start_time
                             fps = frames_processed / elapsed if elapsed > 0 else 0
                             percent = 100.0 * frames_processed / total_frames if total_frames > 0 else 0
@@ -557,13 +411,23 @@ class VideoRenderer:
                             if fps > 0:
                                 remaining_frames = total_frames - frames_processed
                                 eta = remaining_frames / fps
-                                eta_str = f", 预计剩余: {eta:.1f}秒" if eta > 0 else ""
+                                eta_str = f"{eta:.1f}秒"
                             else:
-                                eta_str = ""
+                                eta = 0
+                                eta_str = "未知"
+                            
+                            # 更新进度条
+                            pbar.set_postfix(
+                                fps=f"{fps:.1f}", 
+                                eta=eta_str,
+                                完成=f"{percent:.1f}%"
+                            )
+                            pbar.n = frames_processed
+                            pbar.refresh()
                                 
-                            logger.info(
+                            logger.debug(
                                 f"进度: {frames_processed}/{total_frames} 帧 "
-                                f"({percent:.1f}%, {fps:.1f} fps{eta_str})"
+                                f"({percent:.1f}%, {fps:.1f} fps, 预计剩余: {eta_str})"
                             )
                             last_report_time = current_time
                             
@@ -639,6 +503,9 @@ class VideoRenderer:
                                     # 更新进度
                                     frames_processed += 1
                                     
+                                    # 更新进度条
+                                    pbar.update(1)
+                                    
                                     # 报告进度
                                     report_progress()
                                 else:
@@ -665,8 +532,29 @@ class VideoRenderer:
                     # 6. 完成处理，关闭stdin管道
                     proc.stdin.close()
                     
+                    # 记录帧处理阶段结束，编码阶段开始
+                    frame_processing_end_time = time.time()
+                    self.performance_stats["frame_processing_time"] = frame_processing_end_time - processing_start_time
+                    self.performance_stats["frames_processed"] = frames_processed
+                    
+                    encoding_start_time = time.time()
+                    logger.info(f"帧处理阶段完成，用时: {self.performance_stats['frame_processing_time']:.2f}秒，平均: {frames_processed / self.performance_stats['frame_processing_time']:.2f}帧/秒")
+                    logger.info(f"等待FFmpeg完成编码...")
+                    
                     # 等待FFmpeg完成
                     return_code = proc.wait()
+                    
+                    # 记录编码阶段结束
+                    encoding_end_time = time.time()
+                    self.performance_stats["encoding_time"] = encoding_end_time - encoding_start_time
+                    
+                    # 记录总时间
+                    total_end_time = time.time()
+                    self.performance_stats["total_time"] = total_end_time - total_start_time
+                    self.performance_stats["fps"] = frames_processed / self.performance_stats["frame_processing_time"] if self.performance_stats["frame_processing_time"] > 0 else 0
+                    
+                    # 关闭进度条
+                    pbar.close()
                     
                     # 读取剩余输出
                     while True:
@@ -690,10 +578,14 @@ class VideoRenderer:
                         logger.error(f"FFmpeg进程异常退出，代码: {return_code}")
                         return None
                     else:
-                        logger.info(
-                            f"视频处理完成，用时: {time.time() - processing_start_time:.2f}秒，"
-                            f"实际处理: {frames_processed}/{total_frames}帧"
-                        )
+                        # 输出详细的性能统计报告
+                        logger.info("=" * 50)
+                        logger.info("视频渲染性能报告:")
+                        logger.info(f"1. 准备阶段: {self.performance_stats['preparation_time']:.2f}秒 ({self.performance_stats['preparation_time'] / self.performance_stats['total_time'] * 100:.1f}%)")
+                        logger.info(f"2. 帧处理阶段: {self.performance_stats['frame_processing_time']:.2f}秒 ({self.performance_stats['frame_processing_time'] / self.performance_stats['total_time'] * 100:.1f}%) - {self.performance_stats['fps']:.2f}帧/秒")
+                        logger.info(f"3. 视频编码阶段: {self.performance_stats['encoding_time']:.2f}秒 ({self.performance_stats['encoding_time'] / self.performance_stats['total_time'] * 100:.1f}%)")
+                        logger.info(f"总时间: {self.performance_stats['total_time']:.2f}秒，处理 {frames_processed} 帧")
+                        logger.info("=" * 50)
                 
             except Exception as e:
                 logger.error(f"处理视频时出错: {str(e)}\n{traceback.format_exc()}")
@@ -1098,8 +990,11 @@ class VideoRenderer:
                 raise e
 
             finally:
+                # 关闭进度条
+                if 'pbar' in locals():
+                    pbar.close()
+                    
                 # 清理
-                pbar.close()
                 _g_img_array = None
                 gc.collect()  # 强制垃圾回收
 

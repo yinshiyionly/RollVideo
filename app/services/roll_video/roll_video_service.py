@@ -2,8 +2,11 @@ import os
 import sys
 import logging
 import platform
+import time
+import traceback
+from datetime import datetime
 from typing import Dict, Tuple, List, Optional, Union
-from PIL import Image
+from PIL import Image, ImageFont, ImageDraw
 
 from .renderer.text_renderer import TextRenderer
 from .renderer.video_renderer import VideoRenderer
@@ -335,3 +338,331 @@ class RollVideoService:
                 "message": f"创建滚动视频失败: {str(e)}",
                 "output_path": None,
             }
+
+    def _generate_scrolling_text_image(self, text, font_path=None, font_size=36, fg_color=(255, 255, 255), bg_color=(0, 0, 0, 0), max_width=1280, align="left", spacing=8, padding=(40, 40, 40, 40), antialias=True):
+        """生成滚动文本的图像
+        
+        Args:
+            text: 要渲染的文本
+            font_path: 字体路径，如果为None则使用默认字体
+            font_size: 字体大小
+            fg_color: 前景色 (R, G, B) 或 (R, G, B, A)
+            bg_color: 背景色 (R, G, B) 或 (R, G, B, A)
+            max_width: 最大宽度
+            align: 对齐方式 "left", "center", 或 "right"
+            spacing: 行间距
+            padding: (左, 上, 右, 下) 填充像素
+            antialias: 是否使用抗锯齿
+            
+        Returns:
+            PIL.Image: 渲染后的文本图像
+        """
+        # 初始化性能统计
+        text_render_stats = {
+            "text_length": len(text),
+            "render_start_time": time.time(),
+            "render_time": 0
+        }
+        
+        logger.info(f"开始渲染文本 (长度: {text_render_stats['text_length']}字符)")
+        
+        try:
+            # 准备字体
+            if font_path:
+                font = self._load_font(font_path, font_size)
+            else:
+                logger.warning("未指定字体，使用默认字体")
+                # 使用PIL默认字体
+                font = ImageFont.load_default()
+            
+            # 初始空白图像用于测量文本
+            img = Image.new('RGBA', (1, 1), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            
+            # 拆分文本行
+            lines = text.split('\n')
+            
+            # 预处理各行文本宽度
+            line_sizes = []
+            for line in lines:
+                # 测量每行文本的大小
+                if hasattr(draw, 'textbbox'):  # PIL 9.2.0+
+                    bbox = draw.textbbox((0, 0), line, font=font)
+                    line_width = bbox[2] - bbox[0]
+                    line_height = bbox[3] - bbox[1]
+                else:  # 旧版PIL
+                    line_width, line_height = draw.textsize(line, font=font)
+                
+                line_sizes.append((line_width, line_height))
+            
+            # 计算最大宽度 (考虑最大宽度限制)
+            if max_width:
+                # 考虑左右填充
+                max_text_width = max_width - padding[0] - padding[2]
+                content_width = min(max(s[0] for s in line_sizes) if line_sizes else 0, max_text_width)
+            else:
+                content_width = max(s[0] for s in line_sizes) if line_sizes else 0
+            
+            # 获取单行最大高度
+            line_max_height = max(s[1] for s in line_sizes) if line_sizes else font_size
+            
+            # 计算总高度 (包括行间距)
+            total_height = sum(line_max_height for _ in lines)
+            if len(lines) > 1:
+                total_height += spacing * (len(lines) - 1)
+            
+            # 最终图像尺寸 (包括填充)
+            final_width = content_width + padding[0] + padding[2]
+            final_height = total_height + padding[1] + padding[3]
+            
+            # 创建最终图像
+            img = Image.new('RGBA', (final_width, final_height), bg_color)
+            draw = ImageDraw.Draw(img)
+            
+            # 当前垂直位置
+            y = padding[1]
+            
+            # 绘制每行文本
+            for i, line in enumerate(lines):
+                # 计算此行文本的水平位置
+                if align == 'left':
+                    x = padding[0]
+                elif align == 'center':
+                    x = padding[0] + (content_width - line_sizes[i][0]) // 2
+                elif align == 'right':
+                    x = padding[0] + content_width - line_sizes[i][0]
+                else:
+                    x = padding[0]  # 默认左对齐
+                
+                # 绘制文本
+                if antialias:
+                    # 使用内置抗锯齿
+                    draw.text((x, y), line, font=font, fill=fg_color)
+                else:
+                    # 禁用抗锯齿
+                    draw.text((x, y), line, font=font, fill=fg_color)
+                
+                # 移动到下一行
+                y += line_sizes[i][1] + spacing
+            
+            # 记录实际文本高度 (不含上下填充)
+            actual_text_height = total_height
+            
+            # 记录渲染时间
+            text_render_stats["render_time"] = time.time() - text_render_stats["render_start_time"]
+            logger.info(f"文本渲染完成: {text_render_stats['render_time']:.2f}秒，尺寸: {final_width}x{final_height}像素")
+            
+            return img, actual_text_height
+        
+        except Exception as e:
+            end_time = time.time()
+            text_render_stats["render_time"] = end_time - text_render_stats["render_start_time"]
+            logger.error(f"文本渲染失败，耗时: {text_render_stats['render_time']:.2f}秒，错误: {str(e)}")
+            raise
+
+    def _draw_background_rectangle(self, img, x, y, w, h, fill, outline=None, radius=0):
+        """绘制背景矩形，支持圆角"""
+        # 创建绘图对象
+        draw = ImageDraw.Draw(img)
+        
+        if radius <= 0:
+            # 无圆角，直接绘制矩形
+            draw.rectangle([x, y, x + w, y + h], fill=fill, outline=outline)
+            return
+        
+        # 绘制圆角矩形
+        # 四个角的圆弧
+        draw.rectangle([x + radius, y, x + w - radius, y + h], fill=fill, outline=None)
+        draw.rectangle([x, y + radius, x + w, y + h - radius], fill=fill, outline=None)
+        
+        # 左上角
+        draw.pieslice([x, y, x + radius * 2, y + radius * 2], 180, 270, fill=fill, outline=outline)
+        # 右上角
+        draw.pieslice([x + w - radius * 2, y, x + w, y + radius * 2], 270, 0, fill=fill, outline=outline)
+        # 右下角
+        draw.pieslice([x + w - radius * 2, y + h - radius * 2, x + w, y + h], 0, 90, fill=fill, outline=outline)
+        # 左下角
+        draw.pieslice([x, y + h - radius * 2, x + radius * 2, y + h], 90, 180, fill=fill, outline=outline)
+        
+        # 如果有轮廓
+        if outline:
+            # 绘制边框
+            radius = max(radius - 1, 0)  # 边框略小于填充
+            
+            # 上边框
+            draw.line([x + radius, y, x + w - radius, y], fill=outline)
+            # 右边框
+            draw.line([x + w, y + radius, x + w, y + h - radius], fill=outline)  
+            # 下边框
+            draw.line([x + w - radius, y + h, x + radius, y + h], fill=outline)
+            # 左边框
+            draw.line([x, y + h - radius, x, y + radius], fill=outline)
+            
+            # 左上角弧线
+            draw.arc([x, y, x + radius * 2, y + radius * 2], 180, 270, fill=outline)
+            # 右上角弧线
+            draw.arc([x + w - radius * 2, y, x + w, y + radius * 2], 270, 0, fill=outline)
+            # 右下角弧线
+            draw.arc([x + w - radius * 2, y + h - radius * 2, x + w, y + h], 0, 90, fill=outline)
+            # 左下角弧线
+            draw.arc([x, y + h - radius * 2, x + radius * 2, y + h], 90, 180, fill=outline)
+
+    def _load_font(self, font_path, font_size):
+        """加载字体
+        
+        Args:
+            font_path: 字体文件路径
+            font_size: 字体大小
+            
+        Returns:
+            PIL.ImageFont: 字体对象
+        """
+        try:
+            return ImageFont.truetype(font_path, font_size)
+        except Exception as e:
+            logger.error(f"无法加载字体 {font_path}: {str(e)}")
+            # 回退到默认字体
+            return ImageFont.load_default()
+
+    def create_scrolling_video(self, text, output_path=None, font_path=None, font_size=36, 
+                               fg_color=(255, 255, 255), bg_color=(0, 0, 0, 0), 
+                               align="left", line_spacing=8, padding=(40, 40, 40, 40),
+                               preferred_codec="libx264", audio_path=None):
+        """创建滚动字幕视频
+        
+        Args:
+            text: 要显示的文本内容
+            output_path: 输出文件路径 (如果为None则自动生成)
+            font_path: 字体文件路径 (如果为None则使用系统默认字体)
+            font_size: 字体大小
+            fg_color: 文本颜色 (R,G,B) 或 (R,G,B,A)
+            bg_color: 背景颜色 (R,G,B) 或 (R,G,B,A)
+            align: 对齐方式 ('left', 'center', 'right')
+            line_spacing: 行间距 (像素)
+            padding: 文本填充 (左,上,右,下) 像素
+            preferred_codec: 首选视频编码器
+            audio_path: 音频文件路径 (可选)
+            
+        Returns:
+            输出视频文件路径
+        """
+        # 初始化性能统计
+        self.performance_stats = {
+            "total_start_time": time.time(),  # 总开始时间
+            "text_render_time": 0,            # 文本渲染时间
+            "video_render_time": 0,           # 视频渲染时间
+            "total_time": 0                   # 总时间
+        }
+        
+        logger.info(f"开始创建滚动字幕视频...")
+        
+        try:
+            # 1. 生成滚动文本图像
+            text_render_start = time.time()
+            logger.info(f"正在渲染文本图像，长度: {len(text)} 字符")
+            
+            # 检查原始参数中是否有透明度设置
+            has_alpha = len(bg_color) == 4 and bg_color[3] < 255
+            transparency_required = has_alpha
+            
+            # 渲染文本到图像
+            text_img, text_actual_height = self._generate_scrolling_text_image(
+                text=text,
+                font_path=font_path,
+                font_size=font_size,
+                fg_color=fg_color,
+                bg_color=bg_color,
+                max_width=1280,  # 标准HD宽度
+                align=align,
+                spacing=line_spacing,
+                padding=padding
+            )
+            
+            # 记录文本渲染时间
+            text_render_end = time.time()
+            self.performance_stats["text_render_time"] = text_render_end - text_render_start
+            logger.info(f"文本渲染完成，耗时: {self.performance_stats['text_render_time']:.2f}秒")
+            
+            # 2. 创建视频渲染器
+            width = text_img.width
+            height = min(720, text_actual_height)  # 限制最大高度为720p
+            scroll_speed = 2  # 每帧滚动像素数
+            
+            video_render_start = time.time()
+            logger.info(f"创建视频渲染器: {width}x{height}, 滚动速度: {scroll_speed}像素/帧")
+            
+            renderer = VideoRenderer(
+                width=width,
+                height=height,
+                fps=30,
+                scroll_speed=scroll_speed
+            )
+            
+            # 3. 生成输出路径 (如果未提供)
+            if not output_path:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_folder = os.path.join(
+                    os.path.dirname(__file__), "output"
+                )
+                os.makedirs(output_folder, exist_ok=True)
+                output_path = os.path.join(
+                    output_folder, f"scrolling_text_{timestamp}.mp4"
+                )
+            
+            # 4. 渲染视频
+            logger.info(f"开始渲染视频: {output_path}")
+            rendered_path = renderer.create_scrolling_video_optimized(
+                image=text_img,
+                output_path=output_path,
+                text_actual_height=text_actual_height,
+                transparency_required=transparency_required,
+                preferred_codec=preferred_codec,
+                audio_path=audio_path,
+                bg_color=bg_color[:3] if len(bg_color) > 3 else bg_color  # 取RGB部分
+            )
+            
+            # 记录视频渲染时间
+            video_render_end = time.time()
+            self.performance_stats["video_render_time"] = video_render_end - video_render_start
+            
+            # 计算总时间
+            self.performance_stats["total_time"] = video_render_end - self.performance_stats["total_start_time"]
+            
+            # 合并渲染器的性能统计
+            if hasattr(renderer, 'performance_stats'):
+                self.performance_stats.update({
+                    "video_preparation_time": renderer.performance_stats.get("preparation_time", 0),
+                    "video_frame_processing_time": renderer.performance_stats.get("frame_processing_time", 0),
+                    "video_encoding_time": renderer.performance_stats.get("encoding_time", 0),
+                    "frames_processed": renderer.performance_stats.get("frames_processed", 0),
+                    "fps": renderer.performance_stats.get("fps", 0),
+                })
+            
+            # 输出综合性能报告
+            logger.info("\n" + "="*50)
+            logger.info("滚动视频生成性能统计:")
+            logger.info(f"1. 文本渲染阶段: {self.performance_stats['text_render_time']:.2f}秒 ({self.performance_stats['text_render_time']/self.performance_stats['total_time']*100:.1f}%)")
+            logger.info(f"2. 视频生成阶段: {self.performance_stats['video_render_time']:.2f}秒 ({self.performance_stats['video_render_time']/self.performance_stats['total_time']*100:.1f}%)")
+            
+            if "video_preparation_time" in self.performance_stats:
+                vp = self.performance_stats["video_preparation_time"]
+                vf = self.performance_stats["video_frame_processing_time"]
+                ve = self.performance_stats["video_encoding_time"]
+                
+                logger.info(f"   - 视频准备: {vp:.2f}秒 ({vp/self.performance_stats['video_render_time']*100:.1f}%)")
+                logger.info(f"   - 帧处理: {vf:.2f}秒 ({vf/self.performance_stats['video_render_time']*100:.1f}%) - {self.performance_stats['fps']:.1f}帧/秒")
+                logger.info(f"   - 视频编码: {ve:.2f}秒 ({ve/self.performance_stats['video_render_time']*100:.1f}%)")
+            
+            logger.info(f"总时间: {self.performance_stats['total_time']:.2f}秒")
+            if "frames_processed" in self.performance_stats:
+                logger.info(f"处理帧数: {self.performance_stats['frames_processed']}帧，平均: {self.performance_stats['fps']:.1f}帧/秒")
+            logger.info("="*50 + "\n")
+            
+            return rendered_path
+            
+        except Exception as e:
+            # 记录总时间（即使发生错误）
+            self.performance_stats["total_time"] = time.time() - self.performance_stats["total_start_time"]
+            logger.error(f"创建滚动视频失败 (总耗时: {self.performance_stats['total_time']:.2f}秒): {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
