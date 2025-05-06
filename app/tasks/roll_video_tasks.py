@@ -13,6 +13,33 @@ from app.config import settings
 # 初始化日志
 log = Logger('roll-video-celery')
 
+def _schedule_retry(task_id: str, video_url: str, retry_count: int, event_type: str, extra_data: dict = None):
+    """安排重试逻辑
+    
+    Args:
+        task_id: 任务ID
+        video_url: 视频URL
+        retry_count: 当前重试次数
+        event_type: 事件类型
+        extra_data: 额外数据
+    """
+    if retry_count < 3:
+        # 确定下次重试的延迟时间
+        delay_minutes = [5, 10, 30][retry_count]
+        delay_seconds = delay_minutes * 60
+        
+        log.info(f"将在{delay_minutes}分钟后重试推送事件: task_id={task_id}, retry_count={retry_count+1}")
+        
+        # 安排延迟任务
+        push_event_to_client.apply_async(
+            args=[task_id, video_url, retry_count + 1, event_type, extra_data],
+            countdown=delay_seconds
+        )
+        return True
+    else:
+        log.error(f"推送事件失败，已达到最大重试次数: task_id={task_id}")
+        return False
+
 @celery_app.task(name='app.tasks.roll_video_tasks.push_event_to_client', bind=True)
 def push_event_to_client(self, task_id: str, video_url: str, retry_count: int = 0, event_type: str = "video_generated", extra_data: dict = None):
     """向客户端推送事件
@@ -26,7 +53,7 @@ def push_event_to_client(self, task_id: str, video_url: str, retry_count: int = 
     """
     if not hasattr(settings, 'CLIENT_NOTIFY_URL') or not settings.CLIENT_NOTIFY_URL:
         log.warning(f"未配置CLIENT_NOTIFY_URL，无法推送事件")
-        return
+        return None
         
     log.info(f"开始向客户端推送事件: task_id={task_id}, event_type={event_type}, retry_count={retry_count}")
     
@@ -35,7 +62,7 @@ def push_event_to_client(self, task_id: str, video_url: str, retry_count: int = 
     task = task_db.get_task(task_id)
     if not task:
         log.error(f"推送事件失败，任务不存在: {task_id}")
-        return
+        return None
         
     # 构建推送数据
     payload = {
@@ -62,48 +89,33 @@ def push_event_to_client(self, task_id: str, video_url: str, retry_count: int = 
             headers={"Content-Type": "application/json"},
             timeout=10  # 10秒超时
         )
-        
+
         # 检查响应
-        if response.status_code == 200 and response.text.strip().lower() == 'success':
-            log.info(f"推送事件成功: task_id={task_id}")
-            return True
-            
-        log.warning(f"推送事件失败: status_code={response.status_code}, response={response.text}, task_id={task_id}")
+        try:
+            response_json = response.json()
+            if (response.status_code == 200 and 
+                response_json.get('message', '').lower() == 'success' and 
+                response_json.get('code') == 10000):
+                log.info(f"推送事件成功: task_id={task_id}")
+                return True
+
+            # 推送失败            
+            log.warning(f"推送事件失败: status_code={response.status_code}, response={response.text}, task_id={task_id}")
+
+        except Exception as e:
+            log.warning(f"推送事件异常: {str(e)}")
         
-        # 如果失败并且重试次数未达到最大值，则安排重试
-        if retry_count < 3:
-            # 确定下次重试的延迟时间
-            delay_minutes = [5, 10, 30][retry_count]
-            delay_seconds = delay_minutes * 60
-            
-            log.info(f"将在{delay_minutes}分钟后重试推送事件: task_id={task_id}, retry_count={retry_count+1}")
-            
-            # 安排延迟任务
-            push_event_to_client.apply_async(
-                args=[task_id, video_url, retry_count + 1, event_type, extra_data],
-                countdown=delay_seconds
-            )
-        else:
-            log.error(f"推送事件失败，已达到最大重试次数: task_id={task_id}")
+        # 使用公共方法处理重试逻辑
+        _schedule_retry(task_id, video_url, retry_count, event_type, extra_data)
+        return None
 
     except Exception as e:
         log.error(f"推送事件过程中发生异常: {str(e)}")
         
-        # 如果出现异常并且重试次数未达到最大值，则安排重试
-        if retry_count < 3:
-            # 确定下次重试的延迟时间
-            delay_minutes = [5, 10, 30][retry_count]
-            delay_seconds = delay_minutes * 60
-            
-            log.info(f"将在{delay_minutes}分钟后重试推送事件: task_id={task_id}, retry_count={retry_count+1}")
-            
-            # 安排延迟任务
-            push_event_to_client.apply_async(
-                args=[task_id, video_url, retry_count + 1, event_type, extra_data],
-                countdown=delay_seconds
-            )
-        else:
-            log.error(f"推送事件失败，已达到最大重试次数: task_id={task_id}")
+        # 使用公共方法处理重试逻辑
+        _schedule_retry(task_id, video_url, retry_count, event_type, extra_data)
+        return None
+
 
 @celery_app.task(name='app.tasks.roll_video_tasks.generate_roll_video_task', bind=True)
 def generate_roll_video_task(self, task_id: str):

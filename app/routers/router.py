@@ -42,15 +42,22 @@ async def create_task(request: TaskCreateRequest):
 
 
         # 构建任务参数
+        # task_data = {
+        #     "task_id": task_id,
+        #     "uid": request.uid,
+        #     "source": request.source,
+        #     "payload": {
+        #         **request.payload,  # 保留payload的所有其他字段
+        #         "text_length": len(request.payload.text),  # 添加文本长度统计
+        #         "text": None  # 将原text置为None或直接删除
+        #     }
+        # }
+
         task_data = {
             "task_id": task_id,
             "uid": request.uid,
             "source": request.source,
-            "payload": {
-                **request.payload,  # 保留payload的所有其他字段
-                "text_length": len(request.payload.text),  # 添加文本长度统计
-                "text": None  # 将原text置为None或直接删除
-            }
+            "payload": request.payload
         }
 
         # 记录参数

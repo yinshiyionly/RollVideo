@@ -3,11 +3,91 @@
 import numpy as np
 import logging
 import ctypes
+import multiprocessing as mp
+from multiprocessing import shared_memory
 
 logger = logging.getLogger(__name__)
 
 # 在多线程/多进程中共享的全局变量
 _g_img_array = None  # 全局共享的图像数组
+
+# 共享内存变量
+_shm = None  # 共享内存对象引用
+_shm_name = None  # 共享内存名称
+_shm_shape = None  # 图像形状
+_shm_dtype = np.uint8  # 数据类型
+
+def init_shared_memory(image_array):
+    """初始化共享内存并存储图像数据
+    
+    Args:
+        image_array: 源图像的NumPy数组
+        
+    Returns:
+        shared_memory_name: 共享内存段的名称
+        shape: 图像数组的形状
+    """
+    global _shm, _shm_name, _shm_shape
+    
+    # 获取数组信息
+    nbytes = image_array.nbytes
+    shape = image_array.shape
+    dtype = image_array.dtype
+    
+    # 创建共享内存段
+    shm = shared_memory.SharedMemory(create=True, size=nbytes)
+    
+    # 创建共享内存的NumPy视图并复制数据
+    shm_array = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+    np.copyto(shm_array, image_array)
+    
+    logger.info(f"创建共享内存: 大小={nbytes/(1024*1024):.2f}MB, 形状={shape}")
+    
+    # 保存引用以便稍后清理
+    _shm = shm
+    _shm_name = shm.name
+    _shm_shape = shape
+    
+    return shm.name, shape, dtype
+
+def cleanup_shared_memory():
+    """清理共享内存资源"""
+    global _shm
+    
+    if _shm is not None:
+        try:
+            logger.info(f"正在清理共享内存: {_shm.name}")
+            _shm.close()
+            _shm.unlink()
+            _shm = None
+        except Exception as e:
+            logger.error(f"清理共享内存失败: {e}")
+
+def init_worker(shm_name, shape, dtype):
+    """初始化工作进程，连接到共享内存
+    
+    Args:
+        shm_name: 共享内存段的名称
+        shape: 图像数组的形状
+        dtype: 数据类型
+    """
+    global _g_img_array, _shm_name, _shm_shape, _shm_dtype
+    
+    try:
+        # 保存共享内存信息
+        _shm_name = shm_name
+        _shm_shape = shape
+        _shm_dtype = dtype
+        
+        # 连接到现有共享内存
+        existing_shm = shared_memory.SharedMemory(name=shm_name)
+        
+        # 创建NumPy数组，它使用共享内存作为底层缓冲区
+        _g_img_array = np.ndarray(shape, dtype=dtype, buffer=existing_shm.buf)
+        
+        logger.debug(f"工作进程连接到共享内存: {shm_name}, 形状={shape}")
+    except Exception as e:
+        logger.error(f"工作进程共享内存初始化失败: {e}")
 
 def _process_frame(args):
     """多进程帧处理函数，高性能优化版本"""
@@ -140,6 +220,55 @@ def _process_frame_optimized(args):
     
     # 确保返回内存连续的帧数据 - 此步骤对于管道通信至关重要
     # 由于我们已经在创建时指定order='C'，这里可以省略额外的检查
+    return frame_idx, frame
+
+def _process_frame_optimized_shm(args):
+    """使用共享内存的极度优化帧处理函数"""
+    global _g_img_array
+    
+    # 如果_g_img_array为None，尝试重新连接到共享内存
+    if _g_img_array is None and _shm_name is not None:
+        try:
+            existing_shm = shared_memory.SharedMemory(name=_shm_name)
+            _g_img_array = np.ndarray(_shm_shape, dtype=_shm_dtype, buffer=existing_shm.buf)
+        except Exception as e:
+            logger.error(f"重新连接共享内存失败: {e}")
+            return args[0], None  # 返回帧索引和None表示处理失败
+    
+    frame_idx, img_start_y, img_height, img_width, self_height, self_width, is_transparent, bg_color = args
+    
+    # 快速路径 - 直接计算切片位置
+    img_end_y = min(img_height, img_start_y + self_height)
+    visible_height = img_end_y - img_start_y
+    
+    # 零边界检查 - 极端情况直接返回背景
+    if visible_height <= 0 or _g_img_array is None:
+        if is_transparent:
+            # 预分配连续内存
+            frame = np.zeros((self_height, self_width, 4), dtype=np.uint8, order='C')
+        else:
+            # 使用背景色
+            frame = np.ones((self_height, self_width, 3), dtype=np.uint8, order='C') * np.array(bg_color, dtype=np.uint8)
+        return frame_idx, frame
+    
+    # 预分配帧缓冲区 - 提高效率，确保内存连续
+    if is_transparent:
+        # 创建空的透明帧
+        frame = np.zeros((self_height, self_width, 4), dtype=np.uint8, order='C')
+    else:
+        # 用背景色填充帧
+        frame = np.ones((self_height, self_width, 3), dtype=np.uint8, order='C') * np.array(bg_color, dtype=np.uint8)
+    
+    # 计算切片 - 超高效版
+    source_height = min(visible_height, self_height)
+    source_width = min(img_width, self_width)
+    
+    # 使用直接视图赋值，避免任何额外复制
+    if source_height > 0 and source_width > 0:
+        # 单一高效赋值操作
+        frame[:source_height, :source_width] = _g_img_array[img_start_y:img_start_y+source_height, :source_width]
+    
+    # 确保返回内存连续的帧数据
     return frame_idx, frame
 
 # 尝试添加JIT编译支持（如果可用）

@@ -4,7 +4,8 @@ import platform
 from typing import Dict, Tuple, List, Optional, Union
 from PIL import Image
 
-from renderer.renderer import TextRenderer, VideoRenderer
+from renderer.text_renderer import TextRenderer
+from renderer.video_renderer import VideoRenderer
 
 # 配置日志
 logger = logging.getLogger(__name__)

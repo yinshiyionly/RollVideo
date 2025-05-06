@@ -13,6 +13,7 @@ import multiprocessing as mp
 from PIL import Image
 from typing import Dict, Tuple, List, Optional, Union
 import platform
+from collections import defaultdict
 
 from .memory_management import FrameMemoryPool
 from .performance import PerformanceMonitor
@@ -20,7 +21,11 @@ from .frame_processors import (
     _g_img_array,
     _process_frame,
     _process_frame_optimized,
+    _process_frame_optimized_shm,
     fast_frame_processor,
+    init_shared_memory,
+    cleanup_shared_memory,
+    init_worker,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,11 +149,11 @@ class VideoRenderer:
         output_path: str,
         text_actual_height: int,
         transparency_required: bool,
-        preferred_codec: str,  # 仍然接收 h264_nvenc 作为首选
+        preferred_codec: str,
         audio_path: Optional[str] = None,
         bg_color: Optional[Tuple[int, int, int, int]] = None,
     ) -> str:
-        """创建滚动视频 - 高性能优化版"""
+        """创建滚动视频 - 高性能优化版 (共享内存 + 异步处理)"""
 
         # 1. 图像预处理优化
         if transparency_required:
@@ -309,7 +314,7 @@ class VideoRenderer:
             "-analyzeduration",
             "20M",
             "-thread_queue_size",
-            "1024",
+            "8192",
             # 输入格式参数
             "-f",
             "rawvideo",
@@ -355,7 +360,7 @@ class VideoRenderer:
 
         logger.info(f"执行ffmpeg命令: {' '.join(ffmpeg_cmd)}")
 
-        # 4. 性能优化: 内存管理与进程控制
+        # 4. 性能优化: 共享内存管理与多进程控制
         # 预计算帧位置 - 确保最大性能
         frame_positions = []
         for frame_idx in range(total_frames):
@@ -370,240 +375,191 @@ class VideoRenderer:
             else:
                 frame_positions.append(int(scroll_distance))  # 静止结尾
 
-        # 初始化内存池
-        self._init_memory_pool(channels, pool_size=120)
-
-        # 数据传输模式：直接模式或缓存模式
-        # GPU编码器通常更快，所以需要较小的批处理大小和更多流控制
-        batch_size = 120 if not use_gpu else 60
-        num_batches = (total_frames + batch_size - 1) // batch_size
-
-        # 确定最佳进程数
+        # 5. 使用共享内存存储图像数据
         try:
-            cpu_count = mp.cpu_count()
-            optimal_processes = min(
-                6, max(1, cpu_count - 2)
-            )  # 留出2个核心给系统和ffmpeg
-            num_processes = optimal_processes
-            logger.info(
-                f"检测到{cpu_count}个CPU核心，优化使用{num_processes}个进程进行渲染，批处理大小:{batch_size}"
-            )
-        except:
-            num_processes = 4
-            logger.info(f"使用默认4个进程，批处理大小:{batch_size}")
-
-        # 性能监控
-        perf_monitor = PerformanceMonitor()
-        perf_monitor.start()
-
-        # 用于多进程的全局变量
-        global _g_img_array
-        _g_img_array = img_array  # 在多进程之间共享图像数据
-
-        # 5. 处理和编码
-        try:
-            # 创建临时先入先出队列用于帧缓冲
-            if not os.path.exists("/tmp"):
-                os.makedirs("/tmp", exist_ok=True)
-            temp_fifo = f"/tmp/ffmpeg_fifo_{int(time.time())}"
+            # 初始化共享内存并存储图像数据
+            logger.info("正在将图像数据存入共享内存...")
+            shm_name, shm_shape, shm_dtype = init_shared_memory(img_array)
+            logger.info(f"图像数据已存入共享内存: {shm_name}")
+            
+            # 初始化进程池与任务处理
+            # 确定最佳进程数
             try:
-                os.mkfifo(temp_fifo)
-                logger.info(f"创建FIFO: {temp_fifo}")
-                use_fifo = True
-            except:
-                use_fifo = False
-                logger.warning(f"无法创建FIFO，使用直接管道")
-
-            # 启动ffmpeg进程，使用适当的输入方式
-            if use_fifo:
-                # 替换输入参数
-                fifo_cmd = list(ffmpeg_cmd)
-                for i, arg in enumerate(fifo_cmd):
-                    if arg == "-" and fifo_cmd[i - 1] == "-i":
-                        fifo_cmd[i] = temp_fifo
-
-                # 启动进程
-                process = subprocess.Popen(
-                    fifo_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                cpu_count = mp.cpu_count()
+                # 减少使用的核心数，为系统和ffmpeg留下更多资源
+                optimal_processes = min(8, max(3, cpu_count - 2))
+                num_processes = optimal_processes
+                logger.info(
+                    f"检测到{cpu_count}个CPU核心，优化使用{num_processes}个进程进行渲染"
                 )
+            except:
+                num_processes = 4  # 默认使用较少进程
+                logger.info(f"使用默认{num_processes}个进程")
 
-                # 如果使用FIFO，我们需要延迟打开写入端，以确保ffmpeg已启动
-                time.sleep(0.5)
-                fifo_fd = os.open(temp_fifo, os.O_WRONLY)
-                pipe_out = os.fdopen(fifo_fd, "wb")
-            else:
-                # 使用标准管道
+            # 批处理大小
+            # GPU编码器通常更快，所以需要较小的批处理大小和更多流控制
+            batch_size = 240 if not use_gpu else 120
+            num_batches = (total_frames + batch_size - 1) // batch_size
+            
+            # 6. 运行FFmpeg进程并设置线程
+            try:
+                # 启动ffmpeg进程
                 process = subprocess.Popen(
                     ffmpeg_cmd,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    bufsize=10 * 1024 * 1024,  # 10MB缓冲区
                 )
-                pipe_out = process.stdin
 
-            # 创建stdout/stderr读取线程
-            stdout_q = queue.Queue()
-            stderr_q = queue.Queue()
-            stdout_thread = threading.Thread(
-                target=self._reader_thread, args=(process.stdout, stdout_q)
-            )
-            stderr_thread = threading.Thread(
-                target=self._reader_thread, args=(process.stderr, stderr_q)
-            )
-            stdout_thread.daemon = True
-            stderr_thread.daemon = True
-            stdout_thread.start()
-            stderr_thread.start()
+                # 创建队列用于捕获输出
+                stdout_q = queue.Queue()
+                stderr_q = queue.Queue()
 
-            # 准备批帧参数，优化内存使用
-            frame_batch_params = []
-            for batch_idx in range(num_batches):
-                start_frame = batch_idx * batch_size
-                end_frame = min(start_frame + batch_size, total_frames)
-                batch_frames = []
+                # 启动读取线程
+                stdout_thread = threading.Thread(
+                    target=self._reader_thread, args=(process.stdout, stdout_q)
+                )
+                stderr_thread = threading.Thread(
+                    target=self._reader_thread, args=(process.stderr, stderr_q)
+                )
 
-                for frame_idx in range(start_frame, end_frame):
+                stdout_thread.daemon = True
+                stderr_thread.daemon = True
+                stdout_thread.start()
+                stderr_thread.start()
+                
+                # 7. 创建帧处理任务并准备处理
+                logger.info("准备处理帧...")
+                frame_params = []
+                for frame_idx in range(total_frames):
                     img_start_y = frame_positions[frame_idx]
-                    frame_params = (
-                        frame_idx,
-                        img_start_y,
-                        img_height,
-                        img_width,
-                        self.height,
-                        self.width,
-                        transparency_required,
-                        bg_color_rgb,
+                    frame_params.append(
+                        (
+                            frame_idx,
+                            img_start_y,
+                            img_height,
+                            img_width,
+                            self.height,
+                            self.width,
+                            transparency_required,
+                            bg_color_rgb,
+                        )
                     )
-                    batch_frames.append(frame_params)
-
-                frame_batch_params.append(batch_frames)
-
-            # 处理帧计数
-            self.frame_counter = 0
-
-            # 创建共享进度条
-            with tqdm(
-                total=total_frames, desc=f"编码 ({video_codec_params[1]})"
-            ) as pbar:
-                # 使用进程池处理帧
-                last_write_time = time.time()
-                with mp.Pool(processes=num_processes) as pool:
-                    for batch_idx, batch_frames in enumerate(frame_batch_params):
-                        # 定期检查ffmpeg是否还在运行
-                        if process.poll() is not None:
-                            logger.error(
-                                f"ffmpeg进程意外退出，返回码: {process.returncode}"
-                            )
-                            # 收集并记录错误输出
-                            stderr_data = []
-                            while not stderr_q.empty():
-                                line = stderr_q.get_nowait()
-                                if line:
-                                    stderr_data.append(
-                                        line.decode(errors="ignore").strip()
-                                    )
-                            if stderr_data:
-                                logger.error(f"ffmpeg错误输出: {stderr_data[-10:]}")
-                            break
-
-                        # 防止上一次写入的时间太短
-                        elapsed = time.time() - last_write_time
-                        if elapsed < 0.05 and use_gpu:  # GPU模式下控制写入速率
-                            time.sleep(0.05 - elapsed)
-
-                        # 处理当前批次
-                        if len(batch_frames) > 30 and num_processes > 1:
-                            # 大批处理：并行处理所有帧
-                            pool_results = pool.map(
-                                _process_frame_optimized, batch_frames
-                            )
-                            processed_frames = sorted(pool_results, key=lambda x: x[0])
-                        else:
-                            # 小批处理：顺序处理
-                            processed_frames = []
-                            for params in batch_frames:
-                                frame_idx, frame = _process_frame_optimized(params)
-                                processed_frames.append((frame_idx, frame))
-
-                        # 写入所有处理好的帧数据
-                        try:
-                            for _, frame in processed_frames:
-                                pipe_out.write(frame.tobytes())
-                                self.frame_counter += 1
-                            pipe_out.flush()  # 确保数据写入
-
-                            # 更新进度条
-                            pbar.update(len(processed_frames))
-                            last_write_time = time.time()
-                        except BrokenPipeError:
-                            logger.error("管道已断开，停止写入")
-                            break
-                        except Exception as e:
-                            logger.error(f"写入帧数据时出错: {e}")
-                            break
-
-                        # 定期记录性能
-                        if batch_idx % 5 == 0:
-                            perf_monitor.log_stats(logger)
-
-                        # 定期垃圾回收
-                        if batch_idx % 10 == 9:
-                            gc.collect()
-
-            # 关闭管道/FIFO
-            try:
-                pipe_out.close()
-            except:
-                pass
-
-            # 如果使用FIFO，需要删除它
-            if use_fifo:
-                try:
-                    os.unlink(temp_fifo)
-                except:
-                    pass
-
-            # 等待ffmpeg完成
-            try:
-                return_code = process.wait(timeout=120.0)  # 等待最多2分钟
-                logger.info(f"ffmpeg进程完成，返回码: {return_code}")
-
-                # 记录输出
-                stderr_lines = []
-                while not stderr_q.empty():
-                    line = stderr_q.get()
-                    if line is not None:
-                        stderr_lines.append(line.decode(errors="ignore").strip())
-
-                if return_code != 0:
-                    error_output = "\n".join(stderr_lines[-20:])  # 只记录最后20行
-                    logger.error(f"ffmpeg错误输出:\n{error_output}")
-
-                return return_code == 0
-            except subprocess.TimeoutExpired:
-                logger.warning("ffmpeg进程超时，尝试终止")
-                process.kill()
-                return False
-        except Exception as e:
-            logger.error(f"渲染过程出错: {e}", exc_info=True)
-            return False
+                
+                # 8. 使用进程池异步处理帧
+                logger.info(f"启动进程池处理 {total_frames} 帧...")
+                
+                # 创建带有共享内存初始化的进程池
+                with mp.Pool(
+                    processes=num_processes,
+                    initializer=init_worker,
+                    initargs=(shm_name, shm_shape, shm_dtype),
+                ) as pool:
+                    # 创建进度条
+                    with tqdm(total=total_frames, desc=f"编码 ({video_codec_params[1]})") as pbar:
+                        # 创建任务结果缓冲区
+                        frame_buffer = {}
+                        next_frame_to_write = 0
+                        
+                        # 使用imap_unordered获取任意顺序的结果
+                        # 允许先处理完成的子进程立即返回结果
+                        for frame_idx, frame_data in pool.imap_unordered(
+                            _process_frame_optimized_shm, frame_params, chunksize=10
+                        ):
+                            # 检查ffmpeg进程是否还在运行
+                            if process.poll() is not None:
+                                logger.error(f"ffmpeg进程意外退出，返回码: {process.returncode}")
+                                # 收集并记录错误输出
+                                stderr_data = []
+                                while not stderr_q.empty():
+                                    line = stderr_q.get_nowait()
+                                    if line:
+                                        stderr_data.append(line.decode(errors="ignore").strip())
+                                if stderr_data:
+                                    logger.error(f"ffmpeg错误输出: {stderr_data[-10:]}")
+                                break
+                            
+                            # 如果帧数据为None，表示处理失败，跳过该帧
+                            if frame_data is None:
+                                logger.warning(f"帧 {frame_idx} 处理失败，跳过")
+                                continue
+                                
+                            # 将帧数据存入缓冲区
+                            frame_buffer[frame_idx] = frame_data
+                            
+                            # 按顺序写入FFmpeg
+                            while next_frame_to_write in frame_buffer:
+                                # 获取要写入的帧
+                                next_frame = frame_buffer.pop(next_frame_to_write)
+                                # 写入FFmpeg
+                                process.stdin.write(next_frame.tobytes())
+                                # 定期刷新防止阻塞
+                                if next_frame_to_write % 30 == 0:
+                                    process.stdin.flush()
+                                # 更新进度条
+                                pbar.update(1)
+                                # 移动到下一帧
+                                next_frame_to_write += 1
+                                
+                                # 防止缓冲区过大导致内存压力
+                                if len(frame_buffer) > 120:
+                                    # 强制垃圾回收
+                                    gc.collect()
+                        
+                        # 处理剩余缓冲区中的帧（如果有）
+                        remaining_frames = sorted(frame_buffer.keys())
+                        for frame_idx in remaining_frames:
+                            process.stdin.write(frame_buffer[frame_idx].tobytes())
+                            pbar.update(1)
+                        
+                        # 清空缓冲区
+                        frame_buffer.clear()
+                
+                # 关闭FFmpeg的stdin
+                process.stdin.close()
+                
+                # 等待FFmpeg完成
+                logger.info("等待FFmpeg进程完成...")
+                process.wait()
+                
+                # 检查返回码
+                if process.returncode != 0:
+                    logger.error(f"FFmpeg进程返回错误码: {process.returncode}")
+                    # 收集并记录错误输出
+                    stderr_data = []
+                    while not stderr_q.empty():
+                        line = stderr_q.get_nowait()
+                        if line:
+                            stderr_data.append(line.decode(errors="ignore").strip())
+                    if stderr_data:
+                        logger.error(f"FFmpeg错误输出: {stderr_data[-10:]}")
+                    raise RuntimeError(f"FFmpeg进程失败，返回码: {process.returncode}")
+                
+                logger.info(f"视频渲染完成: {output_path}")
+                return output_path
+                
+            finally:
+                # 确保FFmpeg进程被正确关闭
+                if 'process' in locals() and process.poll() is None:
+                    try:
+                        process.stdin.close()
+                    except:
+                        pass
+                    try:
+                        process.terminate()
+                        process.wait(timeout=2)
+                    except:
+                        pass
+                    
         finally:
-            # 清理资源
-            _g_img_array = None
+            # 清理共享内存
+            cleanup_shared_memory()
+            
+            # 强制垃圾回收
             gc.collect()
-
-            # 记录最终性能
-            end_time = time.time()
-            total_time = end_time - perf_monitor.start_time
-            avg_fps = self.frame_counter / total_time if total_time > 0 else 0
-
-            logger.info(
-                f"总渲染性能: 渲染了{self.frame_counter}帧，"
-                f"耗时{total_time:.2f}秒，"
-                f"平均{avg_fps:.2f}帧/秒"
-            )
-
-            return avg_fps > 0  # 只要成功渲染了一些帧，就认为是成功的
+            
+        return output_path
 
     def create_scrolling_video(
         self,
@@ -767,7 +723,7 @@ class VideoRenderer:
         try:
             cpu_count = mp.cpu_count()
             # 减少使用的核心数，为系统和ffmpeg留下更多资源
-            optimal_processes = min(6, max(1, cpu_count - 2))
+            optimal_processes = min(8, max(2, cpu_count - 1))
             num_processes = optimal_processes
             logger.info(
                 f"检测到{cpu_count}个CPU核心，优化使用{num_processes}个进程进行渲染，批处理大小:{batch_size}"
@@ -778,7 +734,7 @@ class VideoRenderer:
 
         # 初始化内存池 - 减小池大小以降低内存压力
         channels = 4 if transparency_required else 3
-        self._init_memory_pool(channels, pool_size=480)  # 大幅减小内存池大小
+        self._init_memory_pool(channels, pool_size=720)  # 增加内存池大小提高性能
 
         # 将图像转换为numpy数组
         img_array = np.array(image)
