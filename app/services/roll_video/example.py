@@ -8,6 +8,7 @@
 import os
 import logging
 import time
+import sys
 from roll_video_service import RollVideoService
 
 # 配置日志
