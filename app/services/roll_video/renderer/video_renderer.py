@@ -309,7 +309,7 @@ class VideoRenderer:
             "-analyzeduration",
             "20M",
             "-thread_queue_size",
-            "1024",
+            "8192",
             # 输入格式参数
             "-f",
             "rawvideo",
@@ -371,19 +371,18 @@ class VideoRenderer:
                 frame_positions.append(int(scroll_distance))  # 静止结尾
 
         # 初始化内存池
-        self._init_memory_pool(channels, pool_size=120)
+        self._init_memory_pool(channels, pool_size=240)
 
         # 数据传输模式：直接模式或缓存模式
         # GPU编码器通常更快，所以需要较小的批处理大小和更多流控制
-        batch_size = 120 if not use_gpu else 60
+        batch_size = 240 if not use_gpu else 120
         num_batches = (total_frames + batch_size - 1) // batch_size
 
         # 确定最佳进程数
         try:
             cpu_count = mp.cpu_count()
-            optimal_processes = min(
-                6, max(1, cpu_count - 2)
-            )  # 留出2个核心给系统和ffmpeg
+            # 减少使用的核心数，为系统和ffmpeg留下更多资源
+            optimal_processes = min(8, max(2, cpu_count - 1))
             num_processes = optimal_processes
             logger.info(
                 f"检测到{cpu_count}个CPU核心，优化使用{num_processes}个进程进行渲染，批处理大小:{batch_size}"
@@ -767,7 +766,7 @@ class VideoRenderer:
         try:
             cpu_count = mp.cpu_count()
             # 减少使用的核心数，为系统和ffmpeg留下更多资源
-            optimal_processes = min(6, max(1, cpu_count - 2))
+            optimal_processes = min(8, max(2, cpu_count - 1))
             num_processes = optimal_processes
             logger.info(
                 f"检测到{cpu_count}个CPU核心，优化使用{num_processes}个进程进行渲染，批处理大小:{batch_size}"
@@ -778,7 +777,7 @@ class VideoRenderer:
 
         # 初始化内存池 - 减小池大小以降低内存压力
         channels = 4 if transparency_required else 3
-        self._init_memory_pool(channels, pool_size=480)  # 大幅减小内存池大小
+        self._init_memory_pool(channels, pool_size=720)  # 增加内存池大小提高性能
 
         # 将图像转换为numpy数组
         img_array = np.array(image)
