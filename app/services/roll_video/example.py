@@ -8,6 +8,15 @@
 import os
 import logging
 import time
+import sys
+
+# 为了让相对导入在直接运行时也能工作，我们需要修改Python路径
+if __name__ == "__main__":
+    # 获取项目根目录
+    PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+
 from .renderer.roll_video_service import RollVideoService
 
 # 配置日志
