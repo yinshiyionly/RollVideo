@@ -308,7 +308,7 @@ class RollVideoService:
 
             # 创建滚动视频，传递决策结果
             logger.info("开始创建滚动视频...")
-            final_output_path = video_renderer.create_scrolling_video(
+            final_output_path = video_renderer.create_scrolling_video_optimized(
                 image=text_image,
                 output_path=actual_output_path,  # 使用自动调整后的路径
                 text_actual_height=text_actual_height,
