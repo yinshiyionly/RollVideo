@@ -5,7 +5,7 @@ from .text_renderer import TextRenderer
 from .video_renderer import VideoRenderer
 from .performance import PerformanceMonitor
 from .memory_management import FrameMemoryPool
-from .frame_processors import _process_frame, _process_frame_optimized_shm
+from .frame_processors import _process_frame_optimized_shm
 from .utils import limit_resources
 
 # 导出所有公共API
@@ -14,7 +14,6 @@ __all__ = [
     "VideoRenderer",
     "PerformanceMonitor",
     "FrameMemoryPool",
-    "_process_frame",
     "_process_frame_optimized",
     "limit_resources",
 ]
