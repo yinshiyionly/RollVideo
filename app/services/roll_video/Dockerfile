@@ -16,7 +16,7 @@ RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu
     rm -rf /var/lib/apt/lists/*
 
 # 安装nv-codec-headers
-RUN git clone --depth 1 https://github.com/FFmpeg/nv-codec-headers.git && \
+RUN git clone https://github.com/FFmpeg/nv-codec-headers.git && \
     cd nv-codec-headers && \
     git checkout sdk/12.0 && \
     make -j$(nproc) && \
