@@ -12,7 +12,6 @@ import time
 import multiprocessing as mp
 from PIL import Image
 from typing import Dict, Tuple, List, Optional, Union
-import platform
 
 from .memory_management import FrameMemoryPool
 from .performance import PerformanceMonitor
@@ -256,29 +255,22 @@ class VideoRenderer:
             ffmpeg_pix_fmt = "rgb24"
             output_path = os.path.splitext(output_path)[0] + ".mp4"
 
-            # 检查操作系统，在macOS上默认使用CPU编码
-            is_macos = platform.system() == "Darwin"
-            if is_macos:
-                # macOS上强制使用CPU编码
-                logger.info("检测到macOS系统，将使用CPU编码器")
-                os.environ["NO_GPU"] = "1"
-
             # 检查GPU编码器可用性
             if preferred_codec in gpu_encoders and not "NO_GPU" in os.environ:
-                # 使用更高性能的GPU参数
+                # 使用更简单的GPU参数以确保兼容性
                 video_codec_params = [
                     "-c:v",
                     preferred_codec,
                     "-preset",
-                    "p4",  # 提升到p4预设（更高性能）
+                    "p4",  # 保持p4预设
                     "-b:v",
-                    "8M",  # 提升到8M比特率
+                    "5M",  # 使用固定比特率
                     "-pix_fmt",
                     "yuv420p",  # 确保兼容性
                     "-movflags",
                     "+faststart",
                 ]
-                logger.info(f"使用GPU编码器: {preferred_codec}，预设:p4，比特率:8M")
+                logger.info(f"使用GPU编码器: {preferred_codec}")
                 use_gpu = True
             else:
                 # 回退到CPU编码
@@ -297,7 +289,6 @@ class VideoRenderer:
                     "8",
                 ]
                 logger.info(f"使用CPU编码器: libx264 (GPU编码器不可用或被禁用)")
-                use_gpu = False
 
         # 完整的ffmpeg命令
         ffmpeg_cmd = [
@@ -688,13 +679,6 @@ class VideoRenderer:
             ffmpeg_pix_fmt = "rgb24"
             output_path = os.path.splitext(output_path)[0] + ".mp4"
 
-            # 检查操作系统，在macOS上默认使用CPU编码
-            is_macos = platform.system() == "Darwin"
-            if is_macos:
-                # macOS上强制使用CPU编码
-                logger.info("检测到macOS系统，将使用CPU编码器")
-                os.environ["NO_GPU"] = "1"
-
             # 检查GPU编码器可用性
             gpu_encoders = ["h264_nvenc", "hevc_nvenc"]
             if preferred_codec in gpu_encoders and not "NO_GPU" in os.environ:
@@ -710,6 +694,8 @@ class VideoRenderer:
                     "yuv420p",  # 确保兼容性
                     "-movflags",
                     "+faststart",
+                    "-gpu",
+                    "0",  # 明确指定GPU设备
                 ]
                 logger.info(f"使用GPU编码器: {preferred_codec}，预设:p4，比特率:8M")
                 use_gpu = True
@@ -719,7 +705,7 @@ class VideoRenderer:
                     "-c:v",
                     "libx264",
                     "-crf",
-                    "21",  # 略微降低质量以提高速度
+                    "23",  # 略微降低质量以提高速度
                     "-preset",
                     "medium",  # 保持medium预设
                     "-pix_fmt",
@@ -760,25 +746,25 @@ class VideoRenderer:
         # 数据传输模式：直接模式或缓存模式
         # 根据GPU/CPU模式调整批处理大小
         if not "batch_size" in locals():
-            batch_size = 60  # 降低批处理大小
+            batch_size = 240 if not use_gpu else 120  # 增大批处理大小
         num_batches = (total_frames + batch_size - 1) // batch_size
 
         # 确定最佳进程数
         try:
             cpu_count = mp.cpu_count()
-            # 减少使用的核心数，为系统和ffmpeg留下更多资源
-            optimal_processes = min(6, max(1, cpu_count - 2))
+            # 充分利用您的8核CPU，为系统和ffmpeg保留1个核心
+            optimal_processes = min(8, max(1, cpu_count - 1))
             num_processes = optimal_processes
             logger.info(
                 f"检测到{cpu_count}个CPU核心，优化使用{num_processes}个进程进行渲染，批处理大小:{batch_size}"
             )
         except:
-            num_processes = 6  # 默认使用较少进程
+            num_processes = 6  # 默认使用6个进程
             logger.info(f"使用默认{num_processes}个进程，批处理大小:{batch_size}")
 
-        # 初始化内存池 - 减小池大小以降低内存压力
+        # 初始化内存池 - 增大池大小以减少内存分配开销
         channels = 4 if transparency_required else 3
-        self._init_memory_pool(channels, pool_size=480)  # 大幅减小内存池大小
+        self._init_memory_pool(channels, pool_size=480)  # 增大内存池大小
 
         # 将图像转换为numpy数组
         img_array = np.array(image)
