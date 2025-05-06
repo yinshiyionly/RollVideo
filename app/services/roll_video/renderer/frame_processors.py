@@ -4,6 +4,7 @@ import numpy as np
 import logging
 import ctypes
 import multiprocessing.shared_memory as sm
+import multiprocessing as mp
 
 logger = logging.getLogger(__name__)
 
