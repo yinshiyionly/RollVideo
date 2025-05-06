@@ -9,9 +9,18 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
     if: ${{ github.repository == 'duanfuxing/RollVideo' }}
     steps:
+      - name: Free up disk space
+        run: |
+          echo "Cleaning up disk space..."
+          sudo rm -rf /usr/share/dotnet \
+                      /opt/ghc \
+                      /usr/local/lib/android \
+                      /usr/lib/jvm
+          df -h
+
       - name: Checkout repository
         uses: actions/checkout@v3
 
