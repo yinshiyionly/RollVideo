@@ -141,16 +141,16 @@ def generate_roll_video_task(self, task_id: str):
         service = RollVideoService()
         
          # 3.2使用 task.payload 来传递所有参数
-        # result = service.create_roll_video(
-        #     output_path=roll_video_filename, # Service 会修正扩展名
-        #     **task.payload
-        # )
+        result = service.create_roll_video(
+            output_path=roll_video_filename, # Service 会修正扩展名
+            **task.payload
+        )
 
-        result = {
-            "status": "success",
-            "message": "滚动视频创建成功",
-            "output_path": "/opt/test-roll-video.mp4",
-        }
+        #result = {
+        #    "status": "success",
+        #    "message": "滚动视频创建成功",
+        #    "output_path": "/opt/test-roll-video.mp4",
+        #}
 
         # 3.3 输出结果
         if result["status"] == "success" and result["output_path"] and os.path.exists(result["output_path"]):
