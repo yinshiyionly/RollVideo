@@ -137,7 +137,6 @@ def generate_roll_video_task(self, task_id: str):
         
         # 3. 生成滚动视频保存目录
         roll_video_filename = os.path.join(settings.VIDEO_TMP_DIR, f"{task_id}")
-        log.info(f"roll_video_filename: {task.payload}")
         # 3.1 创建服务实例
         service = RollVideoService()
         
@@ -262,8 +261,7 @@ def upload_video_to_oss(task_id: str, video_path: str):
             # 执行上传oss操作
             oss_client.upload_file(
                 local_file_path=video_path,
-                object_key=video_object_key,
-                metadata={"task_id": task_id},
+                object_key=video_object_key
             )
             # 返回
             return video_object_key
