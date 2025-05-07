@@ -1,4 +1,4 @@
-CREATE TABLE `roll_video_task` (
+CREATE TABLE `roll_video_tasks` (
   `id` int unsigned NOT NULL AUTO_INCREMENT COMMENT '主键ID',
   `task_id` varchar(100) NOT NULL DEFAULT '' COMMENT '任务ID',
   `uid` int unsigned NOT NULL DEFAULT '0' COMMENT '用户ID',
