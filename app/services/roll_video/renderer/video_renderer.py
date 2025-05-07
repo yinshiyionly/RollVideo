@@ -1554,6 +1554,10 @@ class VideoRenderer:
                         raise Exception(f"FFmpeg处理失败: 滤镜配置错误，请检查滤镜表达式")
                     elif "CUDA error" in stderr or "CUDA failure" in stderr:
                         raise Exception("FFmpeg处理失败: CUDA错误，可能是GPU内存不足或驱动问题")
+                    elif "Impossible to convert between the formats" in stderr:
+                        raise Exception("FFmpeg处理失败: 滤镜之间的格式转换不兼容，这可能是CUDA格式问题")
+                    elif "Function not implemented" in stderr:
+                        raise Exception("FFmpeg处理失败: 功能未实现，可能是当前CUDA版本不支持某些操作") 
                     else:
                         raise Exception(f"FFmpeg处理失败，返回码: {process.returncode}")
             except Exception as e:
@@ -1814,8 +1818,14 @@ class VideoRenderer:
             
             # 构建滤镜复杂表达式
             filter_complex = (
-                f"[1:v]format=rgba,hwupload_cuda[img]; "
-                f"[0:v][img]overlay_cuda=x=0:y='{y_expr}':eof_action=endall:shortest=1[out]"
+                # 将背景格式化成RGB格式并上传到CUDA
+                "[0:v]format=yuv420p,hwupload_cuda[bg_cuda];"
+                # 准备前景图像：先转换格式，然后上传到CUDA
+                "[1:v]format=rgba,hwupload_cuda[img_cuda];"
+                # 使用overlay_cuda进行叠加
+                f"[bg_cuda][img_cuda]overlay_cuda=x=0:y='{y_expr}':eof_action=endall:shortest=1[out_cuda];"
+                # 确保输出流格式正确
+                "[out_cuda]hwdownload,format=yuv420p[out]"
             )
             
             ffmpeg_cmd.extend([
@@ -1883,6 +1893,10 @@ class VideoRenderer:
                         raise Exception("FFmpeg处理失败: 滤镜配置错误，请检查滤镜表达式")
                     elif "CUDA error" in stderr or "CUDA failure" in stderr:
                         raise Exception("FFmpeg处理失败: CUDA错误，可能是GPU内存不足或驱动问题")
+                    elif "Impossible to convert between the formats" in stderr:
+                        raise Exception("FFmpeg处理失败: 滤镜之间的格式转换不兼容，这可能是CUDA格式问题")
+                    elif "Function not implemented" in stderr:
+                        raise Exception("FFmpeg处理失败: 功能未实现，可能是当前CUDA版本不支持某些操作") 
                     else:
                         raise Exception(f"FFmpeg处理失败，返回码: {process.returncode}")
             except Exception as e:
