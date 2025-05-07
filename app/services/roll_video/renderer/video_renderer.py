@@ -1552,6 +1552,12 @@ class VideoRenderer:
                         raise Exception(f"FFmpeg处理失败: 参数无效，请检查命令")
                     elif "Error opening filters" in stderr:
                         raise Exception(f"FFmpeg处理失败: 滤镜配置错误，请检查滤镜表达式")
+                    elif "CUDA error" in stderr or "CUDA failure" in stderr:
+                        raise Exception("FFmpeg处理失败: CUDA错误，可能是GPU内存不足或驱动问题")
+                    elif "Impossible to convert between the formats" in stderr:
+                        raise Exception("FFmpeg处理失败: 滤镜之间的格式转换不兼容，这可能是CUDA格式问题")
+                    elif "Function not implemented" in stderr:
+                        raise Exception("FFmpeg处理失败: 功能未实现，可能是当前CUDA版本不支持某些操作") 
                     else:
                         raise Exception(f"FFmpeg处理失败，返回码: {process.returncode}")
             except Exception as e:
@@ -1698,18 +1704,17 @@ class VideoRenderer:
             preparation_end_time = time.time()
             self.performance_stats["preparation_time"] = preparation_end_time - preparation_start_time
             
-            # 4. 确认系统是否支持CUDA
+            # 4. 确认系统是否支持CUDA和overlay_cuda滤镜
             encoding_start_time = time.time()
             has_cuda_support = False
+            has_overlay_cuda = False
             
             try:
-                # 检测NVIDIA GPU是否存在
+                # 1. 首先检测NVIDIA GPU是否存在
                 nvidia_result = subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
                 has_cuda_support = nvidia_result.returncode == 0
                 
-                if has_cuda_support:
-                    logger.info("检测到NVIDIA GPU，将使用overlay_cuda滤镜")
-                else:
+                if not has_cuda_support:
                     logger.warning("未检测到NVIDIA GPU，overlay_cuda滤镜需要NVIDIA GPU支持")
                     logger.info("将回退到使用普通的crop滤镜方法")
                     return self.create_scrolling_video_ffmpeg(
@@ -1721,8 +1726,35 @@ class VideoRenderer:
                         audio_path=audio_path,
                         bg_color=bg_color,
                     )
+                
+                # 2. 再检测是否支持overlay_cuda滤镜
+                logger.info("检测是否支持overlay_cuda滤镜...")
+                filter_check = subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-filters"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=5
+                )
+                has_overlay_cuda = "overlay_cuda" in filter_check.stdout
+                
+                if not has_overlay_cuda:
+                    logger.warning("系统不支持overlay_cuda滤镜（GPU加速叠加滤镜），虽然检测到NVIDIA GPU")
+                    logger.info("将回退到使用普通的crop滤镜方法")
+                    return self.create_scrolling_video_ffmpeg(
+                        image=image,
+                        output_path=output_path,
+                        text_actual_height=text_actual_height,
+                        transparency_required=transparency_required,
+                        preferred_codec=preferred_codec,
+                        audio_path=audio_path,
+                        bg_color=bg_color,
+                    )
+                
+                logger.info("检测通过：系统支持NVIDIA GPU和overlay_cuda滤镜")
+                
             except Exception as e:
-                logger.warning(f"检测NVIDIA GPU时出错: {e}")
+                logger.warning(f"检测CUDA或overlay_cuda滤镜时出错: {e}")
                 logger.info("将回退到使用普通的crop滤镜方法")
                 return self.create_scrolling_video_ffmpeg(
                     image=image,
@@ -1785,9 +1817,34 @@ class VideoRenderer:
                 logger.info(f"使用基础匀速滚动效果")
             
             # 构建滤镜复杂表达式
+            # 根据是否需要透明度调整前景图像的格式
+            if transparency_required:
+                 # 准备前景图像：先转换格式为RGBA，然后上传到CUDA
+                img_filter = "[1:v]format=rgba,hwupload_cuda[img_cuda];"
+                bg_format = "rgba" # 如果前景是RGBA，背景也用RGBA以确保兼容性
+                bg_filter = f"[0:v]format={bg_format},hwupload_cuda[bg_cuda];"
+                # overlay_cuda 叠加
+                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y={y_expr}[out_cuda];"
+                # 确保输出流格式正确 (RGBA输出需要hwdownload+format转换)
+                output_filter = "[out_cuda]hwdownload,format=rgba[out]"
+                logger.info("使用 overlay_cuda 处理透明视频 (RGBA格式)")
+            else:
+                # 准备前景图像：先转换格式为YUV420P，然后上传到CUDA
+                img_filter = "[1:v]format=yuv420p,hwupload_cuda[img_cuda];"
+                bg_format = "yuv420p" # 背景使用YUV420P
+                bg_filter = f"[0:v]format={bg_format},hwupload_cuda[bg_cuda];"
+                # overlay_cuda 叠加 (YUV420P输入)
+                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y={y_expr}[out_cuda];"
+                 # 确保输出流格式正确 (YUV420P输出直接使用)
+                output_filter = "[out_cuda]hwdownload,format=yuv420p[out]"
+                logger.info("使用 overlay_cuda 处理不透明视频 (YUV420P格式)")
+
+
             filter_complex = (
-                f"[1:v]format=rgba,hwupload_cuda[img]; "
-                f"[0:v][img]overlaycuda=x=0:y='{y_expr}':eof_action=endall:shortest=1[out]"
+                bg_filter +
+                img_filter +
+                overlay_filter +
+                output_filter
             )
             
             ffmpeg_cmd.extend([
@@ -1846,34 +1903,31 @@ class VideoRenderer:
                 # 检查进程返回码
                 if process.returncode != 0:
                     logger.error(f"FFmpeg处理失败: {stderr}")
-                    # 检查是否是因为overlaycuda滤镜不可用导致的失败
-                    if "No such filter: 'overlaycuda'" in stderr:
-                        logger.warning("系统不支持overlaycuda滤镜，将回退到使用普通的crop滤镜方法")
-                        # 删除临时文件
-                        try:
-                            os.remove(temp_img_path)
-                        except:
-                            pass
-                        return self.create_scrolling_video_ffmpeg(
-                            image=image,
-                            output_path=output_path,
-                            text_actual_height=text_actual_height,
-                            transparency_required=transparency_required,
-                            preferred_codec=preferred_codec,
-                            audio_path=audio_path,
-                            bg_color=bg_color,
-                        )
-                    raise Exception(f"FFmpeg处理失败，返回码: {process.returncode}")
+                    # 分析常见错误原因，提供更详细的错误信息
+                    if "No space left on device" in stderr:
+                        raise Exception("FFmpeg处理失败: 设备存储空间不足")
+                    elif "Invalid argument" in stderr:
+                        raise Exception("FFmpeg处理失败: 参数无效，请检查命令")
+                    elif "Error opening filters" in stderr:
+                        raise Exception("FFmpeg处理失败: 滤镜配置错误，请检查滤镜表达式")
+                    elif "CUDA error" in stderr or "CUDA failure" in stderr:
+                        raise Exception("FFmpeg处理失败: CUDA错误，可能是GPU内存不足或驱动问题")
+                    elif "Impossible to convert between the formats" in stderr:
+                        raise Exception("FFmpeg处理失败: 滤镜之间的格式转换不兼容，这可能是CUDA格式问题")
+                    elif "Function not implemented" in stderr:
+                        raise Exception("FFmpeg处理失败: 功能未实现，可能是当前CUDA版本不支持某些操作") 
+                    else:
+                        raise Exception(f"FFmpeg处理失败，返回码: {process.returncode}")
             except Exception as e:
                 logger.error(f"FFmpeg处理失败: {str(e)}")
                 raise
                 
-            # 删除临时图像文件
-            try:
-                os.remove(temp_img_path)
-                logger.info(f"已删除临时文件: {temp_img_path}")
-            except Exception as e:
-                logger.warning(f"删除临时文件失败: {e}")
+            # # 删除临时图像文件
+            # try:
+            #     os.remove(temp_img_path)
+            #     logger.info(f"已删除临时文件: {temp_img_path}")
+            # except Exception as e:
+            #     logger.warning(f"删除临时文件失败: {e}")
             
             # 更新性能统计信息
             encoding_end_time = time.time()
@@ -1891,10 +1945,10 @@ class VideoRenderer:
         except Exception as e:
             logger.error(f"创建滚动视频失败 (overlay_cuda): {str(e)}")
             logger.error(traceback.format_exc())
-            try:
-                # 清理临时文件
-                if 'temp_img_path' in locals() and os.path.exists(temp_img_path):
-                    os.remove(temp_img_path)
-            except:
-                pass
-            raise
+            # try:
+            #     # 清理临时文件
+            #     if 'temp_img_path' in locals() and os.path.exists(temp_img_path):
+            #         os.remove(temp_img_path)
+            # except:
+            #     pass
+            # raise
