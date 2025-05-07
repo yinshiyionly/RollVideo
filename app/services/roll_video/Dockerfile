@@ -155,11 +155,14 @@ ENV PATH="/usr/local/cuda/bin:${PATH}" \
 # 验证FFmpeg是否支持NVIDIA编码器
 # RUN ffmpeg -encoders | grep nvenc
 
+# 复制
+COPY dockerfile-requirements.txt /app/
+
 # 设置工作目录
 WORKDIR /app
 
 # 安装Python依赖
-RUN pip3 install --no-cache-dir -r dockerfile-requirements.txt
+# RUN pip3 install --no-cache-dir -r dockerfile-requirements.txt
 
 # 暴露API端口
 EXPOSE 5000

@@ -10,7 +10,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    if: ${{ github.repository == 'duanfuxing/RollVideo' }}
+    if: ${{ github.repository == 'yinshiyionly/RollVideo' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
