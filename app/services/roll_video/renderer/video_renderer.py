@@ -1926,10 +1926,10 @@ class VideoRenderer:
         except Exception as e:
             logger.error(f"创建滚动视频失败 (overlay_cuda): {str(e)}")
             logger.error(traceback.format_exc())
-            try:
-                # 清理临时文件
-                if 'temp_img_path' in locals() and os.path.exists(temp_img_path):
-                    os.remove(temp_img_path)
-            except:
-                pass
-            raise
+            # try:
+            #     # 清理临时文件
+            #     if 'temp_img_path' in locals() and os.path.exists(temp_img_path):
+            #         os.remove(temp_img_path)
+            # except:
+            #     pass
+            # raise
