@@ -33,6 +33,7 @@ pip-wheel-metadata/
 
 # 配置文件（如果你有私密信息）
 *.ini
+!supervisor-conf/*.ini
 *.cfg
 
 # Jupyter Notebook
