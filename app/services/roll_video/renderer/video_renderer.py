@@ -1817,15 +1817,34 @@ class VideoRenderer:
                 logger.info(f"使用基础匀速滚动效果")
             
             # 构建滤镜复杂表达式
+            # 根据是否需要透明度调整前景图像的格式
+            if transparency_required:
+                 # 准备前景图像：先转换格式为RGBA，然后上传到CUDA
+                img_filter = "[1:v]format=rgba,hwupload_cuda[img_cuda];"
+                bg_format = "rgba" # 如果前景是RGBA，背景也用RGBA以确保兼容性
+                bg_filter = f"[0:v]format={bg_format},hwupload_cuda[bg_cuda];"
+                # overlay_cuda 叠加
+                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y={y_expr}:eof_action=endall:shortest=1[out_cuda];"
+                # 确保输出流格式正确 (RGBA输出需要hwdownload+format转换)
+                output_filter = "[out_cuda]hwdownload,format=rgba[out]"
+                logger.info("使用 overlay_cuda 处理透明视频 (RGBA格式)")
+            else:
+                # 准备前景图像：先转换格式为YUV420P，然后上传到CUDA
+                img_filter = "[1:v]format=yuv420p,hwupload_cuda[img_cuda];"
+                bg_format = "yuv420p" # 背景使用YUV420P
+                bg_filter = f"[0:v]format={bg_format},hwupload_cuda[bg_cuda];"
+                # overlay_cuda 叠加 (YUV420P输入)
+                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y={y_expr}:eof_action=endall:shortest=1[out_cuda];"
+                 # 确保输出流格式正确 (YUV420P输出直接使用)
+                output_filter = "[out_cuda]hwdownload,format=yuv420p[out]"
+                logger.info("使用 overlay_cuda 处理不透明视频 (YUV420P格式)")
+
+
             filter_complex = (
-                # 将背景格式化成RGB格式并上传到CUDA
-                "[0:v]format=yuv420p,hwupload_cuda[bg_cuda];"
-                # 准备前景图像：先转换格式，然后上传到CUDA
-                "[1:v]format=rgba,hwupload_cuda[img_cuda];"
-                # 使用overlay_cuda进行叠加
-                f"[bg_cuda][img_cuda]overlay_cuda=x=0:y='{y_expr}':eof_action=endall:shortest=1[out_cuda];"
-                # 确保输出流格式正确
-                "[out_cuda]hwdownload,format=yuv420p[out]"
+                bg_filter +
+                img_filter +
+                overlay_filter +
+                output_filter
             )
             
             ffmpeg_cmd.extend([
@@ -1904,11 +1923,11 @@ class VideoRenderer:
                 raise
                 
             # 删除临时图像文件
-            # try:
-            #     os.remove(temp_img_path)
-            #     logger.info(f"已删除临时文件: {temp_img_path}")
-            # except Exception as e:
-            #     logger.warning(f"删除临时文件失败: {e}")
+            try:
+                os.remove(temp_img_path)
+                logger.info(f"已删除临时文件: {temp_img_path}")
+            except Exception as e:
+                logger.warning(f"删除临时文件失败: {e}")
             
             # 更新性能统计信息
             encoding_end_time = time.time()
@@ -1926,10 +1945,10 @@ class VideoRenderer:
         except Exception as e:
             logger.error(f"创建滚动视频失败 (overlay_cuda): {str(e)}")
             logger.error(traceback.format_exc())
-            # try:
-            #     # 清理临时文件
-            #     if 'temp_img_path' in locals() and os.path.exists(temp_img_path):
-            #         os.remove(temp_img_path)
-            # except:
-            #     pass
-            # raise
+            try:
+                # 清理临时文件
+                if 'temp_img_path' in locals() and os.path.exists(temp_img_path):
+                    os.remove(temp_img_path)
+            except:
+                pass
+            raise
