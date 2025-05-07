@@ -1732,10 +1732,10 @@ class VideoRenderer:
                     text=True,
                     timeout=5
                 )
-                has_overlay_cuda = "overlaycuda" in filter_check.stdout
+                has_overlay_cuda = "overlay_cuda" in filter_check.stdout
                 
                 if not has_overlay_cuda:
-                    logger.warning("系统不支持overlay_cuda滤镜，虽然检测到NVIDIA GPU")
+                    logger.warning("系统不支持overlay_cuda滤镜（GPU加速叠加滤镜），虽然检测到NVIDIA GPU")
                     logger.info("将回退到使用普通的crop滤镜方法")
                     return self.create_scrolling_video_ffmpeg(
                         image=image,
@@ -1815,7 +1815,7 @@ class VideoRenderer:
             # 构建滤镜复杂表达式
             filter_complex = (
                 f"[1:v]format=rgba,hwupload_cuda[img]; "
-                f"[0:v][img]overlaycuda=x=0:y='{y_expr}':eof_action=endall:shortest=1[out]"
+                f"[0:v][img]overlay_cuda=x=0:y='{y_expr}':eof_action=endall:shortest=1[out]"
             )
             
             ffmpeg_cmd.extend([
