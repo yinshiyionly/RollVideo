@@ -11,10 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     cmake \
     git \
-    vim \
     clang \
     llvm \
-    clang-tools \
     libtool \
     autoconf \
     automake \
@@ -30,20 +28,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libass-dev \
     libva-dev \
     libvdpau-dev \
-    libxcb1-dev \
-    libxcb-shm0-dev \
-    libxcb-xfixes0-dev \
-    nvidia-driver-525-server \
     libreadline-dev \
     libbz2-dev \
-    libsm6 \
-    libxrender1 \
     libxext-dev \
     libgomp1 \
     liblzma-dev \
-    libgl1-mesa-glx \
-    libprotobuf-dev \
-    protobuf-compiler \
     libglib2.0-0 \
     mpich \
     openmpi-bin \
@@ -56,19 +45,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsqlite3-dev \
     libssl-dev \
     libffi-dev \
-    unzip \
-    pciutils \
-    net-tools \
     libblas-dev \
     gfortran \
     libblas3 \
     libopenblas-dev \
-    git-lfs \
     libswresample-dev \
     libfreetype6-dev \
     libtheora-dev \
     libvorbis-dev \
-    texinfo \
     libmp3lame-dev \
     libopus-dev \
     # 安装 CUDA 开发工具
@@ -154,6 +138,9 @@ ENV PATH="/usr/local/cuda/bin:${PATH}" \
 
 # 验证FFmpeg是否支持NVIDIA编码器
 # RUN ffmpeg -encoders | grep nvenc
+
+# 复制
+COPY dockerfile-requirements.txt /app/
 
 # 设置工作目录
 WORKDIR /app

@@ -10,7 +10,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    if: ${{ github.repository == 'duanfuxing/RollVideo' }}
+    if: ${{ github.repository == 'notworking/RollVideo' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -39,7 +39,7 @@ jobs:
           file: app/services/roll_video/Dockerfile
           push: true
           tags: |
-            catchoco/roll-video:supervisor
+            catchoco/roll-video:notworking
           platforms: linux/amd64
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
