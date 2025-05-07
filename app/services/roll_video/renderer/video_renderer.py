@@ -1904,11 +1904,11 @@ class VideoRenderer:
                 raise
                 
             # 删除临时图像文件
-            try:
-                os.remove(temp_img_path)
-                logger.info(f"已删除临时文件: {temp_img_path}")
-            except Exception as e:
-                logger.warning(f"删除临时文件失败: {e}")
+            # try:
+            #     os.remove(temp_img_path)
+            #     logger.info(f"已删除临时文件: {temp_img_path}")
+            # except Exception as e:
+            #     logger.warning(f"删除临时文件失败: {e}")
             
             # 更新性能统计信息
             encoding_end_time = time.time()
