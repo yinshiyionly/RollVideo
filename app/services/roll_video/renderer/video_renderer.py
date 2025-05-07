@@ -1545,40 +1545,36 @@ class VideoRenderer:
                 # 检查进程返回码
                 if process.returncode != 0:
                     logger.error(f"FFmpeg处理失败: {stderr}")
-                    raise Exception(f"FFmpeg处理失败，返回码: {process.returncode}")
-                
-                logger.info("FFmpeg处理完成")
-                
+                    # 分析常见错误原因，提供更详细的错误信息
+                    if "No space left on device" in stderr:
+                        raise Exception(f"FFmpeg处理失败: 设备存储空间不足")
+                    elif "Invalid argument" in stderr:
+                        raise Exception(f"FFmpeg处理失败: 参数无效，请检查命令")
+                    elif "Error opening filters" in stderr:
+                        raise Exception(f"FFmpeg处理失败: 滤镜配置错误，请检查滤镜表达式")
+                    else:
+                        raise Exception(f"FFmpeg处理失败，返回码: {process.returncode}")
             except Exception as e:
-                logger.error(f"执行FFmpeg命令时出错: {str(e)}")
+                logger.error(f"FFmpeg处理失败: {str(e)}")
                 raise
-            finally:
-                # 清理临时文件
-                try:
-                    if os.path.exists(temp_img_path):
-                        os.remove(temp_img_path)
-                except Exception as e:
-                    logger.warning(f"清理临时文件失败: {str(e)}")
+                
+            # 删除临时图像文件
+            try:
+                os.remove(temp_img_path)
+                logger.info(f"已删除临时文件: {temp_img_path}")
+            except Exception as e:
+                logger.warning(f"删除临时文件失败: {e}")
             
-            # 编码结束
+            # 更新性能统计信息
             encoding_end_time = time.time()
             self.performance_stats["encoding_time"] = encoding_end_time - encoding_start_time
-            
-            # 计算总时间
             self.performance_stats["total_time"] = encoding_end_time - total_start_time
-            
-            # 估算处理的帧数和帧率
             self.performance_stats["frames_processed"] = total_frames
-            if self.performance_stats["encoding_time"] > 0:
-                self.performance_stats["fps"] = total_frames / self.performance_stats["encoding_time"]
+            self.performance_stats["fps"] = total_frames / max(0.001, self.performance_stats["encoding_time"])
             
-            # 输出性能统计
-            logger.info("\n" + "="*50)
-            logger.info("滚动视频生成性能统计 (FFmpeg滤镜方式):")
-            logger.info(f"1. 准备阶段: {self.performance_stats['preparation_time']:.2f}秒 ({self.performance_stats['preparation_time']/self.performance_stats['total_time']*100:.1f}%)")
-            logger.info(f"2. FFmpeg编码: {self.performance_stats['encoding_time']:.2f}秒 ({self.performance_stats['encoding_time']/self.performance_stats['total_time']*100:.1f}%)")
-            logger.info(f"总时间: {self.performance_stats['total_time']:.2f}秒, 估算帧率: {self.performance_stats['fps']:.1f}帧/秒")
-            logger.info("="*50 + "\n")
+            logger.info(f"视频处理完成: {output_path}")
+            logger.info(f"性能统计: 准备={self.performance_stats['preparation_time']:.2f}秒, 编码={self.performance_stats['encoding_time']:.2f}秒")
+            logger.info(f"总时间: {self.performance_stats['total_time']:.2f}秒, 平均帧率: {self.performance_stats['fps']:.1f}FPS")
             
             return output_path
             
@@ -1587,4 +1583,318 @@ class VideoRenderer:
             logger.error(traceback.format_exc())
             # 记录总时间（即使发生错误）
             self.performance_stats["total_time"] = time.time() - total_start_time
+            raise
+
+    def create_scrolling_video_overlay_cuda(
+        self,
+        image,
+        output_path,
+        text_actual_height,
+        transparency_required=False,
+        preferred_codec="h264_nvenc",
+        audio_path=None,
+        bg_color=(0, 0, 0, 255),
+        scroll_effect="basic"  # 'basic' 或 'advanced' 滚动效果
+    ):
+        """
+        使用FFmpeg的overlay_cuda滤镜创建GPU加速的滚动视频
+        
+        参数:
+            image: 要滚动的图像 (PIL.Image或NumPy数组)
+            output_path: 输出视频文件路径
+            text_actual_height: 文本实际高度
+            transparency_required: 是否需要透明通道
+            preferred_codec: 首选视频编码器
+            audio_path: 可选的音频文件路径
+            bg_color: 背景颜色 (R,G,B) 或 (R,G,B,A)
+            scroll_effect: 滚动效果类型 ('basic'=匀速, 'advanced'=加减速)
+            
+        Returns:
+            输出视频的路径
+        """
+        try:
+            # 记录开始时间
+            total_start_time = time.time()
+            
+            # 初始化性能统计
+            self.performance_stats = {
+                "preparation_time": 0,
+                "encoding_time": 0,
+                "total_time": 0,
+                "frames_processed": 0,
+                "fps": 0
+            }
+            
+            # 1. 准备图像
+            preparation_start_time = time.time()
+            
+            # 将输入图像转换为PIL.Image对象
+            if isinstance(image, np.ndarray):
+                # NumPy数组转PIL图像
+                if image.shape[2] == 4:  # RGBA
+                    pil_image = Image.fromarray(image, 'RGBA')
+                else:  # RGB
+                    pil_image = Image.fromarray(image, 'RGB')
+            elif isinstance(image, Image.Image):
+                # 直接使用PIL图像
+                pil_image = image
+            else:
+                raise ValueError("不支持的图像类型，需要PIL.Image或numpy.ndarray")
+            
+            # 确保输出目录存在
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            
+            # 设置临时图像文件路径
+            temp_img_path = f"{os.path.splitext(output_path)[0]}_temp.png"
+            
+            # 临时图像优化选项
+            image_optimize_options = {
+                "optimize": True,  # 优化图像存储
+                "compress_level": 6,  # 中等压缩级别
+            }
+            
+            # 使用PIL直接保存图像，保留原始格式和所有信息
+            pil_image.save(temp_img_path, format="PNG", **image_optimize_options)
+            
+            # 获取图像尺寸
+            img_width, img_height = pil_image.size
+            
+            # 清理内存中的大型对象，确保不会占用过多内存
+            del pil_image
+            gc.collect()
+            
+            # 2. 计算滚动参数
+            # 滚动距离 = 图像高度 - 视频高度
+            scroll_distance = max(0, img_height - self.height)
+            
+            # 确保至少有8秒的滚动时间
+            min_scroll_duration = 8.0  # 秒
+            scroll_duration = max(min_scroll_duration, scroll_distance / (self.scroll_speed * self.fps))
+            
+            # 前后各添加2秒静止时间
+            start_static_time = 2.0  # 秒
+            end_static_time = 2.0  # 秒
+            total_duration = start_static_time + scroll_duration + end_static_time
+            
+            # 总帧数
+            total_frames = int(total_duration * self.fps)
+            self.total_frames = total_frames
+            
+            # 滚动起始和结束时间点
+            scroll_start_time = start_static_time
+            scroll_end_time = start_static_time + scroll_duration
+            
+            logger.info(f"视频参数: 宽度={self.width}, 高度={self.height}, 帧率={self.fps}")
+            logger.info(f"滚动参数: 距离={scroll_distance}px, 速度={self.scroll_speed}px/帧, 持续={scroll_duration:.2f}秒")
+            logger.info(f"时间设置: 总时长={total_duration:.2f}秒, 静止开始={start_static_time}秒, 静止结束={end_static_time}秒")
+            logger.info(f"滚动效果: {scroll_effect}")
+            
+            # 3. 设置编码器参数
+            codec_params, _ = self._get_codec_parameters(
+                preferred_codec, transparency_required, 4 if transparency_required else 3
+            )
+            
+            # 准备阶段结束
+            preparation_end_time = time.time()
+            self.performance_stats["preparation_time"] = preparation_end_time - preparation_start_time
+            
+            # 4. 确认系统是否支持CUDA
+            encoding_start_time = time.time()
+            has_cuda_support = False
+            
+            try:
+                # 检测NVIDIA GPU是否存在
+                nvidia_result = subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
+                has_cuda_support = nvidia_result.returncode == 0
+                
+                if has_cuda_support:
+                    logger.info("检测到NVIDIA GPU，将使用overlay_cuda滤镜")
+                else:
+                    logger.warning("未检测到NVIDIA GPU，overlay_cuda滤镜需要NVIDIA GPU支持")
+                    logger.info("将回退到使用普通的crop滤镜方法")
+                    return self.create_scrolling_video_ffmpeg(
+                        image=image,
+                        output_path=output_path,
+                        text_actual_height=text_actual_height,
+                        transparency_required=transparency_required,
+                        preferred_codec=preferred_codec,
+                        audio_path=audio_path,
+                        bg_color=bg_color,
+                    )
+            except Exception as e:
+                logger.warning(f"检测NVIDIA GPU时出错: {e}")
+                logger.info("将回退到使用普通的crop滤镜方法")
+                return self.create_scrolling_video_ffmpeg(
+                    image=image,
+                    output_path=output_path,
+                    text_actual_height=text_actual_height,
+                    transparency_required=transparency_required,
+                    preferred_codec=preferred_codec,
+                    audio_path=audio_path,
+                    bg_color=bg_color,
+                )
+            
+            # 5. 构建基本FFmpeg命令 (CUDA加速版)
+            # 将背景色从RGB(A)转换为十六进制格式 (#RRGGBB)
+            bg_hex = "#{:02x}{:02x}{:02x}".format(bg_color[0], bg_color[1], bg_color[2])
+            
+            # 构建基础命令
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",
+                "-hwaccel", "cuda",
+                "-hwaccel_output_format", "cuda",
+                "-f", "lavfi", 
+                "-i", f"color=c={bg_hex}:s={self.width}x{self.height}:r={self.fps},format=yuv420p,hwupload_cuda",
+                "-i", temp_img_path,
+                "-progress", "pipe:2",  # 输出进度信息到stderr
+                "-stats",  # 启用统计信息
+                "-stats_period", "1",  # 每1秒输出一次统计信息
+            ]
+            
+            # 添加音频输入（如果有）
+            if audio_path and os.path.exists(audio_path):
+                ffmpeg_cmd.extend(["-i", audio_path])
+            
+            # 创建滚动表达式
+            if scroll_effect == "advanced":
+                # 加速减速效果的滚动
+                # 加速阶段时间（秒）
+                accel_time = min(3.0, scroll_duration * 0.15)  
+                # 减速开始时间（秒）
+                decel_start = scroll_start_time + scroll_duration - min(3.0, scroll_duration * 0.15)
+                # 加速系数、中间速度和减速系数
+                accel_factor = scroll_distance * 0.05 / (accel_time * accel_time) if accel_time > 0 else 0
+                mid_speed = scroll_distance / scroll_duration if scroll_duration > 0 else 0
+                decel_factor = mid_speed * 0.2
+                
+                # 高级滚动公式
+                scroll_expr = (
+                    f"if(lt(t,{scroll_start_time + accel_time}),"
+                    f"{accel_factor}*pow(t-{scroll_start_time},2),"
+                    f"if(gt(t,{decel_start}),"
+                    f"{scroll_distance-mid_speed*(scroll_end_time-decel_start)}+mid_speed*(t-{decel_start})-{decel_factor}*pow(t-{decel_start},2),"
+                    f"{accel_factor}*pow({accel_time},2)+mid_speed*(t-{scroll_start_time}-{accel_time})))"
+                )
+                
+                # 包装最终表达式，限制滚动范围
+                y_expr = f"min(0,-(h-{self.height})+{scroll_expr})"
+                logger.info(f"使用高级滚动效果 (加速/减速)")
+            else:
+                # 基础匀速滚动
+                y_expr = f"min(0, -(h-{self.height})+if(between(t,{scroll_start_time},{scroll_end_time}),(t-{scroll_start_time})*{scroll_distance}/{scroll_duration},if(lt(t,{scroll_start_time}),0,{scroll_distance})))"
+                logger.info(f"使用基础匀速滚动效果")
+            
+            # 构建滤镜复杂表达式
+            filter_complex = (
+                f"[1:v]format=rgba,hwupload_cuda[img]; "
+                f"[0:v][img]overlaycuda=x=0:y='{y_expr}':eof_action=endall:shortest=1[out]"
+            )
+            
+            ffmpeg_cmd.extend([
+                "-filter_complex", filter_complex,
+                "-map", "[out]"
+            ])
+            
+            # 添加音频映射（如果有）
+            if audio_path and os.path.exists(audio_path):
+                ffmpeg_cmd.extend([
+                    "-map", "2:a:0",  # 从第3个输入（索引2）获取音频
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-shortest",
+                ])
+            
+            # 添加视频编码器参数
+            ffmpeg_cmd.extend(codec_params)
+            
+            # 设置持续时间
+            ffmpeg_cmd.extend(["-t", str(total_duration)])
+            
+            # 添加输出路径
+            ffmpeg_cmd.append(output_path)
+            
+            logger.info(f"FFmpeg命令: {' '.join(ffmpeg_cmd)}")
+            
+            # 6. 执行FFmpeg命令
+            try:
+                # 启动进程
+                logger.info("启动FFmpeg进程 (overlay_cuda)...")
+                process = subprocess.Popen(
+                    ffmpeg_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,  # 行缓冲
+                    universal_newlines=True  # 使用通用换行符
+                )
+                
+                # 使用性能监控线程
+                monitor_thread = PerformanceMonitor.monitor_ffmpeg_progress(
+                    process=process,
+                    total_duration=total_duration,
+                    total_frames=total_frames,
+                    encoding_start_time=encoding_start_time
+                )
+                
+                # 获取输出和错误
+                stdout, stderr = process.communicate()
+                
+                # 等待监控线程结束
+                if monitor_thread and monitor_thread.is_alive():
+                    monitor_thread.join(timeout=2.0)
+                
+                # 检查进程返回码
+                if process.returncode != 0:
+                    logger.error(f"FFmpeg处理失败: {stderr}")
+                    # 检查是否是因为overlaycuda滤镜不可用导致的失败
+                    if "No such filter: 'overlaycuda'" in stderr:
+                        logger.warning("系统不支持overlaycuda滤镜，将回退到使用普通的crop滤镜方法")
+                        # 删除临时文件
+                        try:
+                            os.remove(temp_img_path)
+                        except:
+                            pass
+                        return self.create_scrolling_video_ffmpeg(
+                            image=image,
+                            output_path=output_path,
+                            text_actual_height=text_actual_height,
+                            transparency_required=transparency_required,
+                            preferred_codec=preferred_codec,
+                            audio_path=audio_path,
+                            bg_color=bg_color,
+                        )
+                    raise Exception(f"FFmpeg处理失败，返回码: {process.returncode}")
+            except Exception as e:
+                logger.error(f"FFmpeg处理失败: {str(e)}")
+                raise
+                
+            # 删除临时图像文件
+            try:
+                os.remove(temp_img_path)
+                logger.info(f"已删除临时文件: {temp_img_path}")
+            except Exception as e:
+                logger.warning(f"删除临时文件失败: {e}")
+            
+            # 更新性能统计信息
+            encoding_end_time = time.time()
+            self.performance_stats["encoding_time"] = encoding_end_time - encoding_start_time
+            self.performance_stats["total_time"] = encoding_end_time - total_start_time
+            self.performance_stats["frames_processed"] = total_frames
+            self.performance_stats["fps"] = total_frames / max(0.001, self.performance_stats["encoding_time"])
+            
+            logger.info(f"视频处理完成 (overlay_cuda): {output_path}")
+            logger.info(f"性能统计: 准备={self.performance_stats['preparation_time']:.2f}秒, 编码={self.performance_stats['encoding_time']:.2f}秒")
+            logger.info(f"总时间: {self.performance_stats['total_time']:.2f}秒, 平均帧率: {self.performance_stats['fps']:.1f}FPS")
+            
+            return output_path
+            
+        except Exception as e:
+            logger.error(f"创建滚动视频失败 (overlay_cuda): {str(e)}")
+            logger.error(traceback.format_exc())
+            try:
+                # 清理临时文件
+                if 'temp_img_path' in locals() and os.path.exists(temp_img_path):
+                    os.remove(temp_img_path)
+            except:
+                pass
             raise

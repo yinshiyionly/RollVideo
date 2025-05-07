@@ -60,10 +60,46 @@ def main():
         #         "scroll_speed": 1,
         #     }
         # },
+        # {
+        #     # 使用FFmpeg滤镜方法
+        #     "description": "白底黑字（自动GPU -> MP4）- FFmpeg滤镜方法",
+        #     "method": "ffmpeg",  # 使用FFmpeg滤镜方法
+        #     "params": {
+        #         "text": sample_text,
+        #         "width": 720,
+        #         "height": 1280,
+        #         "font_path": "方正黑体简体.ttf",
+        #         "font_size": 30,
+        #         "font_color": [0,0,0],
+        #         "bg_color":[255,255,255,1.0], # 不透明
+        #         "line_spacing": 20,
+        #         "char_spacing": 10,
+        #         "fps": 30,
+        #         "scroll_speed": 1,
+        #     }
+        # },
+        # {
+        #     # 使用FFmpeg滤镜方法 - 透明背景
+        #     "description": "透明背景黑字（ProRes 4444 -> MOV）- FFmpeg滤镜方法",
+        #     "method": "ffmpeg",  # 使用FFmpeg滤镜方法
+        #     "params": {
+        #          "text": sample_text,
+        #         "width": 720,
+        #         "height": 1280,
+        #         "font_path": "方正黑体简体.ttf",
+        #         "font_size": 30,
+        #         "font_color": [0,0,0],
+        #         "bg_color": [255,255,255,0.5],  # 半透明背景
+        #         "line_spacing": 20,
+        #         "char_spacing": 10,
+        #         "fps": 30,
+        #         "scroll_speed": 1,  # 更快的滚动速度
+        #     }
+        # },
         {
-            # 使用FFmpeg滤镜方法
-            "description": "白底黑字（自动GPU -> MP4）- FFmpeg滤镜方法",
-            "method": "ffmpeg",  # 使用FFmpeg滤镜方法
+            # 使用overlay_cuda GPU加速方法
+            "description": "白底黑字（GPU加速 -> MP4）- overlay_cuda GPU加速方法",
+            "method": "overlay_cuda",  # 使用overlay_cuda GPU加速方法
             "params": {
                 "text": sample_text,
                 "width": 720,
@@ -71,19 +107,20 @@ def main():
                 "font_path": "方正黑体简体.ttf",
                 "font_size": 30,
                 "font_color": [0,0,0],
-                "bg_color":[255,255,255,1.0], # 不透明
+                "bg_color": [255,255,255,1.0],  # 不透明
                 "line_spacing": 20,
                 "char_spacing": 10,
                 "fps": 30,
                 "scroll_speed": 1,
+                "scroll_effect": "basic",  # 基础匀速滚动
             }
         },
         {
-            # 使用FFmpeg滤镜方法 - 透明背景
-            "description": "透明背景黑字（ProRes 4444 -> MOV）- FFmpeg滤镜方法",
-            "method": "ffmpeg",  # 使用FFmpeg滤镜方法
+            # 使用overlay_cuda GPU加速方法 - 加减速效果
+            "description": "深蓝底白字（GPU加速 + 加减速效果 -> MP4）- overlay_cuda GPU加速方法",
+            "method": "overlay_cuda",  # 使用overlay_cuda GPU加速方法
             "params": {
-                 "text": sample_text,
+                "text": sample_text,
                 "width": 720,
                 "height": 1280,
                 "font_path": "方正黑体简体.ttf",
@@ -92,8 +129,9 @@ def main():
                 "bg_color": [255,255,255,0.5],  # 半透明背景
                 "line_spacing": 20,
                 "char_spacing": 10,
-                "fps": 30,
-                "scroll_speed": 1,  # 更快的滚动速度
+                "fps": 30,  # 更高帧率，更平滑的效果
+                "scroll_speed": 1,
+                "scroll_effect": "advanced",  # 加速减速效果
             }
         }
     ]
@@ -115,6 +153,12 @@ def main():
         if method == "ffmpeg":
             # 使用FFmpeg滤镜方法
             result = service.create_roll_video_ffmpeg(
+                output_path=output_path_base,
+                **test_case['params']
+            )
+        elif method == "overlay_cuda":
+            # 使用overlay_cuda GPU加速方法
+            result = service.create_roll_video_overlay_cuda(
                 output_path=output_path_base,
                 **test_case['params']
             )
