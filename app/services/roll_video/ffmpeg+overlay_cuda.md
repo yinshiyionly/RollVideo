@@ -172,3 +172,18 @@ ffmpeg -y -hwaccel cuda -hwaccel_output_format cuda \
 1、要充分使用GPU加速的效果提升渲染效率。
 2、当GPU不可用或滤镜不可用时要有CPU渲染的回退策略
 3、可以使用的硬件资源：8核、30G内存、10G显存(A10卡)
+
+
+
+ffmpeg -y -hwaccel cuda \
+-f lavfi -i "color=c=ffffff:s=720x1280:r=30,format=yuv420p,hwupload_cuda" \
+-i /app/services/roll_video/output/test_case_2_20250507_061849_temp.png \
+-progress pipe:2 -stats -stats_period 1 \
+-filter_complex "[0:v]null[bg_final_cuda]; \
+                 [1:v]format=rgba,hwupload_cuda[img_cuda_src]; \
+                 [bg_final_cuda][img_cuda_src]overlay_cuda=x=0:y='min(0, -(overlay_h-1280)+if(between(t,2.0,202.08333333333334),(t-2.0)*12005/200.08333333333334,if(lt(t,2.0),0,12005)))':eof_action=endall:shortest=1[out_overlay_cuda]; \
+                 [out_overlay_cuda]scale_npp=format=nv12[out_final_cuda]; \
+                 [out_final_cuda]hwdownload,format=yuv420p[out]" \
+-map "[out]" -c:v h264_nvenc -preset p1 -rc vbr -cq 28 -b:v 4M -pix_fmt yuv420p \
+-movflags +faststart -t 204.08333333333334 \
+/app/services/roll_video/output/66666.mp4

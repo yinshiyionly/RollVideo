@@ -1922,12 +1922,12 @@ class VideoRenderer:
                 logger.error(f"FFmpeg处理失败: {str(e)}")
                 raise
                 
-            # 删除临时图像文件
-            try:
-                os.remove(temp_img_path)
-                logger.info(f"已删除临时文件: {temp_img_path}")
-            except Exception as e:
-                logger.warning(f"删除临时文件失败: {e}")
+            # # 删除临时图像文件
+            # try:
+            #     os.remove(temp_img_path)
+            #     logger.info(f"已删除临时文件: {temp_img_path}")
+            # except Exception as e:
+            #     logger.warning(f"删除临时文件失败: {e}")
             
             # 更新性能统计信息
             encoding_end_time = time.time()
@@ -1945,10 +1945,10 @@ class VideoRenderer:
         except Exception as e:
             logger.error(f"创建滚动视频失败 (overlay_cuda): {str(e)}")
             logger.error(traceback.format_exc())
-            try:
-                # 清理临时文件
-                if 'temp_img_path' in locals() and os.path.exists(temp_img_path):
-                    os.remove(temp_img_path)
-            except:
-                pass
-            raise
+            # try:
+            #     # 清理临时文件
+            #     if 'temp_img_path' in locals() and os.path.exists(temp_img_path):
+            #         os.remove(temp_img_path)
+            # except:
+            #     pass
+            # raise
