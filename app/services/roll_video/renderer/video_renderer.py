@@ -1824,7 +1824,7 @@ class VideoRenderer:
                 bg_format = "rgba" # 如果前景是RGBA，背景也用RGBA以确保兼容性
                 bg_filter = f"[0:v]format={bg_format},hwupload_cuda[bg_cuda];"
                 # overlay_cuda 叠加
-                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y={y_expr}:eof_action=endall:shortest=1[out_cuda];"
+                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y={y_expr}[out_cuda];"
                 # 确保输出流格式正确 (RGBA输出需要hwdownload+format转换)
                 output_filter = "[out_cuda]hwdownload,format=rgba[out]"
                 logger.info("使用 overlay_cuda 处理透明视频 (RGBA格式)")
@@ -1834,7 +1834,7 @@ class VideoRenderer:
                 bg_format = "yuv420p" # 背景使用YUV420P
                 bg_filter = f"[0:v]format={bg_format},hwupload_cuda[bg_cuda];"
                 # overlay_cuda 叠加 (YUV420P输入)
-                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y={y_expr}:eof_action=endall:shortest=1[out_cuda];"
+                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y={y_expr}[out_cuda];"
                  # 确保输出流格式正确 (YUV420P输出直接使用)
                 output_filter = "[out_cuda]hwdownload,format=yuv420p[out]"
                 logger.info("使用 overlay_cuda 处理不透明视频 (YUV420P格式)")
