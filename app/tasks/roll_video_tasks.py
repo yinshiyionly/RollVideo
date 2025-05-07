@@ -7,7 +7,7 @@ from app.models.roll_video_task import TaskState
 from app.utils.logger import Logger
 from app.celery_app import celery_app
 from app.services.roll_video.roll_video_service import RollVideoService
-from app.utils.tos_client import TOSClient
+from app.utils.oss_client import OSSClient
 from app.config import settings
 
 # 初始化日志
@@ -142,27 +142,33 @@ def generate_roll_video_task(self, task_id: str):
         service = RollVideoService()
         
          # 3.2使用 task.payload 来传递所有参数
-        result = service.create_roll_video(
-            output_path=roll_video_filename, # Service 会修正扩展名
-            **task.payload
-        )
+        # result = service.create_roll_video(
+        #     output_path=roll_video_filename, # Service 会修正扩展名
+        #     **task.payload
+        # )
+
+        result = {
+            "status": "success",
+            "message": "滚动视频创建成功",
+            "output_path": "/opt/test-roll-video.mp4",
+        }
 
         # 3.3 输出结果
         if result["status"] == "success" and result["output_path"] and os.path.exists(result["output_path"]):
             log.info(f"生成视频成功, task_id: {task_id}, 生成结果: {result}")
-            # 3.4 上传 tos
+            # 3.4 上传 oss
             try:
-                object_key = upload_video_to_tos(task_id, result['output_path'])
+                object_key = upload_video_to_oss(task_id, result['output_path'])
                 # 构建完整的CDN URL，确保正确拼接
-                tos_cdn = settings.TOS_CDN.rstrip('/')  # 移除末尾可能的斜杠
-                tos_url = f"{tos_cdn}/{object_key.lstrip('/')}"  # 确保object_key不以斜杠开头
+                oss_cdn = settings.OSS_CDN.rstrip('/')  # 移除末尾可能的斜杠
+                oss_url = f"{oss_cdn}/{object_key.lstrip('/')}"  # 确保object_key不以斜杠开头
                 # 3.5 更新任务状态为完成
-                update_task_status(task_id, TaskState.COMPLETED, {"tos_url": tos_url})
+                update_task_status(task_id, TaskState.COMPLETED, {"oss_url": oss_url})
                 # 3.6 向客户端推送成功事件
                 if hasattr(settings, 'CLIENT_NOTIFY_URL') and settings.CLIENT_NOTIFY_URL:
-                    push_event_to_client.delay(task_id, tos_url, 0, "video_generated")
+                    push_event_to_client.delay(task_id, oss_url, 0, "video_generated")
             except Exception as e:
-                log.error(f"上传TOS失败: {str(e)}")
+                log.error(f"上传oss失败: {str(e)}")
                 update_task_status(task_id, TaskState.FAILED, {"error": f"视频生成成功但上传失败: {str(e)}"})
                 # 4.1 向客户端推送失败事件
                 if hasattr(settings, 'CLIENT_NOTIFY_URL') and settings.CLIENT_NOTIFY_URL:
@@ -226,8 +232,8 @@ def cleanup_temp_file(file_path):
     except Exception as e:
         log.error(f"清理临时文件失败: {str(e)}")
 
-def upload_video_to_tos(task_id: str, video_path: str):
-    """上传文件至TOS
+def upload_video_to_oss(task_id: str, video_path: str):
+    """上传文件至oss
 
     Args:
         task_id: 任务ID
@@ -246,15 +252,15 @@ def upload_video_to_tos(task_id: str, video_path: str):
     # 重试逻辑
     while retry_count < max_retries:
         try:
-            # 初始化 TOS 客户端
-            tos_client = TOSClient()
+            # 初始化 oss 客户端
+            oss_client = OSSClient()
             # 获取源文件扩展名
             ext = os.path.splitext(video_path)[1]  # 包含 `.` 例如 `.mp3`
             now = datetime.datetime.now()
             # 生成 object_key
             video_object_key = f"roll-video/{now.year}/{now.month:02d}/{task_id}{ext}"
-            # 执行上传TOS操作
-            tos_client.upload_file(
+            # 执行上传oss操作
+            oss_client.upload_file(
                 local_file_path=video_path,
                 object_key=video_object_key,
                 metadata={"task_id": task_id},
@@ -264,12 +270,12 @@ def upload_video_to_tos(task_id: str, video_path: str):
         except Exception as e:
             retry_count += 1
             last_error = e
-            log.warning(f"上传TOS失败(第{retry_count}次), task_id: {task_id}, error: {str(e)}")
+            log.warning(f"上传oss失败(第{retry_count}次), task_id: {task_id}, error: {str(e)}")
             if retry_count < max_retries:
                 # 等待一段时间后重试
                 time.sleep(5)
     
     # 所有重试都失败
-    msg = f"上传TOS失败(已重试{max_retries}次), task_id: {task_id}, video_path: {video_path}, 最后错误: {str(last_error)}"
+    msg = f"上传oss失败(已重试{max_retries}次), task_id: {task_id}, video_path: {video_path}, 最后错误: {str(last_error)}"
     log.error(msg)
     raise Exception(msg)

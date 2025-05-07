@@ -7,7 +7,7 @@ from app.config import settings
 from app.utils.logger import Logger
 
 # 配置日志记录器
-logger = Logger('tos-client')
+logger = Logger('oss-client')
 
 class OSSClient:
     def __init__(self):
@@ -57,7 +57,7 @@ class OSSClient:
         try:
             # 标准化文件路径
             local_file_path = Path(local_file_path)
-            
+
             # 检查文件是否存在
             if not local_file_path.exists():
                 raise FileNotFoundError(f"文件不存在: {local_file_path}")
@@ -70,20 +70,13 @@ class OSSClient:
                 return self._multipart_upload(
                     str(local_file_path), object_key, metadata
                 )
-            
-            # 配置头信息
-            headers = {}
-            if metadata:
-                for k, v in metadata.items():
-                    headers[f'x-oss-meta-{k}'] = str(v)
-            
+
             # 小文件直接上传
             result = self.bucket.put_object_from_file(
                 object_key, 
-                str(local_file_path),
-                headers=headers
+                str(local_file_path)
             )
-            
+
             logger.info(f"文件上传成功: {object_key}, 大小: {file_size} 字节")
             return {
                 "status": "success",
@@ -93,14 +86,17 @@ class OSSClient:
             }
             
         except FileNotFoundError as e:
-            logger.error(f"文件不存在: {str(e)}")
-            raise
+            err = f"文件不存在: {str(e)}"
+            logger.error(err)
+            raise Expection(status_code=500, detail=err)
         except oss2.exceptions.OssError as e:
-            logger.error(f"OSS操作错误: {e.code}, {e.message}, 请求ID: {e.request_id}")
-            raise
+            err = f"OSS操作错误: {e.code}, {e.message}, 请求ID: {e.request_id}"
+            logger.error(err)
+            raise Expection(status_code=500, detail=err)
         except Exception as e:
-            logger.error(f"文件上传失败-未知错误: {str(e)}")
-            raise
+            err = f"文件上传失败-未知错误: {str(e)}"
+            logger.error(err)
+            raise Expection(status_code=500, detail=err)
 
     def _multipart_upload(
         self,

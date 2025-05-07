@@ -34,18 +34,14 @@ class Settings(BaseSettings):
     REDIS_PORT: int  # Redis端口
     REDIS_PASSWORD: str  # Redis密码
 
-    # 火山引擎配置
-    VOLC_AK: str  # 火山引擎访问密钥ID
-    VOLC_SK: str  # 火山引擎访问密钥密码
+    # OSS 配置
+    OSS_ACCESS_KEY: str  # OSS访问密钥ID
+    OSS_SECRET_KEY: str  # OSS访问密钥密码
 
     # TOS云存储配置
-    TOS_REGION: str  # TOS区域
-    TOS_ENDPOINT: str  # TOS终端节点
-    TOS_BUCKET: str  # TOS存储桶名称
-    TOS_BUCKET_HOST_PUB: str  # TOS公网访问域名
-    TOS_BUCKET_HOST_PRI: str  # TOS内网访问域名
-    TOS_SCHEME: str  # TOS访问协议
-    TOS_CDN: str # TOS CDN或公网访问域名
+    OSS_ENDPOINT: str  # TOS终端节点
+    OSS_BUCKET: str  # TOS存储桶名称
+    OSS_CDN: str # TOS CDN或公网访问域名
 
     # 日志配置
     LOG_LEVEL: str  # 日志级别
