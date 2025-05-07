@@ -1,8 +1,8 @@
 services:
   # MySQL服务
-  mysql:
+  pro_mysql:
     image: mysql:8.0
-    container_name: roll_video_mysql
+    container_name: pro_roll_video_mysql
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
@@ -10,22 +10,22 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       TZ: Asia/Shanghai
     ports:
-      - "3306:3306"
+      - "33306:3306"
     volumes:
       - ./app/services/mysql/my.cnf:/etc/mysql/conf.d/my.cnf
       - ./data/mysql:/var/lib/mysql
     restart: unless-stopped
     networks:
-      - roll_video_net
+      - pro_roll_video_net
     command: --default-authentication-plugin=mysql_native_password
 
   # Redis服务
-  redis:
+  pro_redis:
     image: redis:7.0
-    container_name: roll_video_redis
+    container_name: pro_roll_video_redis
     command: redis-server /usr/local/etc/redis/redis.conf --requirepass ${REDIS_PASSWORD}
     ports:
-      - "6379:6379"
+      - "36379:6379"
     volumes:
       - ./app/services/redis/redis.conf:/usr/local/etc/redis/redis.conf
       - ./data/redis:/data/redis
@@ -33,12 +33,12 @@ services:
       - /etc/timezone:/etc/timezone
     restart: unless-stopped
     networks:
-      - roll_video_net
+      - pro_roll_video_net
 
   # 视频场景分割服务
-  roll_video:
-    image: catchoco/roll-video:supervisor
-    container_name: roll_video_serve
+  pro_roll_video:
+    image: catchoco/roll-video:new-supervisor
+    container_name: pro_roll_video_serve
     runtime: nvidia
     deploy:
       resources:
@@ -53,11 +53,11 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility,graphics
     volumes:
-      - ./:/roll_video
+      - ./:/app
       - /etc/localtime:/etc/localtime
       - /etc/timezone:/etc/timezone
     ports:
-      - "5000:5000"
+      - "6000:6000"
     restart: unless-stopped
     healthcheck:
       test: nvidia-smi || exit 1
@@ -66,17 +66,7 @@ services:
       retries: 3
       start_period: 2s
     networks:
-      - roll_video_net
-
-  # 非健康状态自动重启
-  autoheal:
-    restart: always
-    image: willfarrell/autoheal
-    container_name: autoheal
-    environment:
-      - AUTOHEAL_CONTAINER_LABEL=all
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - pro_roll_video_net
 
 volumes:
   mysql_data:
@@ -85,5 +75,5 @@ volumes:
     driver: local
 
 networks:
-  roll_video_net:
+  pro_roll_video_net:
     driver: bridge
