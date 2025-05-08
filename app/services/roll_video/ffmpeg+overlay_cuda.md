@@ -175,15 +175,75 @@ ffmpeg -y -hwaccel cuda -hwaccel_output_format cuda \
 
 
 
-ffmpeg -y -hwaccel cuda \
--f lavfi -i "color=c=ffffff:s=720x1280:r=30,format=yuv420p,hwupload_cuda" \
--i /app/services/roll_video/output/test_case_2_20250507_061849_temp.png \
--progress pipe:2 -stats -stats_period 1 \
--filter_complex "[0:v]null[bg_final_cuda]; \
-                 [1:v]format=rgba,hwupload_cuda[img_cuda_src]; \
-                 [bg_final_cuda][img_cuda_src]overlay_cuda=x=0:y='min(0, -(overlay_h-1280)+if(between(t,2.0,202.08333333333334),(t-2.0)*12005/200.08333333333334,if(lt(t,2.0),0,12005)))':eof_action=endall:shortest=1[out_overlay_cuda]; \
-                 [out_overlay_cuda]scale_npp=format=nv12[out_final_cuda]; \
-                 [out_final_cuda]hwdownload,format=yuv420p[out]" \
--map "[out]" -c:v h264_nvenc -preset p1 -rc vbr -cq 28 -b:v 4M -pix_fmt yuv420p \
--movflags +faststart -t 204.08333333333334 \
-/app/services/roll_video/output/66666.mp4
+
+CAHTGPT
+
+1. 处理非透明图像命令：
+ffmpeg -y -i "/app/services/roll_video/output/test_case_1_20250507_062431_temp_no_alpha.png" -pix_fmt yuv420p "/app/services/roll_video/output/test_case_1_20250507_062431_temp_no_alpha_yuv420p.png"
+
+
+#### MP4 fps：100
+ffmpeg -y \
+-hwaccel cuda -hwaccel_output_format cuda \
+-f lavfi -i "color=c=#ffffff:s=720x1280:r=24,format=yuv420p,hwupload_cuda" \
+-loop 1 -i "/app/services/roll_video/output/test_case_1_20250507_062431_temp_no_alpha.png" \
+-filter_complex "[1:v]format=yuv420p,hwupload_cuda[img_cuda_no_alpha]; \
+                 [0:v][img_cuda_no_alpha]overlay_cuda=x=(main_w-overlay_w)/2:y='-if(lt(t,2.0),0,if(gt(t,202.08333333333334),12005,(t-2.0)*(12005/200.08333333333334)))'[out_cuda]; \
+                 [out_cuda]hwdownload,format=yuv420p[out]" \
+-map "[out]" -c:v h264_nvenc -preset p4 -pix_fmt yuv420p -t 204.08333333333334 "test_video_scroll_up_v6.1_no_alpha.mp4"
+
+
+
+
+1. 处理透明图像命令：
+
+#### MOV 透明视频基座
+ffmpeg -y \
+-f lavfi -t 10 -i "color=c=0x00000000:s=720x1280:r=24,format=yuva420p" \
+-c:v prores_ks -profile:v 2 -pix_fmt yuva420p "transparent_video_10s.mov"
+
+#### MOV 基于透明视频合成 fps：80
+ffmpeg -y \
+-stream_loop -1 -i "/app/services/roll_video/output/transparent_video_10s.mov" \
+-i "/app/services/roll_video/output/063821-yuva420p.png" \
+-filter_complex "[1:v]loop=1:1:0[img]; \
+                 [img]scale=720:13285[scroll]; \
+                 [0:v][scroll]overlay=x=0:y='H-(t*(13285+1280)/204.083333)'[out]" \
+-map "[out]" -c:v prores_ks -profile:v 5 -pix_fmt yuva420p \
+-t 204.083333 "test_video_scroll_up_alpha.mov"
+
+
+   
+#### MOV 把图像转换为yuva420p格式 fps：40
+ffmpeg -y \
+-f lavfi -i "color=c=0x00000000:s=720x1280:r=24,format=yuva420p" \
+-loop 1 -i "/app/services/roll_video/output/063821-yuva420p.png" \
+-filter_complex "[1:v]format=yuva420p,trim=duration=204.083333,loop=1:1:0[img]; \
+                 [img]setpts=PTS-STARTPTS,scale=720:13285[scroll]; \
+                 [0:v][scroll]overlay=x=0:y='H-(t*(13285+1280)/204.083333)'[out]" \
+-map "[out]" -c:v prores_ks -profile:v 1 -pix_fmt yuva420p \
+-t 204.083333 "test_video_scroll_up_alpha.mov"
+
+#### MOV 要求图像为yuva420p格式 fps：30
+ffmpeg -y \
+-f lavfi -i "color=c=0x00000000:s=720x1280:r=24,format=yuva420p" \
+-loop 1 -i "/app/services/roll_video/output/063821-yuva420p.png" \
+-filter_complex "[1:v]trim=duration=204.083333,loop=1:1:0[img]; \
+                 [img]setpts=PTS-STARTPTS,scale=720:13285[scroll]; \
+                 [0:v][scroll]overlay=x=0:y='H-(t*(13285+1280)/204.083333)'[out]" \
+-map "[out]" -c:v prores_ks -profile:v 5 -pix_fmt yuva420p \
+-t 204.083333 "test_video_scroll_up_alpha.mov"
+
+
+
+#### VP9 fps：18
+ffmpeg -y \
+-f lavfi -i "color=c=0x00000000:s=720x1280:r=24,format=yuva420p" \
+-loop 1 -i "/app/services/roll_video/output/063821-yuva420p.png" \
+-filter_complex "[1:v]format=yuva420p,trim=duration=204.083333,loop=1:1:0[img]; \
+                 [img]setpts=PTS-STARTPTS,scale=720:13285[scroll]; \
+                 [0:v][scroll]overlay=x=0:y='H-(t*(13285+1280)/204.083333)'[out]" \
+-map "[out]" -c:v libvpx-vp9 -pix_fmt yuva420p -deadline best \
+-t 204.083333 "test_video_scroll_up_alpha.webm"
+
+

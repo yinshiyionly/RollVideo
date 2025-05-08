@@ -1453,7 +1453,7 @@ class VideoRenderer:
                 "-progress", "pipe:2",  # 输出进度信息到stderr
                 "-stats",  # 启用统计信息
                 "-stats_period", "1",  # 每1秒输出一次统计信息
-                "-max_muxing_queue_size", "1024",  # 限制复用队列大小
+                "-max_muxing_queue_size", "8192",  # 限制复用队列大小
             ]
             
             # 添加音频输入（如果有）
@@ -1490,7 +1490,7 @@ class VideoRenderer:
             ffmpeg_cmd.extend([
                 "-t", str(total_duration),  # 设置总时长
                 "-vsync", "1",  # 添加vsync参数，确保平滑的视频同步
-                "-thread_queue_size", "2048",  # 限制线程队列大小，减少内存使用
+                "-thread_queue_size", "8192",  # 限制线程队列大小，减少内存使用
             ])
             
             # 添加视频编码参数
@@ -1824,7 +1824,7 @@ class VideoRenderer:
                 bg_format = "rgba" # 如果前景是RGBA，背景也用RGBA以确保兼容性
                 bg_filter = f"[0:v]format={bg_format},hwupload_cuda[bg_cuda];"
                 # overlay_cuda 叠加
-                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y={y_expr}[out_cuda];"
+                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y=\"{y_expr}\"[out_cuda];"
                 # 确保输出流格式正确 (RGBA输出需要hwdownload+format转换)
                 output_filter = "[out_cuda]hwdownload,format=rgba[out]"
                 logger.info("使用 overlay_cuda 处理透明视频 (RGBA格式)")
@@ -1834,7 +1834,7 @@ class VideoRenderer:
                 bg_format = "yuv420p" # 背景使用YUV420P
                 bg_filter = f"[0:v]format={bg_format},hwupload_cuda[bg_cuda];"
                 # overlay_cuda 叠加 (YUV420P输入)
-                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y={y_expr}[out_cuda];"
+                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y=\"{y_expr}\"[out_cuda];"
                  # 确保输出流格式正确 (YUV420P输出直接使用)
                 output_filter = "[out_cuda]hwdownload,format=yuv420p[out]"
                 logger.info("使用 overlay_cuda 处理不透明视频 (YUV420P格式)")
@@ -1922,12 +1922,12 @@ class VideoRenderer:
                 logger.error(f"FFmpeg处理失败: {str(e)}")
                 raise
                 
-            # # 删除临时图像文件
-            # try:
-            #     os.remove(temp_img_path)
-            #     logger.info(f"已删除临时文件: {temp_img_path}")
-            # except Exception as e:
-            #     logger.warning(f"删除临时文件失败: {e}")
+            # 删除临时图像文件
+            try:
+                os.remove(temp_img_path)
+                logger.info(f"已删除临时文件: {temp_img_path}")
+            except Exception as e:
+                logger.warning(f"删除临时文件失败: {e}")
             
             # 更新性能统计信息
             encoding_end_time = time.time()
@@ -1945,10 +1945,10 @@ class VideoRenderer:
         except Exception as e:
             logger.error(f"创建滚动视频失败 (overlay_cuda): {str(e)}")
             logger.error(traceback.format_exc())
-            # try:
-            #     # 清理临时文件
-            #     if 'temp_img_path' in locals() and os.path.exists(temp_img_path):
-            #         os.remove(temp_img_path)
-            # except:
-            #     pass
-            # raise
+            try:
+                # 清理临时文件
+                if 'temp_img_path' in locals() and os.path.exists(temp_img_path):
+                    os.remove(temp_img_path)
+            except:
+                pass
+            raise
