@@ -43,7 +43,7 @@ def main():
     # 定义测试场景参数列表
     test_cases = [
         {
-            "description": "白底黑字（GPU加速 -> MP4）- overlay_cuda GPU加速方法",
+            "description": "白底黑字（GPU加速 -> MP4）- overlay_cuda GPU加速方法 - 从下到上滚动",
             "method": "overlay_cuda", 
             "params": {
                 "text": sample_text,
@@ -61,7 +61,7 @@ def main():
             }
         },
         {
-            "description": "深蓝底白字（GPU加速 + 加减速效果 -> MP4）- overlay_cuda GPU加速方法",
+            "description": "深蓝底白字（GPU加速 + 加减速效果 -> MP4）- overlay_cuda GPU加速方法 - 从下到上滚动",
             "method": "ffmpeg",
             "params": {
                 "text": sample_text,
@@ -106,9 +106,10 @@ def main():
                 **test_case['params']
             )
         else:
-            # 使用原始方法
-            result = service.create_roll_video(
+            # 使用overlay_cuda方法替代原始方法
+            result = service.create_roll_video_overlay_cuda(
                 output_path=output_path_base,
+                scroll_direction="bottom_to_top",  # 从下到上滚动
                 **test_case['params']
             )
         

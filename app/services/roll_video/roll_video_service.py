@@ -506,6 +506,7 @@ class RollVideoService:
         scroll_speed: float = 1,  # 修改为每秒滚动的行数
         audio_path: Optional[str] = None,
         scroll_effect: str = "basic",  # 滚动效果类型: 'basic'=匀速, 'advanced'=加减速
+        scroll_direction: str = "bottom_to_top",  # 滚动方向: 'bottom_to_top'=从下到上, 'top_to_bottom'=从上到下
     ) -> Dict[str, Union[str, bool]]:
         """
         使用FFmpeg的overlay_cuda GPU加速滤镜创建滚动视频，自动根据透明度选择格式
@@ -530,6 +531,7 @@ class RollVideoService:
             scroll_speed: 滚动速度(每秒滚动的行数)，例如0.5表示每2秒滚动一行
             audio_path: 可选的音频文件路径
             scroll_effect: 滚动效果类型，'basic'为匀速滚动，'advanced'为加速减速效果
+            scroll_direction: 滚动方向，'bottom_to_top'从下到上滚动，'top_to_bottom'从上到下滚动
             
         Returns:
             包含处理结果的字典
@@ -633,7 +635,8 @@ class RollVideoService:
                 preferred_codec=preferred_codec,
                 audio_path=audio_path,
                 bg_color=bg_color_final,
-                scroll_effect=scroll_effect
+                scroll_effect=scroll_effect,
+                scroll_direction=scroll_direction
             )
 
             logger.info(f"滚动视频创建完成 (overlay_cuda GPU加速方式): {final_output_path}")

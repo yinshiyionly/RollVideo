@@ -1600,7 +1600,8 @@ class VideoRenderer:
         preferred_codec="h264_nvenc",
         audio_path=None,
         bg_color=(0, 0, 0, 255),
-        scroll_effect="basic"  # 'basic' 或 'advanced' 滚动效果
+        scroll_effect="basic",  # 'basic' 或 'advanced' 滚动效果
+        scroll_direction="bottom_to_top"  # 'bottom_to_top'=从下到上, 'top_to_bottom'=从上到下
     ):
         """
         使用FFmpeg的overlay_cuda滤镜创建GPU加速的滚动视频
@@ -1614,6 +1615,7 @@ class VideoRenderer:
             audio_path: 可选的音频文件路径
             bg_color: 背景颜色 (R,G,B) 或 (R,G,B,A)
             scroll_effect: 滚动效果类型 ('basic'=匀速, 'advanced'=加减速)
+            scroll_direction: 滚动方向 ('bottom_to_top'=从下到上, 'top_to_bottom'=从上到下)
             
         Returns:
             输出视频的路径
@@ -1808,14 +1810,29 @@ class VideoRenderer:
                     f"{accel_factor}*pow({accel_time},2)+mid_speed*(t-{scroll_start_time}-{accel_time})))"
                 )
                 
-                # 包装最终表达式，限制滚动范围
-                y_expr = f"min(0,-(h-{self.height})+{scroll_expr})"
-                logger.info(f"使用高级滚动效果 (加速/减速)")
+                # 根据滚动方向决定y表达式
+                if scroll_direction == "bottom_to_top":
+                    # 从下到上滚动 (y值从大到小)
+                    y_expr = f"(h-{self.height})-{scroll_expr}"
+                    logger.info(f"使用高级滚动效果 (加速/减速) - 从下到上滚动")
+                else:
+                    # 从上到下滚动 (y值从小到大)
+                    y_expr = f"min(0,-(h-{self.height})+{scroll_expr})"
+                    logger.info(f"使用高级滚动效果 (加速/减速) - 从上到下滚动")
             else:
                 # 基础匀速滚动
-                y_expr = f"min(0, -(h-{self.height})+if(between(t,{scroll_start_time},{scroll_end_time}),(t-{scroll_start_time})*{scroll_distance}/{scroll_duration},if(lt(t,{scroll_start_time}),0,{scroll_distance})))"
-                logger.info(f"使用基础匀速滚动效果")
-            
+                scroll_formula = f"if(between(t,{scroll_start_time},{scroll_end_time}),(t-{scroll_start_time})*{scroll_distance}/{scroll_duration},if(lt(t,{scroll_start_time}),0,{scroll_distance}))"
+                
+                # 根据滚动方向决定y表达式
+                if scroll_direction == "bottom_to_top":
+                    # 从下到上滚动 (y值从大到小)
+                    y_expr = f"(h-{self.height})-{scroll_formula}"
+                    logger.info(f"使用基础匀速滚动效果 - 从下到上滚动")
+                else:
+                    # 从上到下滚动 (y值从小到大)
+                    y_expr = f"min(0, -(h-{self.height})+{scroll_formula})"
+                    logger.info(f"使用基础匀速滚动效果 - 从上到下滚动")
+
             # 构建滤镜复杂表达式
             # 根据是否需要透明度调整前景图像的格式
             if transparency_required:
