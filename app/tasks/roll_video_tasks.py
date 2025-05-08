@@ -159,8 +159,8 @@ def generate_roll_video_task(self, task_id: str):
             try:
                 object_key = upload_video_to_oss(task_id, result['output_path'])
                 # 构建完整的CDN URL，确保正确拼接
-                oss_cdn = settings.OSS_CDN.rstrip('/')  # 移除末尾可能的斜杠
-                oss_url = f"{oss_cdn}/{object_key.lstrip('/')}"  # 确保object_key不以斜杠开头
+                # oss_cdn = settings.OSS_CDN.rstrip('/')  # 移除末尾可能的斜杠
+                oss_url = f"{object_key.lstrip('/')}"  # 确保object_key不以斜杠开头
                 # 3.5 更新任务状态为完成
                 update_task_status(task_id, TaskState.COMPLETED, {"oss_url": oss_url})
                 # 3.6 向客户端推送成功事件
