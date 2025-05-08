@@ -1,6 +1,8 @@
 import logging
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from app.config import settings
 from app.utils.logger import Logger
 from typing import Any
@@ -95,6 +97,39 @@ async def global_exception_handler(request: Request, exc: Exception):
         code=StatusCode.SERVER_ERROR,
         message=f"服务异常: {str(exc)}",
         status_code=StatusCode.SERVER_ERROR,
+    )
+
+
+# 添加全局异常处理器
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """处理请求验证错误，包括JSON解析错误
+
+    Args:
+        request: 请求对象
+        exc: 异常对象
+
+    Returns:
+        统一的错误响应格式
+    """
+    # 获取具体的错误信息
+    error_detail = exc.errors()[0] if exc.errors() else {}
+    error_type = error_detail.get('type', '')
+    error_msg = error_detail.get('msg', '未知错误')
+
+    if 'json_invalid' in error_type:
+        message = 'JSON格式错误：请确保所有字段名使用双引号，并检查JSON语法'
+    elif 'type_error' in error_type:
+        message = f'数据类型错误：{error_msg}'
+    else:
+        message = f'参数验证失败：{error_msg}'
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content=error_response(
+            code=StatusCode.INVALID_PARAMS,
+            message=message
+        )
     )
 
 # 包装路由处理函数，添加异常保护
