@@ -1321,6 +1321,7 @@ class VideoRenderer:
         preferred_codec="libx264",
         audio_path=None,
         bg_color=(255, 255, 255),
+        scroll_direction="bottom_to_top"  # 添加方向参数
     ):
         """
         使用FFmpeg的crop滤镜和时间表达式创建滚动视频
@@ -1333,6 +1334,7 @@ class VideoRenderer:
             preferred_codec: 首选视频编码器
             audio_path: 可选的音频文件路径
             bg_color: 背景颜色 (R,G,B) 或 (R,G,B,A)
+            scroll_direction: 滚动方向，'bottom_to_top'从下到上滚动，'top_to_bottom'从上到下滚动
         
         Returns:
             输出视频的路径
@@ -1461,7 +1463,15 @@ class VideoRenderer:
                 ffmpeg_cmd.extend(["-i", audio_path])
                 
             # 创建裁剪表达式
-            crop_y_expr = f"'if(between(t,{scroll_start_time},{scroll_end_time}),min({img_height-self.height},(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}),if(lt(t,{scroll_start_time}),0,{scroll_distance}))'"
+            crop_y_expr = f"'if(lt(t,{scroll_start_time}), 0, if(gt(t,{scroll_end_time}), {scroll_distance}, (t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))'"
+            
+            # 改为使用与overlay_cuda相同的逻辑
+            if scroll_direction == "bottom_to_top":
+                # 从下到上滚动 (y值从大到小)
+                crop_y_expr = f"'if(lt(t,{scroll_start_time}), {img_height-self.height}, if(gt(t,{scroll_end_time}), max(0, {img_height-self.height}-{scroll_distance}), {img_height-self.height}-(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))'"
+            else:
+                # 从上到下滚动 (y值从小到大)
+                crop_y_expr = f"'if(lt(t,{scroll_start_time}), 0, if(gt(t,{scroll_end_time}), min({img_height-self.height}, {scroll_distance}), (t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))'"
             
             # 始终使用CPU的crop滤镜,GPU没有crop滤镜
             crop_expr = (
@@ -1727,6 +1737,7 @@ class VideoRenderer:
                         preferred_codec=preferred_codec,
                         audio_path=audio_path,
                         bg_color=bg_color,
+                        scroll_direction=scroll_direction
                     )
                 
                 # 2. 再检测是否支持overlay_cuda滤镜
@@ -1751,6 +1762,7 @@ class VideoRenderer:
                         preferred_codec=preferred_codec,
                         audio_path=audio_path,
                         bg_color=bg_color,
+                        scroll_direction=scroll_direction
                     )
                 
                 logger.info("检测通过：系统支持NVIDIA GPU和overlay_cuda滤镜")
@@ -1766,6 +1778,7 @@ class VideoRenderer:
                     preferred_codec=preferred_codec,
                     audio_path=audio_path,
                     bg_color=bg_color,
+                    scroll_direction=scroll_direction
                 )
             
             # 5. 构建基本FFmpeg命令 (CUDA加速版)
@@ -1813,12 +1826,13 @@ class VideoRenderer:
                 # 根据滚动方向决定y表达式
                 if scroll_direction == "bottom_to_top":
                     # 从下到上滚动 (y值从大到小)
-                    y_expr = f"max(0, min({self.height}, h-{self.height}-{scroll_expr}))"
-                    logger.info(f"使用高级滚动效果 (加速/减速) - 从下到上滚动")
+                    # 全新设计：确保一开始显示图像底部，然后向上滚动
+                    y_expr = f"if(lt(t,{scroll_start_time}), h-{self.height}, if(gt(t,{scroll_end_time}), max(0, h-{self.height}-{scroll_distance}), h-{self.height}-{scroll_expr}))"
+                    logger.info(f"使用高级滚动效果 (加速/减速) - 从下到上滚动（重新设计）")
                 else:
                     # 从上到下滚动 (y值从小到大)
-                    y_expr = f"min(h-{self.height}, {scroll_expr})"
-                    logger.info(f"使用高级滚动效果 (加速/减速) - 从上到下滚动")
+                    y_expr = f"if(lt(t,{scroll_start_time}), 0, if(gt(t,{scroll_end_time}), min(h-{self.height}, {scroll_distance}), {scroll_expr}))"
+                    logger.info(f"使用高级滚动效果 (加速/减速) - 从上到下滚动（重新设计）")
             else:
                 # 基础匀速滚动
                 scroll_formula = f"if(between(t,{scroll_start_time},{scroll_end_time}),(t-{scroll_start_time})*{scroll_distance}/{scroll_duration},if(lt(t,{scroll_start_time}),0,{scroll_distance}))"
@@ -1826,12 +1840,13 @@ class VideoRenderer:
                 # 根据滚动方向决定y表达式
                 if scroll_direction == "bottom_to_top":
                     # 从下到上滚动 (y值从大到小)
-                    y_expr = f"max(0, min({self.height}, h-{self.height}-{scroll_formula}))"
-                    logger.info(f"使用基础匀速滚动效果 - 从下到上滚动")
+                    # 全新设计：确保一开始显示图像底部，然后向上滚动
+                    y_expr = f"if(lt(t,{scroll_start_time}), h-{self.height}, if(gt(t,{scroll_end_time}), max(0, h-{self.height}-{scroll_distance}), h-{self.height}-{scroll_formula}))"
+                    logger.info(f"使用基础匀速滚动效果 - 从下到上滚动（重新设计）")
                 else:
                     # 从上到下滚动 (y值从小到大)
-                    y_expr = f"min(h-{self.height}, {scroll_formula})"
-                    logger.info(f"使用基础匀速滚动效果 - 从上到下滚动")
+                    y_expr = f"if(lt(t,{scroll_start_time}), 0, if(gt(t,{scroll_end_time}), min(h-{self.height}, {scroll_distance}), {scroll_formula}))"
+                    logger.info(f"使用基础匀速滚动效果 - 从上到下滚动（重新设计）")
 
             # 构建滤镜复杂表达式
             # 根据是否需要透明度调整前景图像的格式

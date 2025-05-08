@@ -356,6 +356,7 @@ class RollVideoService:
         fps: int = 30,
         scroll_speed: float = 1,  # 修改为每秒滚动的行数
         audio_path: Optional[str] = None,
+        scroll_direction: str = "bottom_to_top",  # 添加滚动方向参数
     ) -> Dict[str, Union[str, bool]]:
         """
         使用FFmpeg滤镜创建滚动视频，自动根据透明度选择格式
@@ -365,7 +366,7 @@ class RollVideoService:
         2. 更平滑 - 滚动效果由FFmpeg实时计算，支持亚像素精度的滚动
         3. 更低内存 - 不需要在内存中处理大量帧
         
-        参数与create_roll_video相同
+        参数与create_roll_video相同，并增加了scroll_direction参数
         """
         try:
             # --- 决定透明度需求和编码策略 ---
@@ -465,6 +466,7 @@ class RollVideoService:
                 preferred_codec=preferred_codec,  # 传递首选编码器
                 audio_path=audio_path,
                 bg_color=bg_color_final,  # 传递最终的bg_color供非透明路径使用
+                scroll_direction=scroll_direction,  # 传递滚动方向参数
             )
 
             logger.info(f"滚动视频创建完成 (FFmpeg滤镜方式): {final_output_path}")
