@@ -1839,14 +1839,24 @@ class VideoRenderer:
                 output_filter = "[out_cuda]hwdownload,format=yuv420p[out]"
                 logger.info("使用 overlay_cuda 处理不透明视频 (YUV420P格式)")
 
+            # 移除旧的滤镜链拼接逻辑
+            if transparency_required:
+                # 对于透明视频，保留原来的复杂处理方式
+                filter_complex = (
+                    bg_filter +
+                    img_filter +
+                    overlay_filter +
+                    output_filter
+                )
+            # 否则使用简化的滤镜链
+            else:
+                # 使用与成功示例相似的格式，移除复杂的中间流标记
+                # 检查成功示例: overlay_cuda=x=(main_w-overlay_w)/2:y='-if(lt(t,2.0),0,if(gt(t,202.08333333333334),12005,(t-2.0)*(12005/200.08333333333334)))'
+                filter_complex = f"[1:v]format=yuv420p,hwupload_cuda[img_cuda_no_alpha]; \
+                                 [0:v][img_cuda_no_alpha]overlay_cuda=x=0:y='{y_expr}'[out_cuda]; \
+                                 [out_cuda]hwdownload,format=yuv420p[out]"
+                logger.info("使用简化的overlay_cuda处理不透明视频 (YUV420P格式)")
 
-            filter_complex = (
-                bg_filter +
-                img_filter +
-                overlay_filter +
-                output_filter
-            )
-            
             ffmpeg_cmd.extend([
                 "-filter_complex", filter_complex,
                 "-map", "[out]"
