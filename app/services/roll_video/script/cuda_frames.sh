@@ -210,7 +210,11 @@ case $METHOD in
     EXPR1="if(lt(t\,$START_SCROLL_TIME)\,0\,(t-$START_SCROLL_TIME)*$SCROLL_SPEED)"
     
     echo "处理第一个块，持续时间: $BLOCK_DURATION_INT 秒"
-    ffmpeg -y -hwaccel cuda -loop 1 -i "$TEMP_DIR/blocks/block_0.png" \
+    # 先调整块大小确保内容完整显示
+    ffmpeg -y -loglevel error -i "$TEMP_DIR/blocks/block_0.png" \
+      -vf "scale=$BACKGROUND_WIDTH:-1" "$TEMP_DIR/blocks/block_0_resized.png"
+      
+    ffmpeg -y -hwaccel cuda -loop 1 -i "$TEMP_DIR/blocks/block_0_resized.png" \
       -f lavfi -i "color=white:s=${BACKGROUND_WIDTH}x${BACKGROUND_HEIGHT}:r=$FPS:d=$BLOCK_DURATION_INT" \
       -filter_complex "
         [0:v]format=yuv420p,setpts=PTS-STARTPTS[img];
@@ -224,20 +228,24 @@ case $METHOD in
     
     # 处理其余块
     for ((i=1; i<NUM_BLOCKS; i++)); do
-      CURRENT_HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$TEMP_DIR/blocks/block_$i.png")
-      BLOCK_DURATION=$(echo "$CURRENT_HEIGHT / $SCROLL_SPEED" | bc -l)
+      # 先调整块大小确保内容完整显示
+      ffmpeg -y -loglevel error -i "$TEMP_DIR/blocks/block_$i.png" \
+        -vf "scale=$BACKGROUND_WIDTH:-1" "$TEMP_DIR/blocks/block_${i}_resized.png"
+      
+      RESIZED_HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$TEMP_DIR/blocks/block_${i}_resized.png")
+      BLOCK_DURATION=$(echo "$RESIZED_HEIGHT / $SCROLL_SPEED" | bc -l)
       BLOCK_DURATION_INT=$(printf "%.0f" $BLOCK_DURATION)
       
       if [ $BLOCK_DURATION_INT -lt 1 ]; then
         BLOCK_DURATION_INT=1
       fi
       
-      echo "处理块 $i，高度: $CURRENT_HEIGHT，持续时间: $BLOCK_DURATION_INT 秒"
+      echo "处理块 $i，高度: $RESIZED_HEIGHT，持续时间: $BLOCK_DURATION_INT 秒"
       
       # 简化表达式，直接使用t乘以速度
       EXPR2="t*$SCROLL_SPEED"
       
-      ffmpeg -y -hwaccel cuda -loop 1 -i "$TEMP_DIR/blocks/block_$i.png" \
+      ffmpeg -y -hwaccel cuda -loop 1 -i "$TEMP_DIR/blocks/block_${i}_resized.png" \
         -f lavfi -i "color=white:s=${BACKGROUND_WIDTH}x${BACKGROUND_HEIGHT}:r=$FPS:d=$BLOCK_DURATION_INT" \
         -filter_complex "
           [0:v]format=yuv420p,setpts=PTS-STARTPTS[img];
