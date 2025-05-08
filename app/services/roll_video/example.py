@@ -43,9 +43,8 @@ def main():
     # 定义测试场景参数列表
     test_cases = [
         {
-            # 使用overlay_cuda GPU加速方法
             "description": "白底黑字（GPU加速 -> MP4）- overlay_cuda GPU加速方法",
-            "method": "overlay_cuda",  # 使用overlay_cuda GPU加速方法
+            "method": "overlay_cuda", 
             "params": {
                 "text": sample_text,
                 "width": 720,
@@ -62,9 +61,8 @@ def main():
             }
         },
         {
-            # 使用overlay_cuda GPU加速方法 - 加减速效果
             "description": "深蓝底白字（GPU加速 + 加减速效果 -> MP4）- overlay_cuda GPU加速方法",
-            "method": "overlay_cuda",  # 使用overlay_cuda GPU加速方法
+            "method": "ffmpeg",
             "params": {
                 "text": sample_text,
                 "width": 720,
@@ -72,12 +70,28 @@ def main():
                 "font_path": "方正黑体简体.ttf",
                 "font_size": 30,
                 "font_color": [0,0,0],
-                "bg_color": [255,255,255,0.5],  # 半透明背景
+                "bg_color": [255,255,255,1.0],
                 "line_spacing": 20,
                 "char_spacing": 10,
                 "fps": 30,  # 更高帧率，更平滑的效果
                 "scroll_speed": 1,
-                "scroll_effect": "advanced",  # 加速减速效果
+            }
+        },
+        {
+            "description": "深蓝底白字（GPU加速 + 加减速效果 -> MP4）- overlay_cuda GPU加速方法",
+            "method": "original", 
+            "params": {
+                "text": sample_text,
+                "width": 720,
+                "height": 1280,
+                "font_path": "方正黑体简体.ttf",
+                "font_size": 30,
+                "font_color": [0,0,0],
+                "bg_color": [255,255,255,1.0],
+                "line_spacing": 20,
+                "char_spacing": 10,
+                "fps": 30,  # 更高帧率，更平滑的效果
+                "scroll_speed": 1,
             }
         }
     ]
