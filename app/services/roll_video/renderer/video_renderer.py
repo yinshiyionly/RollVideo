@@ -1719,7 +1719,7 @@ class VideoRenderer:
                 if not has_cuda_support:
                     logger.warning("未检测到NVIDIA GPU，overlay_cuda滤镜需要NVIDIA GPU支持")
                     logger.info("将回退到使用普通的crop滤镜方法")
-                    return self.create_scrolling_video_ffmpeg(
+                    return self.create_scrolling_video_crop(
                         image=image,
                         output_path=output_path,
                         text_actual_height=text_actual_height,
@@ -1743,7 +1743,7 @@ class VideoRenderer:
                 if not has_overlay_cuda:
                     logger.warning("系统不支持overlay_cuda滤镜（GPU加速叠加滤镜），虽然检测到NVIDIA GPU")
                     logger.info("将回退到使用普通的crop滤镜方法")
-                    return self.create_scrolling_video_ffmpeg(
+                    return self.create_scrolling_video_crop(
                         image=image,
                         output_path=output_path,
                         text_actual_height=text_actual_height,
@@ -1758,7 +1758,7 @@ class VideoRenderer:
             except Exception as e:
                 logger.warning(f"检测CUDA或overlay_cuda滤镜时出错: {e}")
                 logger.info("将回退到使用普通的crop滤镜方法")
-                return self.create_scrolling_video_ffmpeg(
+                return self.create_scrolling_video_crop(
                     image=image,
                     output_path=output_path,
                     text_actual_height=text_actual_height,
@@ -1813,11 +1813,11 @@ class VideoRenderer:
                 # 根据滚动方向决定y表达式
                 if scroll_direction == "bottom_to_top":
                     # 从下到上滚动 (y值从大到小)
-                    y_expr = f"(h-{self.height})-{scroll_expr}"
+                    y_expr = f"max(0, min({self.height}, h-{self.height}-{scroll_expr}))"
                     logger.info(f"使用高级滚动效果 (加速/减速) - 从下到上滚动")
                 else:
                     # 从上到下滚动 (y值从小到大)
-                    y_expr = f"min(0,-(h-{self.height})+{scroll_expr})"
+                    y_expr = f"min(h-{self.height}, {scroll_expr})"
                     logger.info(f"使用高级滚动效果 (加速/减速) - 从上到下滚动")
             else:
                 # 基础匀速滚动
@@ -1826,11 +1826,11 @@ class VideoRenderer:
                 # 根据滚动方向决定y表达式
                 if scroll_direction == "bottom_to_top":
                     # 从下到上滚动 (y值从大到小)
-                    y_expr = f"(h-{self.height})-{scroll_formula}"
+                    y_expr = f"max(0, min({self.height}, h-{self.height}-{scroll_formula}))"
                     logger.info(f"使用基础匀速滚动效果 - 从下到上滚动")
                 else:
                     # 从上到下滚动 (y值从小到大)
-                    y_expr = f"min(0, -(h-{self.height})+{scroll_formula})"
+                    y_expr = f"min(h-{self.height}, {scroll_formula})"
                     logger.info(f"使用基础匀速滚动效果 - 从上到下滚动")
 
             # 构建滤镜复杂表达式
