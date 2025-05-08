@@ -334,7 +334,7 @@ class RollVideoService:
             # 回退到默认字体
             return ImageFont.load_default()
 
-    def create_roll_video_ffmpeg(
+    def create_roll_video_crop(
         self,
         text: str,
         output_path: str,
@@ -457,7 +457,7 @@ class RollVideoService:
 
             # 使用FFmpeg滤镜方式创建滚动视频 - 直接传递PIL图像，不转换为numpy数组
             logger.info("开始创建滚动视频 (FFmpeg滤镜方式)...")
-            final_output_path = video_renderer.create_scrolling_video_ffmpeg(
+            final_output_path = video_renderer.create_scrolling_video_crop(
                 image=text_image,  # 直接传递PIL图像对象
                 output_path=actual_output_path,  # 使用自动调整后的路径
                 text_actual_height=text_actual_height,

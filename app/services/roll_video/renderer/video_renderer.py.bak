@@ -1460,13 +1460,25 @@ class VideoRenderer:
             if audio_path and os.path.exists(audio_path):
                 ffmpeg_cmd.extend(["-i", audio_path])
                 
-            # 创建裁剪表达式
-            crop_y_expr = f"'if(between(t,{scroll_start_time},{scroll_end_time}),min({img_height-self.height},(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}),if(lt(t,{scroll_start_time}),0,{scroll_distance}))'"
+            # 创建滚动表达式
+            scroll_formula = (
+                f"if(lt(t,{scroll_start_time}),0,"
+                f"if(gt(t,{scroll_end_time}),{scroll_distance},"
+                f"(t-{scroll_start_time})*{scroll_distance}/{scroll_duration}))"
+            )
+            
+            # 从下到上滚动的y表达式 - 为crop滤镜简化表达式
+            y_expr = f"{scroll_formula}"  # 不包含h-height计算，避免表达式过复杂
+            
+            # 计算需要减去的基础高度
+            base_height = f"{img_height - self.height}"
+            logger.info(f"使用匀速滚动效果 - 从下到上滚动 (基础高度:{base_height}像素)")
             
             # 始终使用CPU的crop滤镜,GPU没有crop滤镜
+            # 分解表达式，让它更简单可靠
             crop_expr = (
                 f"crop=w={self.width}:h={self.height}:"
-                f"x=0:y={crop_y_expr}"
+                f"x=0:y={base_height}-{y_expr}"
             )
             
             # 添加滤镜
@@ -1599,9 +1611,7 @@ class VideoRenderer:
         transparency_required=False,
         preferred_codec="h264_nvenc",
         audio_path=None,
-        bg_color=(0, 0, 0, 255),
-        scroll_effect="basic",  # 'basic' 或 'advanced' 滚动效果
-        scroll_direction="bottom_to_top"  # 'bottom_to_top'=从下到上, 'top_to_bottom'=从上到下
+        bg_color=(0, 0, 0, 255)
     ):
         """
         使用FFmpeg的overlay_cuda滤镜创建GPU加速的滚动视频
@@ -1614,8 +1624,6 @@ class VideoRenderer:
             preferred_codec: 首选视频编码器
             audio_path: 可选的音频文件路径
             bg_color: 背景颜色 (R,G,B) 或 (R,G,B,A)
-            scroll_effect: 滚动效果类型 ('basic'=匀速, 'advanced'=加减速)
-            scroll_direction: 滚动方向 ('bottom_to_top'=从下到上, 'top_to_bottom'=从上到下)
             
         Returns:
             输出视频的路径
@@ -1695,7 +1703,6 @@ class VideoRenderer:
             logger.info(f"视频参数: 宽度={self.width}, 高度={self.height}, 帧率={self.fps}")
             logger.info(f"滚动参数: 距离={scroll_distance}px, 速度={self.scroll_speed}px/帧, 持续={scroll_duration:.2f}秒")
             logger.info(f"时间设置: 总时长={total_duration:.2f}秒, 静止开始={start_static_time}秒, 静止结束={end_static_time}秒")
-            logger.info(f"滚动效果: {scroll_effect}")
             
             # 3. 设置编码器参数
             codec_params, _ = self._get_codec_parameters(
@@ -1719,7 +1726,7 @@ class VideoRenderer:
                 if not has_cuda_support:
                     logger.warning("未检测到NVIDIA GPU，overlay_cuda滤镜需要NVIDIA GPU支持")
                     logger.info("将回退到使用普通的crop滤镜方法")
-                    return self.create_scrolling_video_ffmpeg(
+                    return self.create_scrolling_video_crop(
                         image=image,
                         output_path=output_path,
                         text_actual_height=text_actual_height,
@@ -1743,7 +1750,7 @@ class VideoRenderer:
                 if not has_overlay_cuda:
                     logger.warning("系统不支持overlay_cuda滤镜（GPU加速叠加滤镜），虽然检测到NVIDIA GPU")
                     logger.info("将回退到使用普通的crop滤镜方法")
-                    return self.create_scrolling_video_ffmpeg(
+                    return self.create_scrolling_video_crop(
                         image=image,
                         output_path=output_path,
                         text_actual_height=text_actual_height,
@@ -1758,7 +1765,7 @@ class VideoRenderer:
             except Exception as e:
                 logger.warning(f"检测CUDA或overlay_cuda滤镜时出错: {e}")
                 logger.info("将回退到使用普通的crop滤镜方法")
-                return self.create_scrolling_video_ffmpeg(
+                return self.create_scrolling_video_crop(
                     image=image,
                     output_path=output_path,
                     text_actual_height=text_actual_height,
@@ -1789,50 +1796,17 @@ class VideoRenderer:
             if audio_path and os.path.exists(audio_path):
                 ffmpeg_cmd.extend(["-i", audio_path])
             
-            # 创建滚动表达式
-            if scroll_effect == "advanced":
-                # 加速减速效果的滚动
-                # 加速阶段时间（秒）
-                accel_time = min(3.0, scroll_duration * 0.15)  
-                # 减速开始时间（秒）
-                decel_start = scroll_start_time + scroll_duration - min(3.0, scroll_duration * 0.15)
-                # 加速系数、中间速度和减速系数
-                accel_factor = scroll_distance * 0.05 / (accel_time * accel_time) if accel_time > 0 else 0
-                mid_speed = scroll_distance / scroll_duration if scroll_duration > 0 else 0
-                decel_factor = mid_speed * 0.2
-                
-                # 高级滚动公式
-                scroll_expr = (
-                    f"if(lt(t,{scroll_start_time + accel_time}),"
-                    f"{accel_factor}*pow(t-{scroll_start_time},2),"
-                    f"if(gt(t,{decel_start}),"
-                    f"{scroll_distance-mid_speed*(scroll_end_time-decel_start)}+mid_speed*(t-{decel_start})-{decel_factor}*pow(t-{decel_start},2),"
-                    f"{accel_factor}*pow({accel_time},2)+mid_speed*(t-{scroll_start_time}-{accel_time})))"
-                )
-                
-                # 根据滚动方向决定y表达式
-                if scroll_direction == "bottom_to_top":
-                    # 从下到上滚动 (y值从大到小)
-                    y_expr = f"(h-{self.height})-{scroll_expr}"
-                    logger.info(f"使用高级滚动效果 (加速/减速) - 从下到上滚动")
-                else:
-                    # 从上到下滚动 (y值从小到大)
-                    y_expr = f"min(0,-(h-{self.height})+{scroll_expr})"
-                    logger.info(f"使用高级滚动效果 (加速/减速) - 从上到下滚动")
-            else:
-                # 基础匀速滚动
-                scroll_formula = f"if(between(t,{scroll_start_time},{scroll_end_time}),(t-{scroll_start_time})*{scroll_distance}/{scroll_duration},if(lt(t,{scroll_start_time}),0,{scroll_distance}))"
-                
-                # 根据滚动方向决定y表达式
-                if scroll_direction == "bottom_to_top":
-                    # 从下到上滚动 (y值从大到小)
-                    y_expr = f"(h-{self.height})-{scroll_formula}"
-                    logger.info(f"使用基础匀速滚动效果 - 从下到上滚动")
-                else:
-                    # 从上到下滚动 (y值从小到大)
-                    y_expr = f"min(0, -(h-{self.height})+{scroll_formula})"
-                    logger.info(f"使用基础匀速滚动效果 - 从上到下滚动")
-
+            # 创建滚动表达式（从下到上滚动）
+            scroll_formula = (
+                f"if(lt(t,{scroll_start_time}),0,"
+                f"if(gt(t,{scroll_end_time}),{scroll_distance},"
+                f"(t-{scroll_start_time})*{scroll_distance}/{scroll_duration}))"
+            )
+            
+            # 从下到上滚动的y表达式
+            y_expr = f"(h-{self.height})-{scroll_formula}"
+            logger.info(f"使用匀速滚动效果 - 从下到上滚动 (图像高度:{img_height}像素)")
+            
             # 构建滤镜复杂表达式
             # 根据是否需要透明度调整前景图像的格式
             if transparency_required:
@@ -1840,8 +1814,8 @@ class VideoRenderer:
                 img_filter = "[1:v]format=rgba,hwupload_cuda[img_cuda];"
                 bg_format = "rgba" # 如果前景是RGBA，背景也用RGBA以确保兼容性
                 bg_filter = f"[0:v]format={bg_format},hwupload_cuda[bg_cuda];"
-                # overlay_cuda 叠加
-                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y=\"{y_expr}\"[out_cuda];"
+                # overlay_cuda 叠加 - 注意转义引号
+                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y='{y_expr}'[out_cuda];"
                 # 确保输出流格式正确 (RGBA输出需要hwdownload+format转换)
                 output_filter = "[out_cuda]hwdownload,format=rgba[out]"
                 logger.info("使用 overlay_cuda 处理透明视频 (RGBA格式)")
@@ -1850,32 +1824,14 @@ class VideoRenderer:
                 img_filter = "[1:v]format=yuv420p,hwupload_cuda[img_cuda];"
                 bg_format = "yuv420p" # 背景使用YUV420P
                 bg_filter = f"[0:v]format={bg_format},hwupload_cuda[bg_cuda];"
-                # overlay_cuda 叠加 (YUV420P输入)
-                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y=\"{y_expr}\"[out_cuda];"
-                 # 确保输出流格式正确 (YUV420P输出直接使用)
+                # overlay_cuda 叠加 (YUV420P输入) - 注意转义引号
+                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y='{y_expr}'[out_cuda];"
+                # 确保输出流格式正确 (YUV420P输出直接使用)
                 output_filter = "[out_cuda]hwdownload,format=yuv420p[out]"
                 logger.info("使用 overlay_cuda 处理不透明视频 (YUV420P格式)")
 
-            # 移除旧的滤镜链拼接逻辑
-            if transparency_required:
-                # 对于透明视频，保留原来的复杂处理方式
-                filter_complex = (
-                    bg_filter +
-                    img_filter +
-                    overlay_filter +
-                    output_filter
-                )
-            # 否则使用简化的滤镜链
-            else:
-                # 使用与成功示例相似的格式，移除复杂的中间流标记
-                # 检查成功示例: overlay_cuda=x=(main_w-overlay_w)/2:y='-if(lt(t,2.0),0,if(gt(t,202.08333333333334),12005,(t-2.0)*(12005/200.08333333333334)))'
-                filter_complex = f"[1:v]format=yuv420p,hwupload_cuda[img_cuda_no_alpha]; \
-                                 [0:v][img_cuda_no_alpha]overlay_cuda=x=0:y='{y_expr}'[out_cuda]; \
-                                 [out_cuda]hwdownload,format=yuv420p[out]"
-                logger.info("使用简化的overlay_cuda处理不透明视频 (YUV420P格式)")
-
             ffmpeg_cmd.extend([
-                "-filter_complex", filter_complex,
+                "-filter_complex", bg_filter + img_filter + overlay_filter + output_filter,
                 "-map", "[out]"
             ])
             
@@ -1930,6 +1886,27 @@ class VideoRenderer:
                 # 检查进程返回码
                 if process.returncode != 0:
                     logger.error(f"FFmpeg处理失败: {stderr}")
+                    
+                    # 检查是否是CUDA格式转换不兼容问题
+                    if "Impossible to convert between the formats" in stderr:
+                        logger.warning("CUDA格式转换不兼容，尝试使用CPU滤镜回退方案...")
+                        
+                        # 尝试使用非CUDA的overlay滤镜
+                        return self._fallback_to_cpu_overlay(
+                            image=image,
+                            output_path=output_path,
+                            text_actual_height=text_actual_height,
+                            transparency_required=transparency_required,
+                            preferred_codec=preferred_codec,
+                            audio_path=audio_path,
+                            bg_color=bg_color,
+                            scroll_start_time=scroll_start_time,
+                            scroll_end_time=scroll_end_time,
+                            scroll_distance=scroll_distance,
+                            scroll_duration=scroll_duration,
+                            total_duration=total_duration
+                        )
+                    
                     # 分析常见错误原因，提供更详细的错误信息
                     if "No space left on device" in stderr:
                         raise Exception("FFmpeg处理失败: 设备存储空间不足")
@@ -1979,3 +1956,169 @@ class VideoRenderer:
             except:
                 pass
             raise
+
+    def _fallback_to_cpu_overlay(
+        self,
+        image,
+        output_path,
+        text_actual_height,
+        transparency_required,
+        preferred_codec,
+        audio_path,
+        bg_color,
+        scroll_start_time,
+        scroll_end_time,
+        scroll_distance,
+        scroll_duration,
+        total_duration
+    ):
+        """
+        CUDA格式不兼容时的CPU回退方案，使用标准overlay滤镜
+        
+        参数与create_scrolling_video_overlay_cuda相同，额外参数用于控制滚动行为
+        """
+        try:
+            logger.info("使用CPU overlay滤镜回退方案")
+            
+            # 检查图像格式
+            if isinstance(image, np.ndarray):
+                pil_image = Image.fromarray(image)
+            elif isinstance(image, Image.Image):
+                pil_image = image
+            else:
+                raise ValueError("不支持的图像类型")
+                
+            # 确保输出目录存在
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            
+            # 设置临时图像文件路径
+            temp_img_path = f"{os.path.splitext(output_path)[0]}_temp.png"
+            
+            # 保存图像
+            pil_image.save(temp_img_path, format="PNG")
+            
+            # 获取图像尺寸
+            img_width, img_height = pil_image.size
+            
+            # 清理内存
+            del pil_image
+            gc.collect()
+            
+            # 创建滚动表达式
+            scroll_formula = (
+                f"if(lt(t,{scroll_start_time}),0,"
+                f"if(gt(t,{scroll_end_time}),{scroll_distance},"
+                f"(t-{scroll_start_time})*{scroll_distance}/{scroll_duration}))"
+            )
+            
+            # 从下到上滚动的y表达式
+            y_expr = f"(H-h)-{scroll_formula}"
+            logger.info(f"使用CPU overlay滤镜和匀速滚动效果 - 从下到上滚动")
+            
+            # 背景色转十六进制
+            bg_hex = "#{:02x}{:02x}{:02x}".format(bg_color[0], bg_color[1], bg_color[2])
+            
+            # 构建基础命令
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",
+                "-f", "lavfi", 
+                "-i", f"color=c={bg_hex}:s={self.width}x{self.height}:r={self.fps}",
+                "-i", temp_img_path,
+                "-progress", "pipe:2",
+                "-stats",
+                "-stats_period", "1",
+            ]
+            
+            # 添加音频输入
+            if audio_path and os.path.exists(audio_path):
+                ffmpeg_cmd.extend(["-i", audio_path])
+                
+            # 构建滤镜表达式
+            filter_complex = f"[1:v]format=rgba[fg]; [0:v][fg]overlay=0:{y_expr}:format=auto[out]"
+            
+            # 添加滤镜
+            ffmpeg_cmd.extend([
+                "-filter_complex", filter_complex,
+                "-map", "[out]"
+            ])
+            
+            # 添加音频映射
+            if audio_path and os.path.exists(audio_path):
+                ffmpeg_cmd.extend([
+                    "-map", "2:a:0",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                ])
+                
+            # 获取编码器参数
+            codec_params, _ = self._get_codec_parameters(
+                preferred_codec if not "nvenc" in preferred_codec else "libx264",
+                transparency_required,
+                4 if transparency_required else 3
+            )
+            
+            # 添加编码器参数
+            ffmpeg_cmd.extend(codec_params)
+            
+            # 设置时长
+            ffmpeg_cmd.extend(["-t", str(total_duration)])
+            
+            # 添加输出路径
+            ffmpeg_cmd.append(output_path)
+            
+            logger.info(f"FFmpeg CPU回退命令: {' '.join(ffmpeg_cmd)}")
+            
+            # 执行命令
+            logger.info("启动FFmpeg进程 (CPU overlay)...")
+            process = subprocess.Popen(
+                ffmpeg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            # 监控进度
+            monitor_thread = PerformanceMonitor.monitor_ffmpeg_progress(
+                process=process,
+                total_duration=total_duration,
+                total_frames=int(total_duration * self.fps),
+                encoding_start_time=time.time()
+            )
+            
+            # 等待处理完成
+            stdout, stderr = process.communicate()
+            
+            # 等待监控线程结束
+            if monitor_thread and monitor_thread.is_alive():
+                monitor_thread.join(timeout=2.0)
+                
+            # 检查结果
+            if process.returncode != 0:
+                logger.error(f"CPU overlay回退方案失败: {stderr}")
+                raise Exception(f"CPU overlay回退方案失败，返回码: {process.returncode}")
+                
+            # 清理临时文件
+            try:
+                os.remove(temp_img_path)
+            except:
+                pass
+                
+            logger.info(f"CPU overlay回退方案成功完成: {output_path}")
+            return output_path
+            
+        except Exception as e:
+            logger.error(f"CPU overlay回退方案失败: {str(e)}")
+            logger.error(traceback.format_exc())
+            # 最后的回退方案：尝试使用crop滤镜
+            logger.info("尝试使用crop滤镜作为最终回退方案...")
+            return self.create_scrolling_video_crop(
+                image=image,
+                output_path=output_path,
+                text_actual_height=text_actual_height,
+                transparency_required=transparency_required,
+                preferred_codec="libx264",  # 强制使用CPU编码器
+                audio_path=audio_path,
+                bg_color=bg_color
+            )

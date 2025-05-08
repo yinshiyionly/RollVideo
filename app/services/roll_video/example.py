@@ -43,26 +43,8 @@ def main():
     # 定义测试场景参数列表
     test_cases = [
         {
-            "description": "白底黑字（GPU加速 -> MP4）- overlay_cuda GPU加速方法 - 从下到上滚动",
+            "description": "overlay_cuda",
             "method": "overlay_cuda", 
-            "params": {
-                "text": sample_text,
-                "width": 720,
-                "height": 1280,
-                "font_path": "方正黑体简体.ttf",
-                "font_size": 30,
-                "font_color": [0,0,0],
-                "bg_color": [255,255,255,1.0],  # 不透明
-                "line_spacing": 20,
-                "char_spacing": 10,
-                "fps": 30,
-                "scroll_speed": 1,
-                "scroll_effect": "basic",  # 基础匀速滚动
-            }
-        },
-        {
-            "description": "深蓝底白字（GPU加速 + 加减速效果 -> MP4）- overlay_cuda GPU加速方法 - 从下到上滚动",
-            "method": "ffmpeg",
             "params": {
                 "text": sample_text,
                 "width": 720,
@@ -73,7 +55,24 @@ def main():
                 "bg_color": [255,255,255,1.0],
                 "line_spacing": 20,
                 "char_spacing": 10,
-                "fps": 30,  # 更高帧率，更平滑的效果
+                "fps": 30,
+                "scroll_speed": 1,
+            }
+        },
+        {
+            "description": "crop",
+            "method": "crop",
+            "params": {
+                "text": sample_text,
+                "width": 720,
+                "height": 1280,
+                "font_path": "方正黑体简体.ttf",
+                "font_size": 30,
+                "font_color": [0,0,0],
+                "bg_color": [255,255,255,1.0],
+                "line_spacing": 20,
+                "char_spacing": 10,
+                "fps": 30,
                 "scroll_speed": 1,
             }
         }
@@ -88,28 +87,21 @@ def main():
         output_path_base = os.path.join(output_dir, base_file_name + ".tmp") 
 
         # 根据方法选择不同的生成函数
-        method = test_case.get("method", "original")
+        method = test_case.get("method", "crop")
         
         # 记录开始时间
         start_time = time.time()
         
-        if method == "ffmpeg":
-            # 使用FFmpeg滤镜方法
-            result = service.create_roll_video_ffmpeg(
-                output_path=output_path_base,
-                **test_case['params']
-            )
-        elif method == "overlay_cuda":
-            # 使用overlay_cuda GPU加速方法
-            result = service.create_roll_video_overlay_cuda(
+        if method == "crop":
+            # crop滤镜
+            result = service.create_roll_video_crop(
                 output_path=output_path_base,
                 **test_case['params']
             )
         else:
-            # 使用overlay_cuda方法替代原始方法
+            # overlay_cuda滤镜
             result = service.create_roll_video_overlay_cuda(
                 output_path=output_path_base,
-                scroll_direction="bottom_to_top",  # 从下到上滚动
                 **test_case['params']
             )
         
