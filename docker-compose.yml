@@ -59,6 +59,8 @@ services:
     ports:
       - "6000:6000"
     restart: unless-stopped
+    command: >
+      sh -c "supervisord -n -c /app/supervisor-conf/supervisord.conf"
     healthcheck:
       test: nvidia-smi || exit 1
       interval: 30s
