@@ -1456,31 +1456,10 @@ class VideoRenderer:
             if audio_path and os.path.exists(audio_path):
                 ffmpeg_cmd.extend(["-i", audio_path])
                 
-            # 目标：从下到上滚动 (y值从大到小)
-            # 基于用户提供的旧代码结构，但调整参数以实现从下到上滚动
-
-            # 1. 初始静止时，裁剪框的顶部应尽可能接近图像底部，使得图像底部内容可见。
-            #    y 值应为使得视频帧能显示图像最底部开始的内容。
-            initial_y_for_bottom_scroll = max(0, img_height - self.height)
-
-            # 2. 结束静止时，裁剪框的顶部应尽可能接近图像顶部。
-            #    如果完全滚动，y 值为 0。如果滚动距离不足以显示顶部，则为 initial_y_for_bottom_scroll - scroll_distance
-            final_y_for_bottom_scroll = max(0, initial_y_for_bottom_scroll - scroll_distance)
-
-            # 3. 滚动期间，y 从 initial_y_for_bottom_scroll 线性减小到 final_y_for_bottom_scroll
-            #    滚动的量是 ( (t - scroll_start_time) / scroll_duration ) * scroll_distance
-            scrolling_part_expr = f"{initial_y_for_bottom_scroll} - ((t-{scroll_start_time})/{scroll_duration}*{scroll_distance})"
-
-            # 构建完整的表达式，使用FFmpeg的if和between逻辑
-            # 注意：旧代码的between部分是 min(上限, 递增值)。我们要的是 初始大值 - 递增滚动量
-            # 因此，滚动部分的逻辑是直接计算，不再使用min。
-            crop_y_expr = f"'if(lt(t,{scroll_start_time}),{initial_y_for_bottom_scroll},if(gt(t,{scroll_end_time}),{final_y_for_bottom_scroll},{scrolling_part_expr}))'"
-
-            logger.info(f"目标：从下到上。crop_y_expr: {crop_y_expr}")
-            logger.info(f"滚动参数: initial_y={initial_y_for_bottom_scroll}px, final_y={final_y_for_bottom_scroll}px, distance={scroll_distance}px")
-            logger.info(f"时间参数: start_time={scroll_start_time}s, end_time={scroll_end_time}s, duration={scroll_duration}s")
-
-            # 构建crop滤镜表达式 - 保持原始格式，使用单引号
+            # 创建裁剪表达式
+            crop_y_expr = f"'if(between(t,{scroll_start_time},{scroll_end_time}),min({img_height-self.height},(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}),if(lt(t,{scroll_start_time}),0,{scroll_distance}))'"
+            
+            # 始终使用CPU的crop滤镜,GPU没有crop滤镜
             crop_expr = (
                 f"crop=w={self.width}:h={self.height}:"
                 f"x=0:y={crop_y_expr}"
