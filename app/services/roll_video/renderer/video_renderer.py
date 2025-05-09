@@ -1463,20 +1463,26 @@ class VideoRenderer:
                 ffmpeg_cmd.extend(["-i", audio_path])
                 
             # 创建裁剪表达式
-            crop_y_expr = f"'if(lt(t,{scroll_start_time}), 0, if(gt(t,{scroll_end_time}), {scroll_distance}, (t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))'"
-            
-            # 改为使用与overlay_cuda相同的逻辑
             if scroll_direction == "bottom_to_top":
                 # 从下到上滚动 (y值从大到小)
-                crop_y_expr = f"'if(lt(t,{scroll_start_time}), {img_height-self.height}, if(gt(t,{scroll_end_time}), max(0, {img_height-self.height}-{scroll_distance}), {img_height-self.height}-(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))'"
+                # 问题修复：确保一开始就显示图像内容，而不是空白
+                # 计算初始位置：确保部分文本内容在视频视口内可见，而不是完全在视口之外
+                # 计算安全的初始显示位置：图像底部但确保内容在视口内
+                initial_pos = f"min(h-{self.height}, max(0, {img_height}-{self.height}))"
+                ending_pos = f"max(0, min({initial_pos}-{scroll_distance}, 0))"
+                y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {initial_pos}-{scroll_formula}))"
+                logger.info(f"使用基础匀速滚动效果 - 从下到上滚动（修复后）- 初始位置:{initial_pos}，结束位置:{ending_pos}")
             else:
                 # 从上到下滚动 (y值从小到大)
-                crop_y_expr = f"'if(lt(t,{scroll_start_time}), 0, if(gt(t,{scroll_end_time}), min({img_height-self.height}, {scroll_distance}), (t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))'"
+                initial_pos = "0" # 顶部开始
+                ending_pos = f"min(h-{self.height}, {scroll_distance})"
+                y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {scroll_formula}))"
+                logger.info(f"使用基础匀速滚动效果 - 从上到下滚动")
             
             # 始终使用CPU的crop滤镜,GPU没有crop滤镜
             crop_expr = (
                 f"crop=w={self.width}:h={self.height}:"
-                f"x=0:y={crop_y_expr}"
+                f"x=0:y='{y_expr}'"
             )
             
             # 添加滤镜
@@ -1826,13 +1832,17 @@ class VideoRenderer:
                 # 根据滚动方向决定y表达式
                 if scroll_direction == "bottom_to_top":
                     # 从下到上滚动 (y值从大到小)
-                    # 全新设计：确保一开始显示图像底部，然后向上滚动
-                    y_expr = f"if(lt(t,{scroll_start_time}), h-{self.height}, if(gt(t,{scroll_end_time}), max(0, h-{self.height}-{scroll_distance}), h-{self.height}-{scroll_expr}))"
-                    logger.info(f"使用高级滚动效果 (加速/减速) - 从下到上滚动（重新设计）")
+                    # 问题修复：确保一开始就显示图像内容，而不是空白
+                    initial_pos = f"min(h-{self.height}, max(0, {img_height}-{self.height}))"
+                    ending_pos = f"max(0, min({initial_pos}-{scroll_distance}, 0))"
+                    y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {initial_pos}-{scroll_expr}))"
+                    logger.info(f"使用高级滚动效果 (加速/减速) - 从下到上滚动（修复后）- 初始位置:{initial_pos}，结束位置:{ending_pos}")
                 else:
                     # 从上到下滚动 (y值从小到大)
-                    y_expr = f"if(lt(t,{scroll_start_time}), 0, if(gt(t,{scroll_end_time}), min(h-{self.height}, {scroll_distance}), {scroll_expr}))"
-                    logger.info(f"使用高级滚动效果 (加速/减速) - 从上到下滚动（重新设计）")
+                    initial_pos = "0" # 顶部开始
+                    ending_pos = f"min(h-{self.height}, {scroll_distance})"
+                    y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {scroll_formula}))"
+                    logger.info(f"使用高级滚动效果 (加速/减速) - 从上到下滚动（修复后）")
             else:
                 # 基础匀速滚动
                 scroll_formula = f"if(between(t,{scroll_start_time},{scroll_end_time}),(t-{scroll_start_time})*{scroll_distance}/{scroll_duration},if(lt(t,{scroll_start_time}),0,{scroll_distance}))"
@@ -1840,13 +1850,17 @@ class VideoRenderer:
                 # 根据滚动方向决定y表达式
                 if scroll_direction == "bottom_to_top":
                     # 从下到上滚动 (y值从大到小)
-                    # 全新设计：确保一开始显示图像底部，然后向上滚动
-                    y_expr = f"if(lt(t,{scroll_start_time}), h-{self.height}, if(gt(t,{scroll_end_time}), max(0, h-{self.height}-{scroll_distance}), h-{self.height}-{scroll_formula}))"
-                    logger.info(f"使用基础匀速滚动效果 - 从下到上滚动（重新设计）")
+                    # 问题修复：确保一开始就显示图像内容，而不是空白
+                    initial_pos = f"min(h-{self.height}, max(0, {img_height}-{self.height}))"
+                    ending_pos = f"max(0, min({initial_pos}-{scroll_distance}, 0))"
+                    y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {initial_pos}-{scroll_formula}))"
+                    logger.info(f"使用基础匀速滚动效果 - 从下到上滚动（修复后）- 初始位置:{initial_pos}，结束位置:{ending_pos}")
                 else:
                     # 从上到下滚动 (y值从小到大)
-                    y_expr = f"if(lt(t,{scroll_start_time}), 0, if(gt(t,{scroll_end_time}), min(h-{self.height}, {scroll_distance}), {scroll_formula}))"
-                    logger.info(f"使用基础匀速滚动效果 - 从上到下滚动（重新设计）")
+                    initial_pos = "0" # 顶部开始
+                    ending_pos = f"min(h-{self.height}, {scroll_distance})"
+                    y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {scroll_formula}))"
+                    logger.info(f"使用基础匀速滚动效果 - 从上到下滚动（修复后）")
 
             # 构建滤镜复杂表达式
             # 根据是否需要透明度调整前景图像的格式
