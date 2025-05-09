@@ -1780,18 +1780,8 @@ class VideoRenderer:
             if audio_path and os.path.exists(audio_path):
                 ffmpeg_cmd.extend(["-i", audio_path])
             
-            # 从下到上滚动 (y值从大到小)
-            # 始终从图像底部显示，即使图像高度小于视频高度
-            start_y = max(0, img_height - self.height)  # 图像最底部位置
-            # 最终滚动到图像顶部(0)或滚动距离允许的最高位置
-            end_y = max(0, start_y - scroll_distance)
-            
-            # 关键：确保滚动表达式是递减的（从大到小）
-            # 从开始位置(底部，大y值)减去一个随时间增加的值，得到递减的y位置
-            y_expr = f"if(lt(t\\,{scroll_start_time})\\,{start_y}\\,if(gt(t\\,{scroll_end_time})\\,{end_y}\\,{start_y}-(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))"
-            
-            # 修改为与crop模式一致的逻辑
-            y_expr = f"if(between(t,{scroll_start_time},{scroll_end_time}),min({img_height-self.height},(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}),if(lt(t,{scroll_start_time}),0,{scroll_distance}))"
+            # 从下往上滚动的表达式
+            y_expr = f"if(between(t,{scroll_start_time},{scroll_end_time}),max(0,{img_height-self.height}-(t-{scroll_start_time})/{scroll_duration}*{img_height-self.height}),if(lt(t,{scroll_start_time}),{img_height-self.height},0))"
             
             # 根据是否需要透明度调整前景图像的格式
             if transparency_required:
@@ -1827,7 +1817,7 @@ class VideoRenderer:
             # 否则使用简化的滤镜链
             else:
                 # 使用与成功示例相似的格式，移除复杂的中间流标记
-                # 检查成功示例: overlay_cuda=x=(main_w-overlay_w)/2:y='-if(lt(t,2.0),0,if(gt(t,202.08333333333334),12005,(t-2.0)*(12005/200.08333333333334)))'
+                # 检查成功示例: overlay_cuda=x=0:y='if(between(t,2.0,458.85),max(0,27411-(t-2.0)/456.85*27411),if(lt(t,2.0),27411,0))'
                 filter_complex = f"[1:v]format=yuv420p,hwupload_cuda[img_cuda_no_alpha]; \
                                  [0:v][img_cuda_no_alpha]overlay_cuda=x=0:y='{y_expr}'[out_cuda]; \
                                  [out_cuda]hwdownload,format=yuv420p[out]"
