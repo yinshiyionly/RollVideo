@@ -357,6 +357,10 @@ class RollVideoService:
         scroll_speed: float = 1,  # 修改为每秒滚动的行数
         audio_path: Optional[str] = None,
         scroll_direction: str = "bottom_to_top",  # 添加滚动方向参数
+        top_margin: int = 0,      # 新增：上边距
+        bottom_margin: int = 0,   # 新增：下边距
+        left_margin: int = 0,     # 新增：左边距
+        right_margin: int = 0     # 新增：右边距
     ) -> Dict[str, Union[str, bool]]:
         """
         使用FFmpeg滤镜创建滚动视频，自动根据透明度选择格式
@@ -366,7 +370,7 @@ class RollVideoService:
         2. 更平滑 - 滚动效果由FFmpeg实时计算，支持亚像素精度的滚动
         3. 更低内存 - 不需要在内存中处理大量帧
         
-        参数与create_roll_video相同，并增加了scroll_direction参数
+        参数与create_roll_video相同，并增加了scroll_direction参数和边距参数
         """
         try:
             # --- 决定透明度需求和编码策略 ---
@@ -426,6 +430,10 @@ class RollVideoService:
                 bg_color=bg_color_final,
                 line_spacing=line_spacing,
                 char_spacing=char_spacing,
+                top_margin=top_margin,       # 传递上边距
+                bottom_margin=bottom_margin, # 传递下边距
+                left_margin=left_margin,     # 传递左边距
+                right_margin=right_margin    # 传递右边距
             )
 
             # 将文本渲染为图片，并获取文本实际高度
@@ -509,6 +517,10 @@ class RollVideoService:
         audio_path: Optional[str] = None,
         scroll_effect: str = "basic",  # 滚动效果类型: 'basic'=匀速, 'advanced'=加减速
         scroll_direction: str = "bottom_to_top",  # 滚动方向: 'bottom_to_top'=从下到上, 'top_to_bottom'=从上到下
+        top_margin: int = 0,      # 新增：上边距
+        bottom_margin: int = 0,   # 新增：下边距
+        left_margin: int = 0,     # 新增：左边距
+        right_margin: int = 0     # 新增：右边距
     ) -> Dict[str, Union[str, bool]]:
         """
         使用FFmpeg的overlay_cuda GPU加速滤镜创建滚动视频，自动根据透明度选择格式
@@ -534,6 +546,10 @@ class RollVideoService:
             audio_path: 可选的音频文件路径
             scroll_effect: 滚动效果类型，'basic'为匀速滚动，'advanced'为加速减速效果
             scroll_direction: 滚动方向，'bottom_to_top'从下到上滚动，'top_to_bottom'从上到下滚动
+            top_margin: 上边距，文本与顶部的距离
+            bottom_margin: 下边距，文本与底部的距离
+            left_margin: 左边距，文本与左侧的距离
+            right_margin: 右边距，文本与右侧的距离
             
         Returns:
             包含处理结果的字典
@@ -597,6 +613,10 @@ class RollVideoService:
                 bg_color=bg_color_final,
                 line_spacing=line_spacing,
                 char_spacing=char_spacing,
+                top_margin=top_margin,       # 传递上边距
+                bottom_margin=bottom_margin, # 传递下边距
+                left_margin=left_margin,     # 传递左边距
+                right_margin=right_margin    # 传递右边距
             )
 
             # 将文本渲染为图片，并获取文本实际高度

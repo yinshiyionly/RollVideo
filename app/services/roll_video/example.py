@@ -57,6 +57,10 @@ def main():
                 "char_spacing": 10,
                 "fps": 30,
                 "scroll_speed": 1,
+                "top_margin": 10, # 上边距
+                "bottom_margin": 10, # 下边距
+                "left_margin": 10, # 左边距
+                "right_margin": 10, # 右边距
             }
         },
         {
@@ -74,6 +78,10 @@ def main():
                 "char_spacing": 10,
                 "fps": 30,
                 "scroll_speed": 1,
+                "top_margin": 10, # 上边距
+                "bottom_margin": 10, # 下边距
+                "left_margin": 10, # 左边距
+                "right_margin": 10, # 右边距
             }
         }
     ]
