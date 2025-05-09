@@ -153,18 +153,6 @@ result = service.create_roll_video_overlay_cuda(
 )
 ```
 
-## 依赖安装
-
-```bash
-# Python 库
-pip install pillow numpy requests
-
-# 核心依赖：FFmpeg
-# 需要安装 FFmpeg。为了使用GPU加速(可选)，
-# FFmpeg 需要编译时启用 NVENC 支持。
-# 检查是否支持: ffmpeg -encoders | grep nvenc
-```
-
 ## 注意事项
 
 - 滚动速度越大，视频时长越短。
