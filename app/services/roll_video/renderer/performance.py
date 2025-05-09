@@ -8,7 +8,6 @@ import numpy as np
 from collections import deque
 import os
 import re
-import sys
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)

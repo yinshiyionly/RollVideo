@@ -14,38 +14,10 @@
 # 直接从子模块导入所有组件
 from .text_renderer import TextRenderer
 from .video_renderer import VideoRenderer
-from .performance import PerformanceMonitor, log_system_info, FrameProcessingTracker
-from .memory_management import FrameMemoryPool, SharedMemoryFramePool, FrameBuffer
-from .frame_processors import (
-    _process_frame, 
-    _process_frame_optimized,
-    _process_frame_optimized_shm,
-    init_shared_memory,
-    cleanup_shared_memory,
-    init_worker,
-    test_worker_shared_memory
-)
-from .utils import limit_resources, emergency_cleanup, get_memory_usage, optimize_memory, time_tracker
+from .performance import PerformanceMonitor
 
 __all__ = [
     "TextRenderer",
     "VideoRenderer",
-    "PerformanceMonitor",
-    "FrameMemoryPool",
-    "SharedMemoryFramePool",
-    "FrameBuffer",
-    "_process_frame",
-    "_process_frame_optimized",
-    "_process_frame_optimized_shm",
-    "init_shared_memory",
-    "cleanup_shared_memory",
-    "init_worker",
-    "test_worker_shared_memory",
-    "limit_resources",
-    "log_system_info",
-    "FrameProcessingTracker",
-    "emergency_cleanup",
-    "get_memory_usage",
-    "optimize_memory",
-    "time_tracker"
+    "PerformanceMonitor"
 ]
