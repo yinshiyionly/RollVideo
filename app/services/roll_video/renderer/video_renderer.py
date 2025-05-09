@@ -135,7 +135,7 @@ class VideoRenderer:
                 "-vendor", "ap10", 
                 "-colorspace", "bt709",
             ]
-            logger.info("使用ProRes 4444编码器处理透明视频")
+            logger.info("使用CPU编码器: ProRes 4444(透明视频)")
             return codec_params, pix_fmt
         
         # 不透明视频处理
@@ -157,10 +157,8 @@ class VideoRenderer:
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
                 ]
-                logger.info("使用NVIDIA GPU加速编码器 (优化性能模式)")
+                logger.info("使用GPU编码器: h264_nvenc")
             else:
-                # 不支持NVIDIA，回退到CPU
-                logger.info("平台不支持NVIDIA编码，切换到libx264")
                 codec_params = [
                     "-c:v", "libx264",
                     "-preset", "veryfast",  # 使用更快的预设
@@ -168,9 +166,8 @@ class VideoRenderer:
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
                 ]
+                logger.info("平台不支持NVIDIA编码，切换到CPU编码器: libx264")
         elif preferred_codec == "h264_videotoolbox":
-            # 删除VideoToolbox相关分支，使用libx264代替
-            logger.info("不支持VideoToolbox，使用libx264")
             codec_params = [
                 "-c:v", "libx264",
                 "-preset", "veryfast",
@@ -178,6 +175,7 @@ class VideoRenderer:
                 "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart",
             ]
+            logger.info("不支持VideoToolbox，使用CPU编码器: libx264")
         elif preferred_codec == "prores_ks":
             # ProRes (非透明)
             codec_params = [
@@ -187,7 +185,7 @@ class VideoRenderer:
                 "-vendor", "ap10",
                 "-colorspace", "bt709",
             ]
-            logger.info("使用ProRes编码器 (非透明)")
+            logger.info("使用CPU编码器: ProRes(非透明)")
         else:
             # 默认使用libx264 (高质量CPU编码)
             codec_params = [
