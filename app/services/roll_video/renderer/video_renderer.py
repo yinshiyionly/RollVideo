@@ -1432,7 +1432,6 @@ class VideoRenderer:
             
             # 检测NVIDIA GPU
             try:
-                # 检测NVIDIA GPU是否存在
                 nvidia_result = subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
                 gpu_support["nvidia"] = nvidia_result.returncode == 0
                 
@@ -1440,9 +1439,6 @@ class VideoRenderer:
                     logger.info("检测到NVIDIA GPU，将尝试使用NVENC编码器")
             except Exception as e:
                 logger.info(f"NVIDIA GPU检测出错: {e}，将使用CPU处理")
-            
-            # 检测是否有任何GPU支持
-            has_gpu_support = gpu_support["nvidia"]
             
             # 构建基本FFmpeg命令
             ffmpeg_cmd = [
@@ -1469,13 +1465,18 @@ class VideoRenderer:
             
             # 关键：确保滚动表达式是递减的（从大到小）
             # 注意使用单引号包裹整个表达式，这是FFmpeg crop滤镜所需要的格式
-            crop_y_expr = f"'if(lt(t,{scroll_start_time}),{start_y},if(gt(t,{scroll_end_time}),{end_y},{start_y}-(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))'"
+            # 原始逻辑: crop_y_expr = f"'if(lt(t,{scroll_start_time}),{start_y},if(gt(t,{scroll_end_time}),{end_y},{start_y}-(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))'"
+            # 尝试反转滚动逻辑，如果之前是从上到下，现在应该变成从下到上 (或者反之)
+            # 主要改变是将减号变加号： {start_y}+(...)
+            crop_y_expr = f"'if(lt(t,{scroll_start_time}),{start_y},if(gt(t,{scroll_end_time}),{end_y},{start_y}+(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))'"
+            logger.warning(f"注意：为调试滚动方向，已临时反转crop_y_expr中的滚动计算符号。原始为减，现为加。")
             
             # 更清晰的日志
-            logger.info(f"⬆️ 滚动方向: 从下到上")
-            logger.info(f"开始位置: 图像底部 y={start_y}px, 结束位置: 图像顶部 y={end_y}px")
-            logger.info(f"图像高度: {img_height}px, 视频窗口高度: {self.height}px, 滚动距离: {scroll_distance}px")
-            
+            logger.info(f"crop_y_expr: {crop_y_expr}")
+            logger.info(f"滚动参数: start_y={start_y}px, end_y={end_y}px, scroll_distance={scroll_distance}px")
+            logger.info(f"时间参数: scroll_start_time={scroll_start_time}s, scroll_end_time={scroll_end_time}s, scroll_duration={scroll_duration}s")
+            logger.info(f"图像/视频尺寸: img_height={img_height}px, video_height={self.height}px")
+
             # 构建crop滤镜表达式 - 保持原始格式，使用单引号
             crop_expr = (
                 f"crop=w={self.width}:h={self.height}:"
