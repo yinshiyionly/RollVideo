@@ -357,10 +357,10 @@ class RollVideoService:
         scroll_speed: float = 1,  # 修改为每秒滚动的行数
         audio_path: Optional[str] = None,
         scroll_direction: str = "bottom_to_top",  # 添加滚动方向参数
-        top_margin: int = 0,      # 新增：上边距
-        bottom_margin: int = 0,   # 新增：下边距
-        left_margin: int = 0,     # 新增：左边距
-        right_margin: int = 0     # 新增：右边距
+        top_margin: int = 10,      # 默认上边距10px
+        bottom_margin: int = 10,   # 默认下边距10px
+        left_margin: int = 10,     # 默认左边距10px
+        right_margin: int = 10     # 默认右边距10px
     ) -> Dict[str, Union[str, bool]]:
         """
         使用FFmpeg滤镜创建滚动视频，自动根据透明度选择格式
@@ -517,10 +517,10 @@ class RollVideoService:
         audio_path: Optional[str] = None,
         scroll_effect: str = "basic",  # 滚动效果类型: 'basic'=匀速, 'advanced'=加减速
         scroll_direction: str = "bottom_to_top",  # 滚动方向: 'bottom_to_top'=从下到上, 'top_to_bottom'=从上到下
-        top_margin: int = 0,      # 新增：上边距
-        bottom_margin: int = 0,   # 新增：下边距
-        left_margin: int = 0,     # 新增：左边距
-        right_margin: int = 0     # 新增：右边距
+        top_margin: int = 10,      # 默认上边距10px
+        bottom_margin: int = 10,   # 默认下边距10px
+        left_margin: int = 10,     # 默认左边距10px
+        right_margin: int = 10     # 默认右边距10px
     ) -> Dict[str, Union[str, bool]]:
         """
         使用FFmpeg的overlay_cuda GPU加速滤镜创建滚动视频，自动根据透明度选择格式

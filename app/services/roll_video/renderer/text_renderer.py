@@ -16,10 +16,10 @@ class TextRenderer:
         bg_color: Tuple[int, int, int, int] = (255, 255, 255, 255),  # RGBA颜色，支持透明度
         line_spacing: int = 10,
         char_spacing: int = 0,
-        top_margin: int = 0,      # 新增：上边距
-        bottom_margin: int = 0,   # 新增：下边距
-        left_margin: int = 0,     # 新增：左边距
-        right_margin: int = 0     # 新增：右边距
+        top_margin: int = 10,      # 默认上边距10px
+        bottom_margin: int = 10,   # 默认下边距10px
+        left_margin: int = 10,     # 默认左边距10px
+        right_margin: int = 10     # 默认右边距10px
     ):
         """
         初始化文字渲染器
