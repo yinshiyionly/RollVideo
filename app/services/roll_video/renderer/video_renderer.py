@@ -1513,7 +1513,7 @@ class VideoRenderer:
             # 5. 执行FFmpeg命令
             try:
                 # 启动进程
-                logger.info("启动FFmpeg进程...")
+                logger.info("正在启动FFmpeg进程...")
                 process = subprocess.Popen(
                     ffmpeg_cmd,
                     stdout=subprocess.PIPE,
@@ -1708,8 +1708,7 @@ class VideoRenderer:
                 has_cuda_support = nvidia_result.returncode == 0
                 
                 if not has_cuda_support:
-                    logger.warning("未检测到NVIDIA GPU，overlay_cuda滤镜需要NVIDIA GPU支持")
-                    logger.info("将回退到使用普通的crop滤镜方法")
+                    logger.warning("未检测到NVIDIA GPU，overlay_cuda滤镜需要NVIDIA GPU支持，将回退到使用CPU的crop滤镜方法")
                     return self.create_scrolling_video_crop(
                         image=image,
                         output_path=output_path,
@@ -1721,7 +1720,6 @@ class VideoRenderer:
                     )
                 
                 # 2. 再检测是否支持overlay_cuda滤镜
-                logger.info("检测是否支持overlay_cuda滤镜...")
                 filter_check = subprocess.run(
                     ["ffmpeg", "-hide_banner", "-filters"],
                     stdout=subprocess.PIPE,
@@ -1732,8 +1730,7 @@ class VideoRenderer:
                 has_overlay_cuda = "overlay_cuda" in filter_check.stdout
                 
                 if not has_overlay_cuda:
-                    logger.warning("系统不支持overlay_cuda滤镜（GPU加速叠加滤镜），虽然检测到NVIDIA GPU")
-                    logger.info("将回退到使用普通的crop滤镜方法")
+                    logger.warning("系统不支持overlay_cuda滤镜，将回退到使用CPU的crop滤镜方法")
                     return self.create_scrolling_video_crop(
                         image=image,
                         output_path=output_path,
@@ -1744,11 +1741,11 @@ class VideoRenderer:
                         bg_color=bg_color,
                     )
                 
-                logger.info("检测通过：系统支持NVIDIA GPU和overlay_cuda滤镜")
+                logger.info("overlay_cuda滤镜检测，通过✅")
                 
             except Exception as e:
                 logger.warning(f"检测CUDA或overlay_cuda滤镜时出错: {e}")
-                logger.info("将回退到使用普通的crop滤镜方法")
+                logger.info("将回退到使用CPU的crop滤镜方法")
                 return self.create_scrolling_video_crop(
                     image=image,
                     output_path=output_path,
@@ -1780,12 +1777,13 @@ class VideoRenderer:
             if audio_path and os.path.exists(audio_path):
                 ffmpeg_cmd.extend(["-i", audio_path])
             
-            # 从下往上滚动的表达式
-            y_expr = f"if(between(t,{scroll_start_time},{scroll_end_time}),max(0,{img_height-self.height}-(t-{scroll_start_time})/{scroll_duration}*{img_height-self.height}),if(lt(t,{scroll_start_time}),{img_height-self.height},0))"
+            # 根据用户提供的命令修改滚动表达式
+            # overlay_cuda=x=0:y='if(between(t,2.0,458.85), -((t-2.0)/456.85)*27411, if(lt(t,2.0), 0, -27411))'
+            y_expr = f"if(between(t,{scroll_start_time},{scroll_end_time}), -((t-{scroll_start_time})/{scroll_duration})*{img_height-self.height}, if(lt(t,{scroll_start_time}), 0, -{img_height-self.height}))"
             
-            # 根据是否需要透明度调整前景图像的格式
+            # 透明视频滤镜链
             if transparency_required:
-                 # 准备前景图像：先转换格式为RGBA，然后上传到CUDA
+                # 准备前景图像：先转换格式为RGBA，然后上传到CUDA
                 img_filter = "[1:v]format=rgba,hwupload_cuda[img_cuda];"
                 bg_format = "rgba" # 如果前景是RGBA，背景也用RGBA以确保兼容性
                 bg_filter = f"[0:v]format={bg_format},hwupload_cuda[bg_cuda];"
@@ -1794,34 +1792,18 @@ class VideoRenderer:
                 # 确保输出流格式正确 (RGBA输出需要hwdownload+format转换)
                 output_filter = "[out_cuda]hwdownload,format=rgba[out]"
                 logger.info("使用 overlay_cuda 处理透明视频 (RGBA格式)")
-            else:
-                # 准备前景图像：先转换格式为YUV420P，然后上传到CUDA
-                img_filter = "[1:v]format=yuv420p,hwupload_cuda[img_cuda];"
-                bg_format = "yuv420p" # 背景使用YUV420P
-                bg_filter = f"[0:v]format={bg_format},hwupload_cuda[bg_cuda];"
-                # overlay_cuda 叠加 (YUV420P输入)
-                overlay_filter = f"[bg_cuda][img_cuda]overlay_cuda=x=0:y=\"{y_expr}\"[out_cuda];"
-                 # 确保输出流格式正确 (YUV420P输出直接使用)
-                output_filter = "[out_cuda]hwdownload,format=yuv420p[out]"
-                logger.info("使用 overlay_cuda 处理不透明视频 (YUV420P格式)")
-
-            # 移除旧的滤镜链拼接逻辑
-            if transparency_required:
-                # 对于透明视频，保留原来的复杂处理方式
                 filter_complex = (
                     bg_filter +
                     img_filter +
                     overlay_filter +
                     output_filter
                 )
-            # 否则使用简化的滤镜链
+            # 非透明视频滤镜链
             else:
-                # 使用与成功示例相似的格式，移除复杂的中间流标记
-                # 检查成功示例: overlay_cuda=x=0:y='if(between(t,2.0,458.85),max(0,27411-(t-2.0)/456.85*27411),if(lt(t,2.0),27411,0))'
                 filter_complex = f"[1:v]format=yuv420p,hwupload_cuda[img_cuda_no_alpha]; \
                                  [0:v][img_cuda_no_alpha]overlay_cuda=x=0:y='{y_expr}'[out_cuda]; \
                                  [out_cuda]hwdownload,format=yuv420p[out]"
-                logger.info("使用简化的overlay_cuda处理不透明视频 (YUV420P格式)")
+                logger.info("使用 overlay_cuda 处理透明视频 (YUV420P格式)")
 
             ffmpeg_cmd.extend([
                 "-filter_complex", filter_complex,
@@ -1851,7 +1833,7 @@ class VideoRenderer:
             # 6. 执行FFmpeg命令
             try:
                 # 启动进程
-                logger.info("启动FFmpeg进程 (overlay_cuda)...")
+                logger.info("正在启动FFmpeg进程 (overlay_cuda)...")
                 process = subprocess.Popen(
                     ffmpeg_cmd,
                     stdout=subprocess.PIPE,

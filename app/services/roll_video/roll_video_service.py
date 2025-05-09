@@ -31,7 +31,7 @@ class RollVideoService:
         # 默认使用自定义字体，如果没有则使用系统默认字体
         if self.available_fonts:
             self.default_font_path = self.available_fonts[0]
-            logger.info(f"将使用自定义字体: {os.path.basename(self.default_font_path)}")
+            logger.info(f"使用自定义字体: {os.path.basename(self.default_font_path)}")
         else:
             # 系统默认字体路径，根据实际情况调整
             self.default_font_path = self.get_system_default_font()
@@ -55,7 +55,6 @@ class RollVideoService:
         if font_name:
             # 如果是完整路径且文件存在
             if os.path.isfile(font_name):
-                logger.info(f"使用指定字体路径: {font_name}")
                 return [font_name]
 
             # 获取不带扩展名的字体名称（用于匹配）
@@ -68,7 +67,6 @@ class RollVideoService:
                 for file in os.listdir(self.fonts_dir):
                     if file.lower() == base_name.lower():
                         found_font = os.path.join(self.fonts_dir, file)
-                        logger.info(f"找到精确匹配字体: {found_font}")
                         return [found_font]
 
                 # 精确匹配（不包括扩展名）
@@ -76,7 +74,6 @@ class RollVideoService:
                     file_without_ext = os.path.splitext(file)[0]
                     if file_without_ext.lower() == name_without_ext.lower():
                         found_font = os.path.join(self.fonts_dir, file)
-                        logger.info(f"找到字体名匹配: {found_font}")
                         return [found_font]
 
             logger.warning(f"找不到指定字体: {font_name}")
@@ -358,7 +355,6 @@ class RollVideoService:
         fps: int = 30,
         scroll_speed: float = 1,  # 修改为每秒滚动的行数
         audio_path: Optional[str] = None,
-        scroll_direction: str = "bottom_to_top",  # 添加滚动方向参数
         top_margin: int = 10,      # 默认上边距10px
         bottom_margin: int = 10,   # 默认下边距10px
         left_margin: int = 10,     # 默认左边距10px
@@ -372,7 +368,6 @@ class RollVideoService:
         2. 更平滑 - 滚动效果由FFmpeg实时计算，支持亚像素精度的滚动
         3. 更低内存 - 不需要在内存中处理大量帧
         
-        参数与create_roll_video相同，并增加了scroll_direction参数和边距参数
         """
         try:
             # --- 决定透明度需求和编码策略 ---
@@ -635,13 +630,9 @@ class RollVideoService:
             # 确保至少滚动1像素/帧
             pixels_per_frame = max(1, round(pixels_per_frame))
             
-            # 获取有效的滚动方向
-            scroll_direction = "bottom_to_top"  # CUDA overlay滤镜目前仅支持从下到上滚动
-
             logger.info(
                 f"滚动速度设置: {scroll_speed:.2f}行/秒 → {pixels_per_frame}像素/帧 (行高约{estimated_line_height}像素)"
             )
-            logger.info(f"滚动方向: {scroll_direction}")
 
             # 创建视频渲染器
             video_renderer = VideoRenderer(
