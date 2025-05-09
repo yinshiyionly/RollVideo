@@ -1456,34 +1456,29 @@ class VideoRenderer:
             if audio_path and os.path.exists(audio_path):
                 ffmpeg_cmd.extend(["-i", audio_path])
                 
-            # 创建裁剪表达式 - 使用FFmpeg兼容的表达式格式
             # 目标：从下到上滚动 (y值从大到小)
+            # 基于用户提供的旧代码结构，但调整参数以实现从下到上滚动
 
-            # 参考旧代码逻辑，并结合从下到上的目标进行调整：
-            # 对于从下到上滚动：
-            # 1. 初始静止时，Y应该是图像的底部。
-            #    start_y_static = img_height - self.height (如果图像高于视频) 或 0 (如果图像不高于视频)
-            #    start_y_static = max(0, img_height - self.height)
-            # 2. 滚动结束时，Y应该是图像的顶部。
-            #    end_y_static = 0
-            # 3. 滚动过程中，Y从 start_y_static 变化到 end_y_static。
-            #    scroll_amount = (t - scroll_start_time) / scroll_duration * scroll_distance
-            #    current_y = start_y_static - scroll_amount
+            # 1. 初始静止时，裁剪框的顶部应尽可能接近图像底部，使得图像底部内容可见。
+            #    y 值应为使得视频帧能显示图像最底部开始的内容。
+            initial_y_for_bottom_scroll = max(0, img_height - self.height)
 
-            initial_y_offset = max(0, img_height - self.height) # 图像底部对应在crop滤镜中的y值
-            final_y_offset = max(0, initial_y_offset - scroll_distance) # 滚动到最顶部时crop滤镜中的y值
+            # 2. 结束静止时，裁剪框的顶部应尽可能接近图像顶部。
+            #    如果完全滚动，y 值为 0。如果滚动距离不足以显示顶部，则为 initial_y_for_bottom_scroll - scroll_distance
+            final_y_for_bottom_scroll = max(0, initial_y_for_bottom_scroll - scroll_distance)
 
-            # 表达式核心： Y_静止初 = initial_y_offset
-            #             Y_静止末 = final_y_offset
-            #             Y_滚动中 = initial_y_offset - (t - scroll_start_time) / scroll_duration * scroll_distance
-            
-            crop_y_expr = f"'if(lt(t,{scroll_start_time}),{initial_y_offset},if(gt(t,{scroll_end_time}),{final_y_offset},{initial_y_offset}-(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))'"
-            
-            # 更清晰的日志
-            logger.info(f"crop_y_expr: {crop_y_expr}")
-            logger.info(f"滚动参数: initial_y_offset={initial_y_offset}px, final_y_offset={final_y_offset}px, scroll_distance={scroll_distance}px")
-            logger.info(f"时间参数: scroll_start_time={scroll_start_time}s, scroll_end_time={scroll_end_time}s, scroll_duration={scroll_duration}s")
-            logger.info(f"图像/视频尺寸: img_height={img_height}px, video_height={self.height}px")
+            # 3. 滚动期间，y 从 initial_y_for_bottom_scroll 线性减小到 final_y_for_bottom_scroll
+            #    滚动的量是 ( (t - scroll_start_time) / scroll_duration ) * scroll_distance
+            scrolling_part_expr = f"{initial_y_for_bottom_scroll} - ((t-{scroll_start_time})/{scroll_duration}*{scroll_distance})"
+
+            # 构建完整的表达式，使用FFmpeg的if和between逻辑
+            # 注意：旧代码的between部分是 min(上限, 递增值)。我们要的是 初始大值 - 递增滚动量
+            # 因此，滚动部分的逻辑是直接计算，不再使用min。
+            crop_y_expr = f"'if(lt(t,{scroll_start_time}),{initial_y_for_bottom_scroll},if(gt(t,{scroll_end_time}),{final_y_for_bottom_scroll},{scrolling_part_expr}))'"
+
+            logger.info(f"目标：从下到上。crop_y_expr: {crop_y_expr}")
+            logger.info(f"滚动参数: initial_y={initial_y_for_bottom_scroll}px, final_y={final_y_for_bottom_scroll}px, distance={scroll_distance}px")
+            logger.info(f"时间参数: start_time={scroll_start_time}s, end_time={scroll_end_time}s, duration={scroll_duration}s")
 
             # 构建crop滤镜表达式 - 保持原始格式，使用单引号
             crop_expr = (
