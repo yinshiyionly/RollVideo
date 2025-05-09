@@ -39,6 +39,11 @@ def main():
     output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
     os.makedirs(output_dir, exist_ok=True)
 
+    # 初始化报告相关变量
+    report_lines = [] # 用于存储报告条目
+    report_file_name = f"test_report_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+    report_file_path = os.path.join(output_dir, report_file_name)
+
     # 创建服务实例
     service = RollVideoService()
 
@@ -67,8 +72,7 @@ def main():
                 "background_url": background_url, # 背景图
                 "scale_mode": "stretch"  # 拉伸模式
             }
-        }
-        ,
+        },
         {
             "description": "overlay_cuda_with_bg_tile",
             "method": "overlay_cuda", 
@@ -227,14 +231,63 @@ def main():
             logger.info(f"场景 {i+1} 成功: 视频创建完成")
             logger.info(f"最终输出视频路径: {result.get('output_path')}")
             logger.info(f"总耗时: {total_time:.2f}秒")
+
+            output_video_path = result.get('output_path')
+            file_size = "N/A"
+
+            if output_video_path and os.path.exists(output_video_path):
+                # 获取文件大小
+                try:
+                    file_size_bytes = os.path.getsize(output_video_path)
+                    file_size = f"{file_size_bytes} bytes ({file_size_bytes / (1024*1024):.2f} MB)"
+                except Exception as e:
+                    logger.error(f"获取文件大小出错 {output_video_path}: {e}")
+                    file_size = "获取文件大小出错"
+            else:
+                logger.error(f"输出视频路径未找到或无效: {output_video_path}")
+                file_size = "N/A (文件未找到)"
+
+            report_entry = (
+                f"测试用例: {test_case['description']}\n"
+                f"方法: {test_case.get('method', 'N/A')}\n"
+                f"参数:\n{json.dumps(test_case['params'], indent=4, ensure_ascii=False)}\n"
+                f"渲染时间: {total_time:.2f}秒\n"
+                f"文件大小: {file_size}\n"
+                f"输出文件: {output_video_path}\n"
+                f"--------------------------------------------------\n"
+            )
+            report_lines.append(report_entry)
+
         else:
             logger.error(f"场景 {i+1} 失败: {result.get('message')}")
+            report_entry = (
+                f"测试用例: {test_case['description']}\n"
+                f"方法: {test_case.get('method', 'N/A')}\n"
+                f"参数:\n{json.dumps(test_case['params'], indent=4, ensure_ascii=False)}\n"
+                f"状态: 失败\n"
+                f"信息: {result.get('message')}\n"
+                f"渲染时间: {total_time:.2f}秒\n"
+                f"--------------------------------------------------\n"
+            )
+            report_lines.append(report_entry)
 
         logger.info(f"--- 场景 {i+1} 生成结束 ---")
         
         # 在不同场景之间添加一个间隔
         if i < len(test_cases) - 1:
             logger.info("\n" + "-"*80 + "\n")
+
+    # 写入报告文件
+    try:
+        with open(report_file_path, "w", encoding="utf-8") as f_report:
+            f_report.write("RollVideo 测试报告\n")
+            f_report.write(f"生成于: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f_report.write("="*80 + "\n\n")
+            for entry in report_lines:
+                f_report.write(entry)
+        logger.info(f"测试报告生成于: {report_file_path}")
+    except Exception as e:
+        logger.error(f"写入测试报告失败: {e}")
 
 if __name__ == "__main__":
     main()
