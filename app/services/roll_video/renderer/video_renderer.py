@@ -1790,6 +1790,9 @@ class VideoRenderer:
             # 从开始位置(底部，大y值)减去一个随时间增加的值，得到递减的y位置
             y_expr = f"if(lt(t\\,{scroll_start_time})\\,{start_y}\\,if(gt(t\\,{scroll_end_time})\\,{end_y}\\,{start_y}-(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))"
             
+            # 修改为与crop模式一致的逻辑
+            y_expr = f"if(between(t,{scroll_start_time},{scroll_end_time}),min({img_height-self.height},(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}),if(lt(t,{scroll_start_time}),0,{scroll_distance}))"
+            
             # 根据是否需要透明度调整前景图像的格式
             if transparency_required:
                  # 准备前景图像：先转换格式为RGBA，然后上传到CUDA

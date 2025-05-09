@@ -64,120 +64,121 @@ def main():
                 "background_url": "https://aigc-miaobi.tos-cn-guangzhou.volces.com/clone_audio_user_demo/2025-05-08/b8b6dd60-2bf0-11f0-94a9-0daeec838b86.jpg", # 背景图
                 "scale_mode": "stretch"  # 拉伸模式
             }
-        },
-        {
-            "description": "overlay_cuda_with_bg_tile",
-            "method": "overlay_cuda", 
-            "params": {
-                "text": sample_text,
-                "width": 720,
-                "height": 1280,
-                "font_path": "方正黑体简体.ttf",
-                "font_size": 30,
-                "font_color": [0,0,0],
-                "bg_color": [255,255,255,1.0],  # 不透明白色背景
-                "line_spacing": 20,
-                "char_spacing": 10,
-                "fps": 30,
-                "scroll_speed": 1,
-                "top_margin": 10, # 上边距
-                "bottom_margin": 10, # 下边距
-                "left_margin": 10, # 左边距
-                "right_margin": 10, # 右边距
-                "background_url": "https://aigc-miaobi.tos-cn-guangzhou.volces.com/clone_audio_user_demo/2025-05-08/b8b6dd60-2bf0-11f0-94a9-0daeec838b86.jpg", # 背景图
-                "scale_mode": "tile"  # 平铺模式
-            }
-        },
-        {
-            "description": "overlay_cuda_no_bg",
-            "method": "overlay_cuda", 
-            "params": {
-                "text": sample_text,
-                "width": 720,
-                "height": 1280,
-                "font_path": "方正黑体简体.ttf",
-                "font_size": 30,
-                "font_color": [0,0,0],
-                "bg_color": [255,255,255,1.0],  # 不透明白色背景
-                "line_spacing": 20,
-                "char_spacing": 10,
-                "fps": 30,
-                "scroll_speed": 1,
-                "top_margin": 10, # 上边距
-                "bottom_margin": 10, # 下边距
-                "left_margin": 10, # 左边距
-                "right_margin": 10, # 右边距
-                "background_url": None  # 不使用背景图
-            }
-        },
-        {
-            "description": "crop_with_bg_stretch",
-            "method": "crop",
-            "params": {
-                "text": sample_text,
-                "width": 720,
-                "height": 1280,
-                "font_path": "方正黑体简体.ttf",
-                "font_size": 30,
-                "font_color": [0,0,0],
-                "bg_color": [255,255,255,1.0],  # 不透明白色背景
-                "line_spacing": 20,
-                "char_spacing": 10,
-                "fps": 30,
-                "scroll_speed": 1,
-                "top_margin": 30, # 上边距
-                "bottom_margin": 30, # 下边距
-                "left_margin": 30, # 左边距
-                "right_margin": 30, # 右边距
-                "background_url": "https://aigc-miaobi.tos-cn-guangzhou.volces.com/clone_audio_user_demo/2025-05-08/b8b6dd60-2bf0-11f0-94a9-0daeec838b86.jpg", # 背景图
-                "scale_mode": "stretch"  # 拉伸模式
-            }
-        },
-        {
-            "description": "crop_with_bg_tile",
-            "method": "crop",
-            "params": {
-                "text": sample_text,
-                "width": 720,
-                "height": 1280,
-                "font_path": "方正黑体简体.ttf",
-                "font_size": 30,
-                "font_color": [0,0,0],
-                "bg_color": [255,255,255,1.0],  # 不透明白色背景
-                "line_spacing": 20,
-                "char_spacing": 10,
-                "fps": 30,
-                "scroll_speed": 1,
-                "top_margin": 30, # 上边距
-                "bottom_margin": 30, # 下边距
-                "left_margin": 30, # 左边距
-                "right_margin": 30, # 右边距
-                "background_url": "https://aigc-miaobi.tos-cn-guangzhou.volces.com/clone_audio_user_demo/2025-05-08/b8b6dd60-2bf0-11f0-94a9-0daeec838b86.jpg", # 背景图
-                "scale_mode": "tile"  # 平铺模式
-            }
-        },
-        {
-            "description": "crop_no_bg",
-            "method": "crop",
-            "params": {
-                "text": sample_text,
-                "width": 720,
-                "height": 1280,
-                "font_path": "方正黑体简体.ttf",
-                "font_size": 30,
-                "font_color": [0,0,0],
-                "bg_color": [255,255,255,1.0],  # 不透明白色背景
-                "line_spacing": 20,
-                "char_spacing": 10,
-                "fps": 30,
-                "scroll_speed": 1,
-                "top_margin": 30, # 上边距
-                "bottom_margin": 30, # 下边距
-                "left_margin": 30, # 左边距
-                "right_margin": 30, # 右边距
-                "background_url": None  # 不使用背景图
-            }
         }
+        # ,
+        # {
+        #     "description": "overlay_cuda_with_bg_tile",
+        #     "method": "overlay_cuda", 
+        #     "params": {
+        #         "text": sample_text,
+        #         "width": 720,
+        #         "height": 1280,
+        #         "font_path": "方正黑体简体.ttf",
+        #         "font_size": 30,
+        #         "font_color": [0,0,0],
+        #         "bg_color": [255,255,255,1.0],  # 不透明白色背景
+        #         "line_spacing": 20,
+        #         "char_spacing": 10,
+        #         "fps": 30,
+        #         "scroll_speed": 1,
+        #         "top_margin": 10, # 上边距
+        #         "bottom_margin": 10, # 下边距
+        #         "left_margin": 10, # 左边距
+        #         "right_margin": 10, # 右边距
+        #         "background_url": "https://aigc-miaobi.tos-cn-guangzhou.volces.com/clone_audio_user_demo/2025-05-08/b8b6dd60-2bf0-11f0-94a9-0daeec838b86.jpg", # 背景图
+        #         "scale_mode": "tile"  # 平铺模式
+        #     }
+        # },
+        # {
+        #     "description": "overlay_cuda_no_bg",
+        #     "method": "overlay_cuda", 
+        #     "params": {
+        #         "text": sample_text,
+        #         "width": 720,
+        #         "height": 1280,
+        #         "font_path": "方正黑体简体.ttf",
+        #         "font_size": 30,
+        #         "font_color": [0,0,0],
+        #         "bg_color": [255,255,255,1.0],  # 不透明白色背景
+        #         "line_spacing": 20,
+        #         "char_spacing": 10,
+        #         "fps": 30,
+        #         "scroll_speed": 1,
+        #         "top_margin": 10, # 上边距
+        #         "bottom_margin": 10, # 下边距
+        #         "left_margin": 10, # 左边距
+        #         "right_margin": 10, # 右边距
+        #         "background_url": None  # 不使用背景图
+        #     }
+        # },
+        # {
+        #     "description": "crop_with_bg_stretch",
+        #     "method": "crop",
+        #     "params": {
+        #         "text": sample_text,
+        #         "width": 720,
+        #         "height": 1280,
+        #         "font_path": "方正黑体简体.ttf",
+        #         "font_size": 30,
+        #         "font_color": [0,0,0],
+        #         "bg_color": [255,255,255,1.0],  # 不透明白色背景
+        #         "line_spacing": 20,
+        #         "char_spacing": 10,
+        #         "fps": 30,
+        #         "scroll_speed": 1,
+        #         "top_margin": 30, # 上边距
+        #         "bottom_margin": 30, # 下边距
+        #         "left_margin": 30, # 左边距
+        #         "right_margin": 30, # 右边距
+        #         "background_url": "https://aigc-miaobi.tos-cn-guangzhou.volces.com/clone_audio_user_demo/2025-05-08/b8b6dd60-2bf0-11f0-94a9-0daeec838b86.jpg", # 背景图
+        #         "scale_mode": "stretch"  # 拉伸模式
+        #     }
+        # },
+        # {
+        #     "description": "crop_with_bg_tile",
+        #     "method": "crop",
+        #     "params": {
+        #         "text": sample_text,
+        #         "width": 720,
+        #         "height": 1280,
+        #         "font_path": "方正黑体简体.ttf",
+        #         "font_size": 30,
+        #         "font_color": [0,0,0],
+        #         "bg_color": [255,255,255,1.0],  # 不透明白色背景
+        #         "line_spacing": 20,
+        #         "char_spacing": 10,
+        #         "fps": 30,
+        #         "scroll_speed": 1,
+        #         "top_margin": 30, # 上边距
+        #         "bottom_margin": 30, # 下边距
+        #         "left_margin": 30, # 左边距
+        #         "right_margin": 30, # 右边距
+        #         "background_url": "https://aigc-miaobi.tos-cn-guangzhou.volces.com/clone_audio_user_demo/2025-05-08/b8b6dd60-2bf0-11f0-94a9-0daeec838b86.jpg", # 背景图
+        #         "scale_mode": "tile"  # 平铺模式
+        #     }
+        # },
+        # {
+        #     "description": "crop_no_bg",
+        #     "method": "crop",
+        #     "params": {
+        #         "text": sample_text,
+        #         "width": 720,
+        #         "height": 1280,
+        #         "font_path": "方正黑体简体.ttf",
+        #         "font_size": 30,
+        #         "font_color": [0,0,0],
+        #         "bg_color": [255,255,255,1.0],  # 不透明白色背景
+        #         "line_spacing": 20,
+        #         "char_spacing": 10,
+        #         "fps": 30,
+        #         "scroll_speed": 1,
+        #         "top_margin": 30, # 上边距
+        #         "bottom_margin": 30, # 下边距
+        #         "left_margin": 30, # 左边距
+        #         "right_margin": 30, # 右边距
+        #         "background_url": None  # 不使用背景图
+        #     }
+        # }
     ]
 
     # 循环生成不同场景的视频
