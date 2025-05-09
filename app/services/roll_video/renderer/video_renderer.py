@@ -1462,32 +1462,27 @@ class VideoRenderer:
             if audio_path and os.path.exists(audio_path):
                 ffmpeg_cmd.extend(["-i", audio_path])
                 
-            # 创建裁剪表达式
+            # 创建裁剪表达式 - 使用FFmpeg兼容的表达式格式
             if scroll_direction == "bottom_to_top":
                 # 从下到上滚动 (y值从大到小)
-                # 问题修复：确保一开始就显示图像内容，而不是空白
-                # 计算初始位置：确保部分文本内容在视频视口内可见，而不是完全在视口之外
-                # 计算安全的初始显示位置：图像底部但确保内容在视口内
-                initial_pos = f"min(h-{self.height}, max(0, {img_height}-{self.height}))"
-                ending_pos = f"max(0, min({initial_pos}-{scroll_distance}, 0))"
-                # 定义滚动公式
-                scroll_formula = f"(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}"
-                y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {initial_pos}-{scroll_formula}))"
-                logger.info(f"使用基础匀速滚动效果 - 从下到上滚动（修复后）- 初始位置:{initial_pos}，结束位置:{ending_pos}")
+                # 使用直接计算得到的数值替代复杂表达式
+                start_y = img_height - self.height if img_height > self.height else 0
+                end_y = max(0, start_y - scroll_distance)
+                
+                # 构建FFmpeg兼容的简化表达式 - 避免嵌套的min/max函数
+                y_expr = f"if(lt(t\\,{scroll_start_time})\\,{start_y}\\,if(gt(t\\,{scroll_end_time})\\,{end_y}\\,{start_y}-(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))"
+                logger.info(f"使用基础匀速滚动效果 - 从下到上滚动 - 开始位置:{start_y}px，结束位置:{end_y}px")
             else:
                 # 从上到下滚动 (y值从小到大)
-                initial_pos = "0" # 顶部开始
-                ending_pos = f"min(h-{self.height}, {scroll_distance})"
-                # 定义滚动公式
-                scroll_formula = f"(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}"
-                y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {scroll_formula}))"
-                logger.info(f"使用基础匀速滚动效果 - 从上到下滚动")
+                start_y = 0  # 从顶部开始
+                end_y = min(img_height - self.height, scroll_distance) if img_height > self.height else 0
+                
+                # 构建FFmpeg兼容的简化表达式
+                y_expr = f"if(lt(t\\,{scroll_start_time})\\,{start_y}\\,if(gt(t\\,{scroll_end_time})\\,{end_y}\\,(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))"
+                logger.info(f"使用基础匀速滚动效果 - 从上到下滚动 - 开始位置:{start_y}px，结束位置:{end_y}px")
             
-            # 始终使用CPU的crop滤镜,GPU没有crop滤镜
-            crop_expr = (
-                f"crop=w={self.width}:h={self.height}:"
-                f"x=0:y='{y_expr}'"
-            )
+            # 构建crop滤镜表达式 - 不使用引号包裹y表达式
+            crop_expr = f"crop=w={self.width}:h={self.height}:x=0:y={y_expr}"
             
             # 添加滤镜
             ffmpeg_cmd.extend([
