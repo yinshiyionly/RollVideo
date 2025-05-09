@@ -1457,23 +1457,31 @@ class VideoRenderer:
                 ffmpeg_cmd.extend(["-i", audio_path])
                 
             # 创建裁剪表达式 - 使用FFmpeg兼容的表达式格式
-            # 只支持从下到上滚动 (y值从大到小)
-            # 始终从图像底部显示，即使图像高度小于视频高度
-            start_y = max(0, img_height - self.height)  # 图像最底部位置
-            # 最终滚动到图像顶部(0)或滚动距离允许的最高位置
-            end_y = max(0, start_y - scroll_distance)
+            # 目标：从下到上滚动 (y值从大到小)
+
+            # 参考旧代码逻辑，并结合从下到上的目标进行调整：
+            # 对于从下到上滚动：
+            # 1. 初始静止时，Y应该是图像的底部。
+            #    start_y_static = img_height - self.height (如果图像高于视频) 或 0 (如果图像不高于视频)
+            #    start_y_static = max(0, img_height - self.height)
+            # 2. 滚动结束时，Y应该是图像的顶部。
+            #    end_y_static = 0
+            # 3. 滚动过程中，Y从 start_y_static 变化到 end_y_static。
+            #    scroll_amount = (t - scroll_start_time) / scroll_duration * scroll_distance
+            #    current_y = start_y_static - scroll_amount
+
+            initial_y_offset = max(0, img_height - self.height) # 图像底部对应在crop滤镜中的y值
+            final_y_offset = max(0, initial_y_offset - scroll_distance) # 滚动到最顶部时crop滤镜中的y值
+
+            # 表达式核心： Y_静止初 = initial_y_offset
+            #             Y_静止末 = final_y_offset
+            #             Y_滚动中 = initial_y_offset - (t - scroll_start_time) / scroll_duration * scroll_distance
             
-            # 关键：确保滚动表达式是递减的（从大到小）
-            # 注意使用单引号包裹整个表达式，这是FFmpeg crop滤镜所需要的格式
-            # 原始逻辑: crop_y_expr = f"'if(lt(t,{scroll_start_time}),{start_y},if(gt(t,{scroll_end_time}),{end_y},{start_y}-(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))'"
-            # 尝试反转滚动逻辑，如果之前是从上到下，现在应该变成从下到上 (或者反之)
-            # 主要改变是将减号变加号： {start_y}+(...)
-            crop_y_expr = f"'if(lt(t,{scroll_start_time}),{start_y},if(gt(t,{scroll_end_time}),{end_y},{start_y}+(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))'"
-            logger.warning(f"注意：为调试滚动方向，已临时反转crop_y_expr中的滚动计算符号。原始为减，现为加。")
+            crop_y_expr = f"'if(lt(t,{scroll_start_time}),{initial_y_offset},if(gt(t,{scroll_end_time}),{final_y_offset},{initial_y_offset}-(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))'"
             
             # 更清晰的日志
             logger.info(f"crop_y_expr: {crop_y_expr}")
-            logger.info(f"滚动参数: start_y={start_y}px, end_y={end_y}px, scroll_distance={scroll_distance}px")
+            logger.info(f"滚动参数: initial_y_offset={initial_y_offset}px, final_y_offset={final_y_offset}px, scroll_distance={scroll_distance}px")
             logger.info(f"时间参数: scroll_start_time={scroll_start_time}s, scroll_end_time={scroll_end_time}s, scroll_duration={scroll_duration}s")
             logger.info(f"图像/视频尺寸: img_height={img_height}px, video_height={self.height}px")
 
