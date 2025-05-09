@@ -351,6 +351,8 @@ class RollVideoService:
             0,
             255,
         ),
+        background_url: Optional[str] = None,  # 背景图URL
+        scale_mode: str = "stretch",  # 背景图缩放模式: 'stretch'拉伸或'tile'平铺
         line_spacing: int = 20,
         char_spacing: int = 0,
         fps: int = 30,
@@ -411,7 +413,7 @@ class RollVideoService:
                 )
             # --- 结束决策 ---
 
-            logger.info(f"开始创建滚动视频 (FFmpeg滤镜方式)，实际输出路径: {actual_output_path}")
+            logger.info(f"开始创建滚动视频 (FFmpeg crop滤镜方式)，实际输出路径: {actual_output_path}")
 
             # 确保输出目录存在
             os.makedirs(output_dir, exist_ok=True)
@@ -428,6 +430,8 @@ class RollVideoService:
                     tuple(font_color) if isinstance(font_color, list) else font_color
                 ),
                 bg_color=bg_color_final,
+                background_url=background_url,  # 传递背景图URL
+                scale_mode=scale_mode,  # 传递缩放模式
                 line_spacing=line_spacing,
                 char_spacing=char_spacing,
                 top_margin=top_margin,       # 传递上边距
@@ -437,12 +441,11 @@ class RollVideoService:
             )
 
             # 将文本渲染为图片，并获取文本实际高度
-            logger.info("将文本渲染为图片...")
             text_image, text_actual_height = text_renderer.render_text_to_image(
                 text, min_height=height
             )
             logger.info(
-                f"文本实际高度: {text_actual_height}px, 渲染图像总高度: {text_image.height}px"
+                f"文本渲染完成，文本实际高度: {text_actual_height}px, 渲染图像总高度: {text_image.height}px"
             )
 
             # 估算行高 (字体大小 + 行间距)
@@ -464,7 +467,7 @@ class RollVideoService:
                 width=width, height=height, fps=fps, scroll_speed=pixels_per_frame
             )
 
-            # 使用FFmpeg滤镜方式创建滚动视频 - 直接传递PIL图像，不转换为numpy数组
+            # 使用FFmpeg crop滤镜方式创建滚动视频 - 直接传递PIL图像，不转换为numpy数组
             logger.info("开始创建滚动视频 (FFmpeg滤镜方式)...")
             final_output_path = video_renderer.create_scrolling_video_crop(
                 image=text_image,  # 直接传递PIL图像对象
@@ -476,19 +479,19 @@ class RollVideoService:
                 bg_color=bg_color_final  # 传递最终的bg_color供非透明路径使用
             )
 
-            logger.info(f"滚动视频创建完成 (FFmpeg滤镜方式): {final_output_path}")
+            logger.info(f"滚动视频创建完成 (FFmpeg crop滤镜方式): {final_output_path}")
 
             return {
                 "status": "success",
-                "message": "滚动视频创建成功 (FFmpeg滤镜方式)",
+                "message": "滚动视频创建成功 (FFmpeg crop滤镜方式)",
                 "output_path": final_output_path,
             }
 
         except Exception as e:
-            logger.error(f"创建滚动视频失败 (FFmpeg滤镜方式): {str(e)}", exc_info=True)
+            logger.error(f"创建滚动视频失败 (FFmpeg crop滤镜方式): {str(e)}", exc_info=True)
             return {
                 "status": "error",
-                "message": f"创建滚动视频失败 (FFmpeg滤镜方式): {str(e)}",
+                "message": f"创建滚动视频失败 (FFmpeg crop滤镜方式): {str(e)}",
                 "output_path": None,
             }
 
@@ -509,6 +512,8 @@ class RollVideoService:
             0,
             255,
         ),
+        background_url: Optional[str] = None,  # 背景图URL
+        scale_mode: str = "stretch",  # 背景图缩放模式: 'stretch'拉伸或'tile'平铺
         line_spacing: int = 20,
         char_spacing: int = 0,
         fps: int = 30,
@@ -531,6 +536,8 @@ class RollVideoService:
             font_size: 字体大小
             font_color: 字体颜色(R,G,B)
             bg_color: 背景颜色(R,G,B)或(R,G,B,A)
+            background_url: 背景图片URL，如果提供，将覆盖bg_color
+            scale_mode: 背景图缩放模式, 'stretch'=拉伸, 'tile'=平铺
             line_spacing: 行间距
             char_spacing: 字符间距
             fps: 视频帧率
@@ -600,6 +607,8 @@ class RollVideoService:
                     tuple(font_color) if isinstance(font_color, list) else font_color
                 ),
                 bg_color=bg_color_final,
+                background_url=background_url,  # 传递背景图URL
+                scale_mode=scale_mode,  # 传递缩放模式
                 line_spacing=line_spacing,
                 char_spacing=char_spacing,
                 top_margin=top_margin,       # 传递上边距
@@ -609,12 +618,11 @@ class RollVideoService:
             )
 
             # 将文本渲染为图片，并获取文本实际高度
-            logger.info("将文本渲染为图片...")
             text_image, text_actual_height = text_renderer.render_text_to_image(
                 text, min_height=height
             )
             logger.info(
-                f"文本实际高度: {text_actual_height}px, 渲染图像总高度: {text_image.height}px"
+                f"文本渲染完成，文本实际高度: {text_actual_height}px, 渲染图像总高度: {text_image.height}px"
             )
 
             # 估算行高 (字体大小 + 行间距)
@@ -626,25 +634,21 @@ class RollVideoService:
 
             # 确保至少滚动1像素/帧
             pixels_per_frame = max(1, round(pixels_per_frame))
+            
+            # 获取有效的滚动方向
+            scroll_direction = "bottom_to_top"  # CUDA overlay滤镜目前仅支持从下到上滚动
 
             logger.info(
                 f"滚动速度设置: {scroll_speed:.2f}行/秒 → {pixels_per_frame}像素/帧 (行高约{estimated_line_height}像素)"
             )
+            logger.info(f"滚动方向: {scroll_direction}")
 
             # 创建视频渲染器
             video_renderer = VideoRenderer(
                 width=width, height=height, fps=fps, scroll_speed=pixels_per_frame
             )
 
-            # 记录处理参数
-            logger.info(f"文本长度: {len(text)}, 视频尺寸: {width}x{height}, 帧率: {fps}")
-            logger.info(f"字体: {font_path}, 大小: {font_size}, 行间距: {line_spacing}, 字符间距: {char_spacing}")
-            logger.info(f"滚动速度: {scroll_speed}行/秒 ({pixels_per_frame}像素/帧)")
-            logger.info(f"文本颜色: {font_color}, 背景颜色: {bg_color_final}")
-            logger.info(f"音频文件: {audio_path if audio_path else '无'}")
-            logger.info(f"使用基础匀速滚动效果 - 从下到上滚动")
-
-            # 使用overlay_cuda GPU加速滤镜方式创建滚动视频
+            # 使用FFmpeg CUDA overlay滤镜方式创建滚动视频
             logger.info("开始创建滚动视频 (overlay_cuda GPU加速方式)...")
             final_output_path = video_renderer.create_scrolling_video_overlay_cuda(
                 image=text_image,
