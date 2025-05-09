@@ -515,44 +515,35 @@ class RollVideoService:
         fps: int = 30,
         scroll_speed: float = 1,  # 修改为每秒滚动的行数
         audio_path: Optional[str] = None,
-        scroll_effect: str = "basic",  # 滚动效果类型: 'basic'=匀速, 'advanced'=加减速
-        scroll_direction: str = "bottom_to_top",  # 滚动方向: 'bottom_to_top'=从下到上, 'top_to_bottom'=从上到下
         top_margin: int = 10,      # 默认上边距10px
         bottom_margin: int = 10,   # 默认下边距10px
         left_margin: int = 10,     # 默认左边距10px
         right_margin: int = 10     # 默认右边距10px
     ) -> Dict[str, Union[str, bool]]:
         """
-        使用FFmpeg的overlay_cuda GPU加速滤镜创建滚动视频，自动根据透明度选择格式
-        
-        优势：
-        1. GPU加速 - 使用NVIDIA GPU硬件加速overlay操作和编码
-        2. 高效平滑 - 不需要逐帧渲染，直接在GPU上实现滚动效果
-        3. 支持特效 - 可以实现加速减速等特效
+        使用overlay_cuda GPU滤镜创建滚动视频 - 只支持基础匀速滚动效果和从下到上滚动方向
         
         参数:
-            text: 要展示的文本内容
-            output_path: 期望的输出视频路径（扩展名会被自动调整）
+            text: 要滚动的文本内容
+            output_path: 输出视频文件路径
             width: 视频宽度
             height: 视频高度
-            font_path: 字体文件路径，不指定则使用默认字体
+            font_path: 字体文件路径
             font_size: 字体大小
-            font_color: 字体颜色 (R,G,B)
-            bg_color: 背景颜色，可以是RGB元组(r,g,b)或RGBA元组(r,g,b,a)，a为透明度，0完全透明，255完全不透明，支持float类型的alpha值
+            font_color: 字体颜色(R,G,B)
+            bg_color: 背景颜色(R,G,B)或(R,G,B,A)
             line_spacing: 行间距
             char_spacing: 字符间距
             fps: 视频帧率
-            scroll_speed: 滚动速度(每秒滚动的行数)，例如0.5表示每2秒滚动一行
-            audio_path: 可选的音频文件路径
-            scroll_effect: 滚动效果类型，'basic'为匀速滚动，'advanced'为加速减速效果
-            scroll_direction: 滚动方向，'bottom_to_top'从下到上滚动，'top_to_bottom'从上到下滚动
-            top_margin: 上边距，文本与顶部的距离
-            bottom_margin: 下边距，文本与底部的距离
-            left_margin: 左边距，文本与左侧的距离
-            right_margin: 右边距，文本与右侧的距离
-            
+            scroll_speed: 每秒滚动的行数
+            audio_path: 音频文件路径
+            top_margin: 上边距（像素）
+            bottom_margin: 下边距（像素）
+            left_margin: 左边距（像素）
+            right_margin: 右边距（像素）
+        
         Returns:
-            包含处理结果的字典
+            包含状态、消息和输出路径的字典
         """
         try:
             # --- 决定透明度需求和编码策略 ---
@@ -594,7 +585,6 @@ class RollVideoService:
             # --- 结束决策 ---
 
             logger.info(f"开始创建滚动视频 (overlay_cuda GPU加速方式)，实际输出路径: {actual_output_path}")
-            logger.info(f"滚动效果: {scroll_effect}")
 
             # 确保输出目录存在
             os.makedirs(output_dir, exist_ok=True)
@@ -647,6 +637,14 @@ class RollVideoService:
                 width=width, height=height, fps=fps, scroll_speed=pixels_per_frame
             )
 
+            # 记录处理参数
+            logger.info(f"文本长度: {len(text)}, 视频尺寸: {width}x{height}, 帧率: {fps}")
+            logger.info(f"字体: {font_path}, 大小: {font_size}, 行间距: {line_spacing}, 字符间距: {char_spacing}")
+            logger.info(f"滚动速度: {scroll_speed}行/秒 ({pixels_per_frame}像素/帧)")
+            logger.info(f"文本颜色: {font_color}, 背景颜色: {bg_color_final}")
+            logger.info(f"音频文件: {audio_path if audio_path else '无'}")
+            logger.info(f"使用基础匀速滚动效果 - 从下到上滚动")
+
             # 使用overlay_cuda GPU加速滤镜方式创建滚动视频
             logger.info("开始创建滚动视频 (overlay_cuda GPU加速方式)...")
             final_output_path = video_renderer.create_scrolling_video_overlay_cuda(
@@ -656,9 +654,7 @@ class RollVideoService:
                 transparency_required=transparency_required,
                 preferred_codec=preferred_codec,
                 audio_path=audio_path,
-                bg_color=bg_color_final,
-                scroll_effect=scroll_effect,
-                scroll_direction=scroll_direction
+                bg_color=bg_color_final
             )
 
             logger.info(f"滚动视频创建完成 (overlay_cuda GPU加速方式): {final_output_path}")

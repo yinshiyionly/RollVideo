@@ -107,12 +107,8 @@ def main():
                 **test_case['params']
             )
         elif method == "overlay_cuda":
-            # overlay_cuda滤镜 (现在使用修复后的版本)
+            # overlay_cuda滤镜 (只支持基础匀速滚动和从下到上滚动)
             params = test_case['params'].copy()
-            params.update({
-                'scroll_effect': 'basic',  # 使用基本滚动效果
-                'scroll_direction': 'bottom_to_top'  # 从下到上滚动
-            })
             result = service.create_roll_video_overlay_cuda(
                 output_path=output_path_base,
                 **params

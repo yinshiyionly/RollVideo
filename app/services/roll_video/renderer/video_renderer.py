@@ -1470,12 +1470,16 @@ class VideoRenderer:
                 # 计算安全的初始显示位置：图像底部但确保内容在视口内
                 initial_pos = f"min(h-{self.height}, max(0, {img_height}-{self.height}))"
                 ending_pos = f"max(0, min({initial_pos}-{scroll_distance}, 0))"
+                # 定义滚动公式
+                scroll_formula = f"(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}"
                 y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {initial_pos}-{scroll_formula}))"
                 logger.info(f"使用基础匀速滚动效果 - 从下到上滚动（修复后）- 初始位置:{initial_pos}，结束位置:{ending_pos}")
             else:
                 # 从上到下滚动 (y值从小到大)
                 initial_pos = "0" # 顶部开始
                 ending_pos = f"min(h-{self.height}, {scroll_distance})"
+                # 定义滚动公式
+                scroll_formula = f"(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}"
                 y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {scroll_formula}))"
                 logger.info(f"使用基础匀速滚动效果 - 从上到下滚动")
             
@@ -1615,9 +1619,7 @@ class VideoRenderer:
         transparency_required=False,
         preferred_codec="h264_nvenc",
         audio_path=None,
-        bg_color=(0, 0, 0, 255),
-        scroll_effect="basic",  # 'basic' 或 'advanced' 滚动效果
-        scroll_direction="bottom_to_top"  # 'bottom_to_top'=从下到上, 'top_to_bottom'=从上到下
+        bg_color=(0, 0, 0, 255)
     ):
         """
         使用FFmpeg的overlay_cuda滤镜创建GPU加速的滚动视频
@@ -1630,8 +1632,6 @@ class VideoRenderer:
             preferred_codec: 首选视频编码器
             audio_path: 可选的音频文件路径
             bg_color: 背景颜色 (R,G,B) 或 (R,G,B,A)
-            scroll_effect: 滚动效果类型 ('basic'=匀速, 'advanced'=加减速)
-            scroll_direction: 滚动方向 ('bottom_to_top'=从下到上, 'top_to_bottom'=从上到下)
             
         Returns:
             输出视频的路径
@@ -1711,7 +1711,6 @@ class VideoRenderer:
             logger.info(f"视频参数: 宽度={self.width}, 高度={self.height}, 帧率={self.fps}")
             logger.info(f"滚动参数: 距离={scroll_distance}px, 速度={self.scroll_speed}px/帧, 持续={scroll_duration:.2f}秒")
             logger.info(f"时间设置: 总时长={total_duration:.2f}秒, 静止开始={start_static_time}秒, 静止结束={end_static_time}秒")
-            logger.info(f"滚动效果: {scroll_effect}")
             
             # 3. 设置编码器参数
             codec_params, _ = self._get_codec_parameters(
@@ -1743,7 +1742,6 @@ class VideoRenderer:
                         preferred_codec=preferred_codec,
                         audio_path=audio_path,
                         bg_color=bg_color,
-                        scroll_direction=scroll_direction
                     )
                 
                 # 2. 再检测是否支持overlay_cuda滤镜
@@ -1768,7 +1766,6 @@ class VideoRenderer:
                         preferred_codec=preferred_codec,
                         audio_path=audio_path,
                         bg_color=bg_color,
-                        scroll_direction=scroll_direction
                     )
                 
                 logger.info("检测通过：系统支持NVIDIA GPU和overlay_cuda滤镜")
@@ -1784,7 +1781,6 @@ class VideoRenderer:
                     preferred_codec=preferred_codec,
                     audio_path=audio_path,
                     bg_color=bg_color,
-                    scroll_direction=scroll_direction
                 )
             
             # 5. 构建基本FFmpeg命令 (CUDA加速版)
@@ -1809,59 +1805,15 @@ class VideoRenderer:
                 ffmpeg_cmd.extend(["-i", audio_path])
             
             # 创建滚动表达式
-            if scroll_effect == "advanced":
-                # 加速减速效果的滚动
-                # 加速阶段时间（秒）
-                accel_time = min(3.0, scroll_duration * 0.15)  
-                # 减速开始时间（秒）
-                decel_start = scroll_start_time + scroll_duration - min(3.0, scroll_duration * 0.15)
-                # 加速系数、中间速度和减速系数
-                accel_factor = scroll_distance * 0.05 / (accel_time * accel_time) if accel_time > 0 else 0
-                mid_speed = scroll_distance / scroll_duration if scroll_duration > 0 else 0
-                decel_factor = mid_speed * 0.2
-                
-                # 高级滚动公式
-                scroll_expr = (
-                    f"if(lt(t,{scroll_start_time + accel_time}),"
-                    f"{accel_factor}*pow(t-{scroll_start_time},2),"
-                    f"if(gt(t,{decel_start}),"
-                    f"{scroll_distance-mid_speed*(scroll_end_time-decel_start)}+mid_speed*(t-{decel_start})-{decel_factor}*pow(t-{decel_start},2),"
-                    f"{accel_factor}*pow({accel_time},2)+mid_speed*(t-{scroll_start_time}-{accel_time})))"
-                )
-                
-                # 根据滚动方向决定y表达式
-                if scroll_direction == "bottom_to_top":
-                    # 从下到上滚动 (y值从大到小)
-                    # 问题修复：确保一开始就显示图像内容，而不是空白
-                    initial_pos = f"min(h-{self.height}, max(0, {img_height}-{self.height}))"
-                    ending_pos = f"max(0, min({initial_pos}-{scroll_distance}, 0))"
-                    y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {initial_pos}-{scroll_expr}))"
-                    logger.info(f"使用高级滚动效果 (加速/减速) - 从下到上滚动（修复后）- 初始位置:{initial_pos}，结束位置:{ending_pos}")
-                else:
-                    # 从上到下滚动 (y值从小到大)
-                    initial_pos = "0" # 顶部开始
-                    ending_pos = f"min(h-{self.height}, {scroll_distance})"
-                    y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {scroll_formula}))"
-                    logger.info(f"使用高级滚动效果 (加速/减速) - 从上到下滚动（修复后）")
-            else:
-                # 基础匀速滚动
-                scroll_formula = f"if(between(t,{scroll_start_time},{scroll_end_time}),(t-{scroll_start_time})*{scroll_distance}/{scroll_duration},if(lt(t,{scroll_start_time}),0,{scroll_distance}))"
-                
-                # 根据滚动方向决定y表达式
-                if scroll_direction == "bottom_to_top":
-                    # 从下到上滚动 (y值从大到小)
-                    # 问题修复：确保一开始就显示图像内容，而不是空白
-                    initial_pos = f"min(h-{self.height}, max(0, {img_height}-{self.height}))"
-                    ending_pos = f"max(0, min({initial_pos}-{scroll_distance}, 0))"
-                    y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {initial_pos}-{scroll_formula}))"
-                    logger.info(f"使用基础匀速滚动效果 - 从下到上滚动（修复后）- 初始位置:{initial_pos}，结束位置:{ending_pos}")
-                else:
-                    # 从上到下滚动 (y值从小到大)
-                    initial_pos = "0" # 顶部开始
-                    ending_pos = f"min(h-{self.height}, {scroll_distance})"
-                    y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {scroll_formula}))"
-                    logger.info(f"使用基础匀速滚动效果 - 从上到下滚动（修复后）")
-
+            scroll_formula = f"if(between(t,{scroll_start_time},{scroll_end_time}),(t-{scroll_start_time})*{scroll_distance}/{scroll_duration},if(lt(t,{scroll_start_time}),0,{scroll_distance}))"
+            
+            # 从下到上滚动 (y值从大到小)
+            # 确保一开始就显示图像内容，而不是空白
+            initial_pos = f"min(h-{self.height}, max(0, {img_height}-{self.height}))"
+            ending_pos = f"max(0, min({initial_pos}-{scroll_distance}, 0))"
+            y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {initial_pos}-{scroll_formula}))"
+            logger.info(f"使用基础匀速滚动效果 - 从下到上滚动 - 初始位置:{initial_pos}，结束位置:{ending_pos}")
+            
             # 构建滤镜复杂表达式
             # 根据是否需要透明度调整前景图像的格式
             if transparency_required:
