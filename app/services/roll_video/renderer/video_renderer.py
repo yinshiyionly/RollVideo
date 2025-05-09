@@ -1320,11 +1320,10 @@ class VideoRenderer:
         transparency_required=False,
         preferred_codec="libx264",
         audio_path=None,
-        bg_color=(255, 255, 255),
-        scroll_direction="bottom_to_top"  # 添加方向参数
+        bg_color=(255, 255, 255)
     ):
         """
-        使用FFmpeg的crop滤镜和时间表达式创建滚动视频
+        使用FFmpeg的crop滤镜和时间表达式创建滚动视频，只支持从下到上滚动
         
         参数:
             image: 要滚动的图像 (PIL.Image或NumPy数组)
@@ -1334,7 +1333,6 @@ class VideoRenderer:
             preferred_codec: 首选视频编码器
             audio_path: 可选的音频文件路径
             bg_color: 背景颜色 (R,G,B) 或 (R,G,B,A)
-            scroll_direction: 滚动方向，'bottom_to_top'从下到上滚动，'top_to_bottom'从上到下滚动
         
         Returns:
             输出视频的路径
@@ -1463,26 +1461,26 @@ class VideoRenderer:
                 ffmpeg_cmd.extend(["-i", audio_path])
                 
             # 创建裁剪表达式 - 使用FFmpeg兼容的表达式格式
-            if scroll_direction == "bottom_to_top":
-                # 从下到上滚动 (y值从大到小)
-                # 使用直接计算得到的数值替代复杂表达式
-                start_y = img_height - self.height if img_height > self.height else 0
-                end_y = max(0, start_y - scroll_distance)
-                
-                # 构建FFmpeg兼容的简化表达式 - 避免嵌套的min/max函数
-                y_expr = f"if(lt(t\\,{scroll_start_time})\\,{start_y}\\,if(gt(t\\,{scroll_end_time})\\,{end_y}\\,{start_y}-(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))"
-                logger.info(f"使用基础匀速滚动效果 - 从下到上滚动 - 开始位置:{start_y}px，结束位置:{end_y}px")
-            else:
-                # 从上到下滚动 (y值从小到大)
-                start_y = 0  # 从顶部开始
-                end_y = min(img_height - self.height, scroll_distance) if img_height > self.height else 0
-                
-                # 构建FFmpeg兼容的简化表达式
-                y_expr = f"if(lt(t\\,{scroll_start_time})\\,{start_y}\\,if(gt(t\\,{scroll_end_time})\\,{end_y}\\,(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))"
-                logger.info(f"使用基础匀速滚动效果 - 从上到下滚动 - 开始位置:{start_y}px，结束位置:{end_y}px")
+            # 只支持从下到上滚动 (y值从大到小)
+            # 始终从图像底部显示，即使图像高度小于视频高度
+            start_y = max(0, img_height - self.height)  # 图像最底部位置
+            # 最终滚动到图像顶部(0)或滚动距离允许的最高位置
+            end_y = max(0, start_y - scroll_distance)
             
-            # 构建crop滤镜表达式 - 不使用引号包裹y表达式
-            crop_expr = f"crop=w={self.width}:h={self.height}:x=0:y={y_expr}"
+            # 关键：确保滚动表达式是递减的（从大到小）
+            # 注意使用单引号包裹整个表达式，这是FFmpeg crop滤镜所需要的格式
+            crop_y_expr = f"'if(lt(t,{scroll_start_time}),{start_y},if(gt(t,{scroll_end_time}),{end_y},{start_y}-(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))'"
+            
+            # 更清晰的日志
+            logger.info(f"⬆️ 滚动方向: 从下到上")
+            logger.info(f"开始位置: 图像底部 y={start_y}px, 结束位置: 图像顶部 y={end_y}px")
+            logger.info(f"图像高度: {img_height}px, 视频窗口高度: {self.height}px, 滚动距离: {scroll_distance}px")
+            
+            # 构建crop滤镜表达式 - 保持原始格式，使用单引号
+            crop_expr = (
+                f"crop=w={self.width}:h={self.height}:"
+                f"x=0:y={crop_y_expr}"
+            )
             
             # 添加滤镜
             ffmpeg_cmd.extend([
@@ -1799,17 +1797,16 @@ class VideoRenderer:
             if audio_path and os.path.exists(audio_path):
                 ffmpeg_cmd.extend(["-i", audio_path])
             
-            # 创建滚动表达式
-            scroll_formula = f"if(between(t,{scroll_start_time},{scroll_end_time}),(t-{scroll_start_time})*{scroll_distance}/{scroll_duration},if(lt(t,{scroll_start_time}),0,{scroll_distance}))"
-            
             # 从下到上滚动 (y值从大到小)
-            # 确保一开始就显示图像内容，而不是空白
-            initial_pos = f"min(h-{self.height}, max(0, {img_height}-{self.height}))"
-            ending_pos = f"max(0, min({initial_pos}-{scroll_distance}, 0))"
-            y_expr = f"if(lt(t,{scroll_start_time}), {initial_pos}, if(gt(t,{scroll_end_time}), {ending_pos}, {initial_pos}-{scroll_formula}))"
-            logger.info(f"使用基础匀速滚动效果 - 从下到上滚动 - 初始位置:{initial_pos}，结束位置:{ending_pos}")
+            # 始终从图像底部显示，即使图像高度小于视频高度
+            start_y = max(0, img_height - self.height)  # 图像最底部位置
+            # 最终滚动到图像顶部(0)或滚动距离允许的最高位置
+            end_y = max(0, start_y - scroll_distance)
             
-            # 构建滤镜复杂表达式
+            # 关键：确保滚动表达式是递减的（从大到小）
+            # 从开始位置(底部，大y值)减去一个随时间增加的值，得到递减的y位置
+            y_expr = f"if(lt(t\\,{scroll_start_time})\\,{start_y}\\,if(gt(t\\,{scroll_end_time})\\,{end_y}\\,{start_y}-(t-{scroll_start_time})/{scroll_duration}*{scroll_distance}))"
+            
             # 根据是否需要透明度调整前景图像的格式
             if transparency_required:
                  # 准备前景图像：先转换格式为RGBA，然后上传到CUDA
