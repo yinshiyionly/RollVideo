@@ -473,8 +473,7 @@ class RollVideoService:
                 transparency_required=transparency_required,  # 传递透明度需求
                 preferred_codec=preferred_codec,  # 传递首选编码器
                 audio_path=audio_path,
-                bg_color=bg_color_final,  # 传递最终的bg_color供非透明路径使用
-                scroll_direction=scroll_direction,  # 传递滚动方向参数
+                bg_color=bg_color_final  # 传递最终的bg_color供非透明路径使用
             )
 
             logger.info(f"滚动视频创建完成 (FFmpeg滤镜方式): {final_output_path}")
