@@ -35,7 +35,7 @@ services:
     networks:
       - pro_roll_video_net
 
-  # 视频场景分割服务
+  # 滚动视频生成服务
   pro_roll_video:
     image: catchoco/roll-video:new-supervisor
     container_name: pro_roll_video_serve
@@ -48,7 +48,8 @@ services:
               count: all
               capabilities: [gpu]
         limits:
-          memory: 4G
+          cpus: '8.0'          # 限制为 8 核 CPU
+          memory: 30G          # 限制为 30GB 内存
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility,graphics

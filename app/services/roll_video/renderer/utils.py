@@ -3,10 +3,8 @@
 import os
 import sys
 import logging
-import resource
 import psutil
 import gc
-import traceback
 import time
 from contextlib import contextmanager
 

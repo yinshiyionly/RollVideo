@@ -141,7 +141,7 @@ def generate_roll_video_task(self, task_id: str):
         service = RollVideoService()
         
          # 3.2使用 task.payload 来传递所有参数
-        result = service.create_roll_video_ffmpeg(
+        result = service.create_roll_video_overlay_cuda(
             output_path=roll_video_filename, # Service 会修正扩展名
             **task.payload
         )
