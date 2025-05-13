@@ -88,7 +88,7 @@
 | line_spacing | int | 20 | 行间距 |
 | char_spacing | int | 0 | 字符间距 |
 | fps | int | 30 | 视频帧率 |
-| scroll_speed | float | 1 | 滚动速度(每秒滚动的行数) |
+| roll_px | float | 1 | 滚动速度(每秒滚动的行数) |
 | audio_path | str | None | 背景音乐路径 |
 | top_margin | int | 10 | 上边距(像素) |
 | bottom_margin | int | 10 | 下边距(像素) |
@@ -115,7 +115,7 @@ result = service.create_roll_video_crop(
     line_spacing=20,
     char_spacing=10,
     fps=30,
-    scroll_speed=1,
+    roll_px=1,
     top_margin=10,
     bottom_margin=10,
     left_margin=10,
@@ -143,7 +143,7 @@ result = service.create_roll_video_overlay_cuda(
     line_spacing=20,
     char_spacing=10,
     fps=30,
-    scroll_speed=1,
+    roll_px=1,
     top_margin=10,
     bottom_margin=10,
     left_margin=10,

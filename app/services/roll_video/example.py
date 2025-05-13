@@ -64,7 +64,7 @@ def main():
                 "line_spacing": 20,
                 "char_spacing": 10,
                 "fps": 30,
-                "scroll_speed": 1,
+                "roll_px": 1,
                 "top_margin": 10, # 上边距
                 "bottom_margin": 10, # 下边距
                 "left_margin": 10, # 左边距
@@ -87,7 +87,7 @@ def main():
                 "line_spacing": 20,
                 "char_spacing": 10,
                 "fps": 30,
-                "scroll_speed": 1,
+                "roll_px": 1,
                 "top_margin": 10, # 上边距
                 "bottom_margin": 10, # 下边距
                 "left_margin": 10, # 左边距
@@ -110,7 +110,7 @@ def main():
                 "line_spacing": 20,
                 "char_spacing": 10,
                 "fps": 30,
-                "scroll_speed": 1,
+                "roll_px": 1,
                 "top_margin": 10, # 上边距
                 "bottom_margin": 10, # 下边距
                 "left_margin": 10, # 左边距
@@ -132,7 +132,7 @@ def main():
                 "line_spacing": 20,
                 "char_spacing": 10,
                 "fps": 30,
-                "scroll_speed": 1,
+                "roll_px": 1,
                 "top_margin": 30, # 上边距
                 "bottom_margin": 30, # 下边距
                 "left_margin": 30, # 左边距
@@ -155,7 +155,7 @@ def main():
                 "line_spacing": 20,
                 "char_spacing": 10,
                 "fps": 30,
-                "scroll_speed": 1,
+                "roll_px": 1,
                 "top_margin": 30, # 上边距
                 "bottom_margin": 30, # 下边距
                 "left_margin": 30, # 左边距
@@ -178,7 +178,7 @@ def main():
                 "line_spacing": 20,
                 "char_spacing": 10,
                 "fps": 30,
-                "scroll_speed": 1,
+                "roll_px": 1,
                 "top_margin": 30, # 上边距
                 "bottom_margin": 30, # 下边距
                 "left_margin": 30, # 左边距
