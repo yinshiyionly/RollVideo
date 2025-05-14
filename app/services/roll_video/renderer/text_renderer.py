@@ -182,3 +182,66 @@ class TextRenderer:
             y_position += line_height
         
         return img, text_actual_height  # 返回图像和文本实际高度（包括上下边距） 
+
+    def render_text_to_transparent_image(self, text: str, min_height: Optional[int] = None) -> Tuple[Image.Image, int]:
+        """
+        将文本渲染到完全透明的图片上，只有文字可见，没有任何背景色
+        
+        Args:
+            text: 要渲染的文本内容
+            min_height: 最小图片高度，通常设置为视频高度
+            
+        Returns:
+            元组: (包含渲染文本的PIL Image对象, 实际文本内容的高度)
+        """
+        lines = self._calculate_text_layout(text)
+        
+        # 使用getbbox计算行高以获得更准确的结果
+        try:
+             # 获取包含上下延伸部分的字符边界框
+             bbox = self.font.getbbox("Agy!")
+             line_height = bbox[3] - bbox[1] + self.line_spacing
+        except AttributeError:
+             # 旧版Pillow的回退方法
+             line_height = self.font_size + self.line_spacing
+
+        # 计算文本实际高度（包括上下边距）
+        text_content_height = len(lines) * line_height if lines else 0  # 纯文本内容高度
+        text_actual_height = text_content_height + self.top_margin + self.bottom_margin  # 加上上下边距
+        
+        # 确定屏幕高度（用于计算底部空白）
+        screen_height = min_height if min_height else text_actual_height
+        if screen_height <= 0: screen_height = 1  # 避免高度为0
+        
+        # 在图像末尾添加一个屏幕高度的空白区域
+        total_height = text_actual_height + screen_height
+        
+        # 创建完全透明的RGBA图像，没有任何背景色
+        transparent_bg = (0, 0, 0, 0)  # 完全透明的RGBA
+        img = Image.new('RGBA', (self.width, total_height), transparent_bg)
+        logger.info(f"创建完全透明背景图像: {self.width}x{total_height}，无任何背景色")
+            
+        draw = ImageDraw.Draw(img)
+        
+        # 考虑上边距，文本从图像上边距开始绘制
+        y_position = self.top_margin
+        
+        # 使用指定的字体颜色（包括透明度）绘制文本
+        for line in lines:
+            # 如果需要手动添加字符间距（Pillow >= 9.2.0支持在draw.text中设置）
+            if hasattr(draw, 'text') and PIL_VERSION >= '9.2.0':
+                 draw.text((self.left_margin, y_position), line, font=self.font, fill=self.font_color, spacing=self.char_spacing)
+            else:
+                 # 对于旧版Pillow，手动添加字符间距
+                 x_pos = self.left_margin
+                 for char in line:
+                      draw.text((x_pos, y_position), char, font=self.font, fill=self.font_color)
+                      try:
+                           char_width = self.font.getlength(char)
+                      except AttributeError:
+                           char_width = self.font.getbbox(char)[2] if char != ' ' else self.font.getbbox('a')[2] # 估算空格宽度
+                      x_pos += char_width + self.char_spacing
+
+            y_position += line_height
+        
+        return img, text_actual_height  # 返回图像和文本实际高度（包括上下边距） 
