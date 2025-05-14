@@ -158,7 +158,7 @@ class RollVideoService:
         line_spacing: int = 20,
         char_spacing: int = 0,
         fps: int = 30,
-        scroll_speed: float = 1,  # 修改为每秒滚动的行数
+        roll_px: float = 1.6,  # 修改为每秒滚动的像素px
         audio_path: Optional[str] = None,
         top_margin: int = 10,      # 默认上边距10px
         bottom_margin: int = 10,   # 默认下边距10px
@@ -251,20 +251,14 @@ class RollVideoService:
             # 估算行高 (字体大小 + 行间距)
             estimated_line_height = font_size + line_spacing
 
-            # 将每秒滚动的行数转换为每帧滚动的像素数
-            # scroll_speed是每秒滚动的行数，乘以行高得到每秒滚动的像素数，再除以fps得到每帧滚动的像素数
-            pixels_per_frame = (scroll_speed * estimated_line_height) / fps
-
-            # 确保至少滚动1像素/帧
-            pixels_per_frame = max(1, round(pixels_per_frame))
-
+            # roll_px 设定为每秒滚动的像素
             logger.info(
-                f"滚动速度设置: {scroll_speed:.2f}行/秒 → {pixels_per_frame}像素/帧 (行高约{estimated_line_height}像素)"
+                f"滚动速度设置: {roll_px}像素/帧 (行高约{estimated_line_height}像素)"
             )
 
             # 创建视频渲染器
             video_renderer = VideoRenderer(
-                width=width, height=height, fps=fps, scroll_speed=pixels_per_frame
+                width=width, height=height, fps=fps, roll_px=roll_px
             )
 
             # 使用FFmpeg crop滤镜方式创建滚动视频 - 直接传递PIL图像，不转换为numpy数组
@@ -317,7 +311,7 @@ class RollVideoService:
         line_spacing: int = 20,
         char_spacing: int = 0,
         fps: int = 30,
-        scroll_speed: float = 1,  # 修改为每秒滚动的行数
+        roll_px: float = 1.6,  # 每秒滚动的像素px
         audio_path: Optional[str] = None,
         top_margin: int = 10,      # 默认上边距10px
         bottom_margin: int = 10,   # 默认下边距10px
@@ -341,7 +335,7 @@ class RollVideoService:
             line_spacing: 行间距
             char_spacing: 字符间距
             fps: 视频帧率
-            scroll_speed: 每秒滚动的行数
+            roll_px: 每秒滚动的像素px
             audio_path: 音频文件路径
             top_margin: 上边距（像素）
             bottom_margin: 下边距（像素）
@@ -428,20 +422,14 @@ class RollVideoService:
             # 估算行高 (字体大小 + 行间距)
             estimated_line_height = font_size + line_spacing
 
-            # 将每秒滚动的行数转换为每帧滚动的像素数
-            # scroll_speed是每秒滚动的行数，乘以行高得到每秒滚动的像素数，再除以fps得到每帧滚动的像素数
-            pixels_per_frame = (scroll_speed * estimated_line_height) / fps
-
-            # 确保至少滚动1像素/帧
-            pixels_per_frame = max(1, round(pixels_per_frame))
-            
+            # roll_px 设定为每秒滚动的像素
             logger.info(
-                f"滚动速度设置: {scroll_speed:.2f}行/秒 → {pixels_per_frame}像素/帧 (行高约{estimated_line_height}像素)"
+                f"滚动速度设置: {roll_px}像素/帧 (行高约{estimated_line_height}像素)"
             )
 
             # 创建视频渲染器
             video_renderer = VideoRenderer(
-                width=width, height=height, fps=fps, scroll_speed=pixels_per_frame
+                width=width, height=height, fps=fps, roll_px=roll_px
             )
 
             # 使用FFmpeg CUDA overlay滤镜方式创建滚动视频

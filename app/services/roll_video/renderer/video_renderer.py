@@ -23,7 +23,7 @@ class VideoRenderer:
         width: int,
         height: int,
         fps: int = 30,
-        scroll_speed: int = 5,  # 每帧滚动的像素数（由service层基于行高和每秒滚动行数计算而来）
+        roll_px: float = 1.6,  # 每帧滚动的像素数（由service层基于行高和每秒滚动行数计算而来）
     ):
         """
         初始化视频渲染器
@@ -32,12 +32,12 @@ class VideoRenderer:
             width: 视频宽度
             height: 视频高度
             fps: 视频帧率
-            scroll_speed: 每帧滚动的像素数（由service层基于行高和每秒滚动行数计算而来）
+            roll_px: 每帧滚动的像素数（由service层基于行高和每秒滚动行数计算而来）
         """
         self.width = width
         self.height = height
         self.fps = fps
-        self.scroll_speed = scroll_speed
+        self.roll_px = roll_px
         self.memory_pool = None
         self.frame_counter = 0
         self.total_frames = 0
@@ -122,13 +122,14 @@ class VideoRenderer:
         # 根据平台和编码器选择参数
         if preferred_codec == "h264_nvenc" and not force_cpu:
             # NVIDIA GPU加速
+            # todo ... 按照GPU的性能同步修改一下CPU的参数 
             if is_windows or is_linux:
                 codec_params = [
                     "-c:v", "h264_nvenc",
-                    "-preset", "p1",  # 使用最快的预设
-                    "-rc", "vbr", 
-                    "-cq", "28",  # 更低的质量以提高速度
-                    "-b:v", "4M",
+                    "-preset", "p7",  # 1-7质量最高 
+                    "-rc", "vbr",  # 使用VBR编码，平均码率，   -rc cbr -b:v 10M 这个组合是强制填充码率
+                    "-cq", "15",  # 质量因子，小到大效果越来越低
+                    "-b:v", "10M",  # 平均码率
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
                 ]
@@ -256,7 +257,7 @@ class VideoRenderer:
             
             # 确保至少有8秒的滚动时间
             min_scroll_duration = 8.0  # 秒
-            scroll_duration = max(min_scroll_duration, scroll_distance / (self.scroll_speed * self.fps))
+            scroll_duration = max(min_scroll_duration, scroll_distance / (self.roll_px * self.fps))
             
             # 前后各添加2秒静止时间
             start_static_time = 2.0  # 秒
@@ -272,7 +273,7 @@ class VideoRenderer:
             scroll_end_time = start_static_time + scroll_duration
             
             logger.info(f"视频参数: 宽度={self.width}, 高度={self.height}, 帧率={self.fps}")
-            logger.info(f"滚动参数: 距离={scroll_distance}px, 速度={self.scroll_speed}px/帧, 持续={scroll_duration:.2f}秒")
+            logger.info(f"滚动参数: 距离={scroll_distance}px, 速度={self.roll_px}px/帧, 持续={scroll_duration:.2f}秒")
             logger.info(f"时间设置: 总时长={total_duration:.2f}秒, 静止开始={start_static_time}秒, 静止结束={end_static_time}秒")
             
             # 3. 设置编码器参数
@@ -509,10 +510,10 @@ class VideoRenderer:
             # 设置临时图像文件路径
             temp_img_path = f"{os.path.splitext(output_path)[0]}_temp.png"
             
-            # 临时图像优化选项
+            # 临时图像优化选项,False不优化
             image_optimize_options = {
-                "optimize": True,  # 优化图像存储
-                "compress_level": 6,  # 中等压缩级别
+                "optimize": False,
+                "compress_level": 0,
             }
             
             # 使用PIL直接保存图像，保留原始格式和所有信息
@@ -531,7 +532,7 @@ class VideoRenderer:
             
             # 确保至少有8秒的滚动时间
             min_scroll_duration = 8.0  # 秒
-            scroll_duration = max(min_scroll_duration, scroll_distance / (self.scroll_speed * self.fps))
+            scroll_duration = max(min_scroll_duration, scroll_distance / (self.roll_px * self.fps))
             
             # 前后各添加2秒静止时间
             start_static_time = 2.0  # 秒
@@ -547,7 +548,7 @@ class VideoRenderer:
             scroll_end_time = start_static_time + scroll_duration
             
             logger.info(f"视频参数: 宽度={self.width}, 高度={self.height}, 帧率={self.fps}")
-            logger.info(f"滚动参数: 距离={scroll_distance}px, 速度={self.scroll_speed}px/帧, 持续={scroll_duration:.2f}秒")
+            logger.info(f"滚动参数: 距离={scroll_distance}px, 速度={self.roll_px}px/帧, 持续={scroll_duration:.2f}秒")
             logger.info(f"时间设置: 总时长={total_duration:.2f}秒, 静止开始={start_static_time}秒, 静止结束={end_static_time}秒")
             
             # 3. 设置编码器参数
@@ -646,7 +647,7 @@ class VideoRenderer:
             # 透明视频滤镜链
             if transparency_required:
                 # 准备前景图像：先转换格式为RGBA，然后上传到CUDA
-                img_filter = "[1:v]format=rgba,hwupload_cuda[img_cuda];"
+                img_filter = f"[1:v]fps={self.fps},format=rgba,hwupload_cuda[img_cuda];"
                 bg_format = "rgba" # 如果前景是RGBA，背景也用RGBA以确保兼容性
                 bg_filter = f"[0:v]format={bg_format},hwupload_cuda[bg_cuda];"
                 # overlay_cuda 叠加
@@ -662,7 +663,7 @@ class VideoRenderer:
                 )
             # 非透明视频滤镜链
             else:
-                filter_complex = f"[1:v]format=yuv420p,hwupload_cuda[img_cuda_no_alpha]; \
+                filter_complex = f"[1:v]fps={self.fps},format=yuv420p,hwupload_cuda[img_cuda_no_alpha]; \
                                  [0:v][img_cuda_no_alpha]overlay_cuda=x=0:y='{y_expr}'[out_cuda]; \
                                  [out_cuda]hwdownload,format=yuv420p[out]"
                 logger.info("使用 overlay_cuda 处理透明视频 (YUV420P格式)")
