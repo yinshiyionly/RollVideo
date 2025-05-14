@@ -312,6 +312,7 @@ class VideoRenderer:
             ffmpeg_cmd = [
                 "ffmpeg",
                 "-y",
+
                 "-loop", "1",  # 循环输入图像
                 "-i", temp_img_path,  # 输入图像
                 "-progress", "pipe:2",  # 输出进度信息到stderr
@@ -463,7 +464,8 @@ class VideoRenderer:
         transparency_required=False,
         preferred_codec="h264_nvenc",
         audio_path=None,
-        bg_color=(0, 0, 0, 255)
+        bg_color=(0, 0, 0, 255),
+        background_url=None,
     ):
         """
         使用FFmpeg的overlay_cuda滤镜创建GPU加速的滚动视频
