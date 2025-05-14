@@ -518,7 +518,7 @@ class VideoRenderer:
             # 临时图像优化选项,False不优化
             image_optimize_options = {
                 "optimize": False,
-                "compress_level": 0,
+                "compress_level": 6, # 1~9：压缩级别逐步提高，默认6
             }
             
             # 使用PIL直接保存图像，保留原始格式和所有信息
