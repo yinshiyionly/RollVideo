@@ -126,10 +126,10 @@ class VideoRenderer:
             if is_windows or is_linux:
                 codec_params = [
                     "-c:v", "h264_nvenc",
-                    "-preset", "p7",  # 1-7质量最高 
-                    "-rc", "vbr",  # 使用VBR编码，平均码率，   -rc cbr -b:v 10M 这个组合是强制填充码率
-                    "-cq", "15",  # 质量因子，小到大效果越来越低
-                    "-b:v", "10M",  # 平均码率
+                    "-preset", "p7",    # 1-7质量最高 
+                    "-rc", "vbr",       # 使用VBR编码，平均码率，   -rc cbr -b:v 10M 这个组合是强制填充码率
+                    "-cq", "15",        # 质量因子，小到大效果越来越低
+                    "-b:v", "10M",      # 平均码率
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
                 ]
@@ -137,8 +137,8 @@ class VideoRenderer:
             else:
                 codec_params = [
                     "-c:v", "libx264",
-                    "-preset", "veryfast",  # 使用更快的预设
-                    "-crf", "20",  # 略微降低质量以提高速度
+                    "-preset", "veryslow",  # 质量最高的预设，对应NVENC的p7
+                    "-crf", "15",           # 略微降低质量以提高速度
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
                 ]
@@ -166,12 +166,17 @@ class VideoRenderer:
             # 默认使用libx264 (高质量CPU编码)
             codec_params = [
                 "-c:v", "libx264",
-                "-preset", "medium",  # 平衡速度和质量的预设
-                "-crf", "20",         # 恒定质量因子 (0-51, 越低质量越高)
-                "-pix_fmt", "yuv420p", # 兼容大多数播放器
+                "-preset", "veryslow",  # 质量最高的预设，对应NVENC的p7
+                "-tune", "film",        # 适合高质量视频内容
+                "-rc-lookahead", "60",  # 增加前瞻缓冲区大小，提高质量
+                "-crf", "15",           # 对应NVENC的cq=15，越低质量越高
+                "-b:v", "10M",          # 与NVENC参数保持一致的平均码率
+                "-maxrate", "15M",      # 最大码率限制
+                "-bufsize", "20M",      # 码率控制缓冲区
+                "-pix_fmt", "yuv420p",  # 与NVENC参数保持一致
                 "-movflags", "+faststart", # MP4优化
             ]
-            logger.info(f"使用CPU编码器: libx264")
+            logger.info(f"使用CPU编码器: libx264(高质量模式)")
         
         return codec_params, pix_fmt
 
