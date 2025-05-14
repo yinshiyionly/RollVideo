@@ -153,8 +153,6 @@ class RollVideoService:
             0,
             255,
         ),
-        background_url: Optional[str] = None,  # 背景图URL
-        scale_mode: str = "stretch",  # 背景图缩放模式: 'stretch'拉伸或'tile'平铺
         line_spacing: int = 20,
         char_spacing: int = 0,
         fps: int = 60,
@@ -231,8 +229,6 @@ class RollVideoService:
                     tuple(font_color) if isinstance(font_color, list) else font_color
                 ),
                 bg_color=bg_color_final,
-                background_url=background_url,  # 传递背景图URL
-                scale_mode=scale_mode,  # 传递缩放模式
                 line_spacing=line_spacing,
                 char_spacing=char_spacing,
                 top_margin=top_margin,       # 传递上边距
@@ -307,8 +303,6 @@ class RollVideoService:
             0,
             255,
         ),
-        background_url: Optional[str] = None,  # 背景图URL
-        scale_mode: str = "stretch",  # 背景图缩放模式: 'stretch'拉伸或'tile'平铺
         line_spacing: int = 20,
         char_spacing: int = 0,
         fps: int = 60,
@@ -332,8 +326,6 @@ class RollVideoService:
             font_size: 字体大小
             font_color: 字体颜色(R,G,B)
             bg_color: 背景颜色(R,G,B)或(R,G,B,A)
-            background_url: 背景图片URL，如果提供，将覆盖bg_color
-            scale_mode: 背景图缩放模式, 'stretch'=拉伸, 'tile'=平铺
             line_spacing: 行间距
             char_spacing: 字符间距
             fps: 视频帧率
@@ -403,8 +395,6 @@ class RollVideoService:
                     tuple(font_color) if isinstance(font_color, list) else font_color
                 ),
                 bg_color=bg_color_final,
-                background_url=background_url,  # 传递背景图URL
-                scale_mode=scale_mode,  # 传递缩放模式
                 line_spacing=line_spacing,
                 char_spacing=char_spacing,
                 top_margin=top_margin,       # 传递上边距

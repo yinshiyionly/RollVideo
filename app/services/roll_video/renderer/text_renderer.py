@@ -1,7 +1,6 @@
 """文本渲染器模块"""
 
 import textwrap
-import requests
 import io
 from typing import Tuple, List, Optional, Union
 from PIL import Image, ImageDraw, ImageFont, __version__ as PIL_VERSION
@@ -18,9 +17,7 @@ class TextRenderer:
         font_path: str,
         font_size: int,
         font_color: Tuple[int, int, int],
-        bg_color: Tuple[int, int, int, int] = (255, 255, 255, 255),  # RGBA颜色，支持透明度
-        background_url: Optional[str] = None,  # 背景图URL
-        scale_mode: str = "stretch",  # 背景图缩放模式: 'stretch'拉伸或'tile'平铺
+        bg_color: Tuple[int, int, int, int] = (255, 255, 255, 0),  # RGBA颜色，默认完全透明
         line_spacing: int = 10,
         char_spacing: int = 0,
         top_margin: int = 10,      # 默认上边距10px
@@ -37,8 +34,6 @@ class TextRenderer:
             font_size: 字体大小
             font_color: 字体颜色 (R,G,B)
             bg_color: 背景颜色 (R,G,B,A)，A为透明度，0表示完全透明，255表示完全不透明
-            background_url: 背景图片URL，如果提供，将覆盖bg_color
-            scale_mode: 背景图缩放模式, 'stretch'=拉伸, 'tile'=平铺
             line_spacing: 行间距
             char_spacing: 字符间距
             top_margin: 上边距，文本与顶部的距离
@@ -62,16 +57,9 @@ class TextRenderer:
         if len(bg_color) == 4:
             self.bg_color = bg_color
         elif len(bg_color) == 3:
-            self.bg_color = bg_color + (255,)  # 添加Alpha通道，默认不透明
+            self.bg_color = bg_color + (0,)  # 添加Alpha通道，默认完全透明
         else:
             self.bg_color = (255, 255, 255, 0) # 默认使用透明白色
-            
-        # 保存背景图URL和缩放模式
-        self.background_url = background_url
-        self.scale_mode = scale_mode.lower() if scale_mode else "stretch"
-        if self.scale_mode not in ["stretch", "tile"]:
-            logger.warning(f"无效的背景图缩放模式 '{scale_mode}'，使用默认值 'stretch'")
-            self.scale_mode = "stretch"
 
         self.line_spacing = line_spacing
         self.char_spacing = char_spacing
@@ -133,58 +121,6 @@ class TextRenderer:
         
         return lines
         
-    def _load_background_image(self, width: int, height: int) -> Optional[Image.Image]:
-        """
-        加载背景图片并根据指定的缩放模式调整大小
-        
-        Args:
-            width: 目标图像宽度
-            height: 目标图像高度
-            
-        Returns:
-            处理后的背景图像，如果加载失败则返回None
-        """
-        if not self.background_url:
-            return None
-            
-        try:
-            # 从URL加载图像
-            logger.info(f"从URL加载背景图片: {self.background_url}")
-            response = requests.get(self.background_url, timeout=10)
-            response.raise_for_status()  # 检查是否成功获取
-            
-            # 从响应内容加载图像
-            img = Image.open(io.BytesIO(response.content))
-            
-            # 根据缩放模式处理图像
-            if self.scale_mode == 'stretch':
-                # 拉伸模式 - 将图像拉伸到指定尺寸
-                logger.info(f"使用拉伸模式调整背景图片大小: {img.size} -> ({width}, {height})")
-                return img.resize((width, height), Image.LANCZOS)
-            
-            elif self.scale_mode == 'tile':
-                # 平铺模式 - 创建新图像并平铺原图
-                logger.info(f"使用平铺模式创建背景: 源图像大小={img.size}, 目标大小=({width}, {height})")
-                img_width, img_height = img.size
-                tiled_img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
-                
-                # 计算需要多少个瓦片
-                x_tiles = (width + img_width - 1) // img_width
-                y_tiles = (height + img_height - 1) // img_height
-                
-                # 平铺图像
-                for y in range(y_tiles):
-                    for x in range(x_tiles):
-                        tiled_img.paste(img, (x * img_width, y * img_height))
-                
-                return tiled_img
-                
-        except Exception as e:
-            logger.error(f"加载背景图片失败: {str(e)}")
-            return None
-            
-        return None
-    
     def render_text_to_image(self, text: str, min_height: Optional[int] = None) -> Tuple[Image.Image, int]:
         """
         将文本渲染到图片，并在末尾添加一个屏幕高度的空白
@@ -218,20 +154,9 @@ class TextRenderer:
         # 在图像末尾添加一个屏幕高度的空白区域
         total_height = text_actual_height + screen_height
         
-        # 尝试加载背景图片
-        bg_image = None
-        if self.background_url:
-            bg_image = self._load_background_image(self.width, total_height)
-            
-        # 创建图像
-        if bg_image:
-            # 如果有背景图片，使用它
-            img = bg_image
-            logger.info("使用背景图片作为渲染背景")
-        else:
-            # 否则使用指定的背景颜色
-            img = Image.new('RGBA', (self.width, total_height), self.bg_color)
-            logger.info(f"使用纯色背景 {self.bg_color}")
+        # 创建透明背景图像
+        img = Image.new('RGBA', (self.width, total_height), self.bg_color)
+        logger.info(f"使用纯色背景 {self.bg_color}")
             
         draw = ImageDraw.Draw(img)
         
