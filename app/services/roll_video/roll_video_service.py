@@ -153,6 +153,7 @@ class RollVideoService:
             0,
             255,
         ),
+        background_url: str = None,
         line_spacing: int = 20,
         char_spacing: int = 0,
         fps: int = 60,
@@ -174,7 +175,14 @@ class RollVideoService:
         
         """
         try:
-            # --- 决定透明度需求和编码策略 ---
+            # 如果指定了background_url，使用透明背景设置
+            transparency_required = False
+            if background_url:
+                # 强制使用透明背景
+                transparency_required = True
+                logger.info("检测到background_url，将使用完全透明背景渲染文字")
+            
+            # 标准的背景色处理逻辑
             normalized_bg_color = list(bg_color)
             if len(normalized_bg_color) == 3:
                 normalized_bg_color.append(255)  # RGB 转 RGBA，默认不透明
@@ -191,8 +199,10 @@ class RollVideoService:
             # 确保 alpha 值在 0-255 范围内
             normalized_bg_color[3] = max(0, min(255, normalized_bg_color[3]))
             bg_color_final = tuple(normalized_bg_color)
-
-            transparency_required = bg_color_final[3] < 255
+            
+            # 如果未指定background_url，根据bg_color的alpha通道决定透明度
+            if not background_url:
+                transparency_required = bg_color_final[3] < 255
 
             # 根据透明度需求确定输出格式和编码器
             output_dir = os.path.dirname(os.path.abspath(output_path))
@@ -220,7 +230,7 @@ class RollVideoService:
             # 获取有效的字体路径
             font_path = self.get_font_path(font_path)
 
-            # 创建文字渲染器 (使用最终确定的bg_color)
+            # 创建文字渲染器
             text_renderer = TextRenderer(
                 width=width,
                 font_path=font_path,
@@ -238,9 +248,18 @@ class RollVideoService:
             )
 
             # 将文本渲染为图片，并获取文本实际高度
-            text_image, text_actual_height = text_renderer.render_text_to_image(
-                text, min_height=height
-            )
+            # 如果指定了背景URL，使用完全透明背景渲染文字
+            if background_url:
+                text_image, text_actual_height = text_renderer.render_text_to_transparent_image(
+                    text, min_height=height
+                )
+                logger.info("使用完全透明背景渲染文本")
+            else:
+                # 否则使用普通渲染方法
+                text_image, text_actual_height = text_renderer.render_text_to_image(
+                    text, min_height=height
+                )
+            
             logger.info(
                 f"文本渲染完成，文本实际高度: {text_actual_height}px, 渲染图像总高度: {text_image.height}px"
             )
@@ -267,7 +286,8 @@ class RollVideoService:
                 transparency_required=transparency_required,  # 传递透明度需求
                 preferred_codec=preferred_codec,  # 传递首选编码器
                 audio_path=audio_path,
-                bg_color=bg_color_final  # 传递最终的bg_color供非透明路径使用
+                bg_color=bg_color_final,  # 传递最终的bg_color供非透明路径使用
+                background_url=background_url  # 传递背景图URL
             )
 
             logger.info(f"滚动视频创建完成 (FFmpeg crop滤镜方式): {final_output_path}")
@@ -303,6 +323,7 @@ class RollVideoService:
             0,
             255,
         ),
+        background_url: str = None,
         line_spacing: int = 20,
         char_spacing: int = 0,
         fps: int = 60,
@@ -326,6 +347,7 @@ class RollVideoService:
             font_size: 字体大小
             font_color: 字体颜色(R,G,B)
             bg_color: 背景颜色(R,G,B)或(R,G,B,A)
+            background_url: 视频容器的背景图片URL，文字将叠加在此背景上
             line_spacing: 行间距
             char_spacing: 字符间距
             fps: 视频帧率
@@ -340,7 +362,14 @@ class RollVideoService:
             包含状态、消息和输出路径的字典
         """
         try:
-            # --- 决定透明度需求和编码策略 ---
+            # 如果指定了background_url，使用透明背景设置
+            transparency_required = False
+            if background_url:
+                # 强制使用透明背景
+                transparency_required = True
+                logger.info("检测到background_url，将使用完全透明背景渲染文字")
+            
+            # 标准的背景色处理逻辑
             normalized_bg_color = list(bg_color)
             if len(normalized_bg_color) == 3:
                 normalized_bg_color.append(255)  # RGB 转 RGBA，默认不透明
@@ -357,8 +386,10 @@ class RollVideoService:
             # 确保 alpha 值在 0-255 范围内
             normalized_bg_color[3] = max(0, min(255, normalized_bg_color[3]))
             bg_color_final = tuple(normalized_bg_color)
-
-            transparency_required = bg_color_final[3] < 255
+            
+            # 如果未指定background_url，根据bg_color的alpha通道决定透明度
+            if not background_url:
+                transparency_required = bg_color_final[3] < 255
 
             # 根据透明度需求确定输出格式和编码器
             output_dir = os.path.dirname(os.path.abspath(output_path))
@@ -386,7 +417,7 @@ class RollVideoService:
             # 获取有效的字体路径
             font_path = self.get_font_path(font_path)
 
-            # 创建文字渲染器 (使用最终确定的bg_color)
+            # 创建文字渲染器
             text_renderer = TextRenderer(
                 width=width,
                 font_path=font_path,
@@ -404,9 +435,18 @@ class RollVideoService:
             )
 
             # 将文本渲染为图片，并获取文本实际高度
-            text_image, text_actual_height = text_renderer.render_text_to_image(
-                text, min_height=height
-            )
+            # 如果指定了背景URL，使用完全透明背景渲染文字
+            if background_url:
+                text_image, text_actual_height = text_renderer.render_text_to_transparent_image(
+                    text, min_height=height
+                )
+                logger.info("使用完全透明背景渲染文本")
+            else:
+                # 否则使用普通渲染方法
+                text_image, text_actual_height = text_renderer.render_text_to_image(
+                    text, min_height=height
+                )
+            
             logger.info(
                 f"文本渲染完成，文本实际高度: {text_actual_height}px, 渲染图像总高度: {text_image.height}px"
             )
@@ -433,7 +473,8 @@ class RollVideoService:
                 transparency_required=transparency_required,
                 preferred_codec=preferred_codec,
                 audio_path=audio_path,
-                bg_color=bg_color_final
+                bg_color=bg_color_final,
+                background_url=background_url
             )
 
             logger.info(f"滚动视频创建完成 (overlay_cuda GPU加速方式): {final_output_path}")
