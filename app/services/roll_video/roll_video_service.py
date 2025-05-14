@@ -157,13 +157,14 @@ class RollVideoService:
         scale_mode: str = "stretch",  # 背景图缩放模式: 'stretch'拉伸或'tile'平铺
         line_spacing: int = 20,
         char_spacing: int = 0,
-        fps: int = 30,
+        fps: int = 60,
         roll_px: float = 1.6,  # 修改为每秒滚动的像素px
         audio_path: Optional[str] = None,
         top_margin: int = 10,      # 默认上边距10px
         bottom_margin: int = 10,   # 默认下边距10px
         left_margin: int = 10,     # 默认左边距10px
-        right_margin: int = 10     # 默认右边距10px
+        right_margin: int = 10,    # 默认右边距10px
+        top_blank: int = 0,        # 默认顶部留白0px
     ) -> Dict[str, Union[str, bool]]:
         """
         使用FFmpeg滤镜创建滚动视频，自动根据透明度选择格式
@@ -310,13 +311,14 @@ class RollVideoService:
         scale_mode: str = "stretch",  # 背景图缩放模式: 'stretch'拉伸或'tile'平铺
         line_spacing: int = 20,
         char_spacing: int = 0,
-        fps: int = 30,
+        fps: int = 60,
         roll_px: float = 1.6,  # 每秒滚动的像素px
         audio_path: Optional[str] = None,
         top_margin: int = 10,      # 默认上边距10px
         bottom_margin: int = 10,   # 默认下边距10px
         left_margin: int = 10,     # 默认左边距10px
-        right_margin: int = 10     # 默认右边距10px
+        right_margin: int = 10,    # 默认右边距10px
+        top_blank: int = 0,        # 默认顶部留白0px
     ) -> Dict[str, Union[str, bool]]:
         """
         使用overlay_cuda GPU滤镜创建滚动视频 - 只支持基础匀速滚动效果和从下到上滚动方向

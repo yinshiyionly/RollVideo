@@ -22,7 +22,7 @@ class VideoRenderer:
         self,
         width: int,
         height: int,
-        fps: int = 30,
+        fps: int = 60,
         roll_px: float = 1.6,  # 每帧滚动的像素数（由service层基于行高和每秒滚动行数计算而来）
     ):
         """
