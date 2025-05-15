@@ -185,7 +185,6 @@ class VideoRenderer:
         image,
         output_path,
         text_actual_height,
-        transparency_required=False,
         preferred_codec="libx264",
         audio_path=None,
         bg_color=(255, 255, 255)
@@ -205,6 +204,9 @@ class VideoRenderer:
         Returns:
             输出视频的路径
         """
+        # transparency_required: 是否需要透明通道 默认 False
+        transparency_required = False
+
         try:
             # 记录开始时间
             total_start_time = time.time()
@@ -461,7 +463,6 @@ class VideoRenderer:
         image,
         output_path,
         text_actual_height,
-        transparency_required=False,
         preferred_codec="h264_nvenc",
         audio_path=None,
         bg_color=(0, 0, 0, 255),
@@ -482,6 +483,9 @@ class VideoRenderer:
         Returns:
             输出视频的路径
         """
+        # transparency_required: 是否需要透明通道 默认 False
+        transparency_required = False
+
         try:
             # 记录开始时间
             total_start_time = time.time()
@@ -583,7 +587,6 @@ class VideoRenderer:
                         image=image,
                         output_path=output_path,
                         text_actual_height=text_actual_height,
-                        transparency_required=transparency_required,
                         preferred_codec=preferred_codec,
                         audio_path=audio_path,
                         bg_color=bg_color,
@@ -605,7 +608,6 @@ class VideoRenderer:
                         image=image,
                         output_path=output_path,
                         text_actual_height=text_actual_height,
-                        transparency_required=transparency_required,
                         preferred_codec=preferred_codec,
                         audio_path=audio_path,
                         bg_color=bg_color,
@@ -620,7 +622,6 @@ class VideoRenderer:
                     image=image,
                     output_path=output_path,
                     text_actual_height=text_actual_height,
-                    transparency_required=transparency_required,
                     preferred_codec=preferred_codec,
                     audio_path=audio_path,
                     bg_color=bg_color,
