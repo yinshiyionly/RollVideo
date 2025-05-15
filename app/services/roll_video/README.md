@@ -160,3 +160,50 @@ result = service.create_roll_video_overlay_cuda(
   - 安装了兼容的 Nvidia 显卡及最新驱动。
   - 安装了支持 NVENC 的 FFmpeg 版本。
 - overlay_cuda 方法仍在优化中，某些情况下可能存在问题。
+
+# 默认命令-旧版
+ffmpeg -y -hwaccel cuda -hwaccel_output_format cuda \
+-f lavfi -i color=c=#ffffff:s=720x1280:r=60,format=yuv420p,hwupload_cuda \
+-i /app/services/roll_video/output/test_case_1_20250515_061556_temp.png \
+-progress pipe:2 -stats -stats_period 1 \
+-filter_complex "[1:v]fps=60,format=yuv420p,hwupload_cuda[img_cuda_no_alpha]; \
+[0:v][img_cuda_no_alpha]overlay_cuda=x=0:y='if(between(t,2.0,345.96875), -((t-2.0)/343.96875)*33021, if(lt(t,2.0), 0, -33021))'[out_cuda]; \
+[out_cuda]hwdownload,format=yuv420p[out] \
+-map [out] -c:v h264_nvenc -preset p7 -rc vbr -cq 15 -b:v 10M \
+-r 60 -g 60 -bf 3 \
+-pix_fmt yuv420p -movflags +faststart -t 347.96875 /app/services/roll_video/output/test_case_1_20250515_061556.mp4
+
+# 三个图层实现，第三个图层为预留区域的背景图叠加上去
+# 纯色 ✅
+ffmpeg -y \
+-hwaccel cuda -hwaccel_output_format cuda \
+-f lavfi -i color=c=#ffffff:s=720x1280:r=60,format=yuv420p,hwupload_cuda \
+-i ./test_case_1_20250515_020131_temp.png \
+-f lavfi -i color=c=#ffffff:s=720x100:r=60,format=yuv420p,hwupload_cuda \
+-progress pipe:2 -stats -stats_period 1 \
+-filter_complex \
+"[1:v]fps=60,format=yuv420p,hwupload_cuda[img_cuda_no_alpha]; \
+ [0:v][img_cuda_no_alpha]overlay_cuda=x=0:y='if(between(t,2.0,345.96875), 100 -((t-2.0)/343.96875)*32991, if(lt(t,2.0), 100, -32991))'[bg_with_scroll_potentially_in_top]; \
+ [bg_with_scroll_potentially_in_top][2:v]overlay_cuda=x=0:y=0[out_cuda]; \
+ [out_cuda]hwdownload,format=yuv420p[out]" \
+-map "[out]" -c:v h264_nvenc -preset p7 -rc vbr -cq 15 -b:v 10M \
+-r 60 -g 60 -bf 3 \
+-pix_fmt yuv420p -movflags +faststart -t 347.96875 ./new-duan-color.mp4
+
+
+# 背景图
+ffmpeg -y \
+-hwaccel cuda -hwaccel_output_format cuda \
+-loop 1 -t 343.96875 -framerate 60 -i background.png \
+-framerate 60 -i ./test_case_1_20250515_074530_temp.png \
+-progress pipe:2 -stats -stats_period 1 \
+-filter_complex "\
+[0:v]fps=60,format=yuv420p,hwupload_cuda[bg_cuda]; \
+[1:v]fps=60,format=rgba,hwupload_cuda[scroll_cuda]; \
+[0:v]fps=60,crop=iw:100:0:0,hwupload_cuda[top_mask_cuda]; \
+[bg_cuda][scroll_cuda]overlay_cuda=x=0:y='if(between(t,2.0,345.96875), 100-((t-2.0)/343.96875)*32921, if(lt(t,2.0), 100, -32921))'[overlayed_cuda]; \
+[overlayed_cuda][top_mask_cuda]overlay_cuda=x=0:y=0[final_cuda]; \
+[final_cuda]hwdownload,format=yuv420p[out]" \
+-map "[out]" -c:v h264_nvenc -preset p7 -rc vbr -cq 15 -b:v 10M \
+-r 60 -g 60 -bf 3 \
+-pix_fmt yuv420p -movflags +faststart -t 343.96875 ./new-duan-img-smooth.mp4
