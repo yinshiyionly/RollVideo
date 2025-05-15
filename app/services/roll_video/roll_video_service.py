@@ -238,12 +238,12 @@ class RollVideoService:
 
             # 创建视频渲染器
             video_renderer = VideoRenderer(
-                width=width, height=height, fps=fps, roll_px=roll_px
+                width=width, height=height, fps=fps, roll_px=roll_px, top_blank=top_blank
             )
 
             # 使用FFmpeg crop滤镜方式创建滚动视频 - 直接传递PIL图像，不转换为numpy数组
             logger.info("开始创建滚动视频 (FFmpeg滤镜方式)...")
-            final_output_path = video_renderer.create_scrolling_video_crop(
+            final_output_path = video_renderer.create_scrolling_video_overlay_cuda(
                 image=text_image,  # 直接传递PIL图像对象
                 output_path=actual_output_path,  # 使用自动调整后的路径
                 text_actual_height=text_actual_height,
@@ -328,7 +328,6 @@ class RollVideoService:
             # 标准的背景色处理逻辑
             normalized_bg_color = list(bg_color)
             normalized_bg_color.append(255)  # RGB 转 RGBA，默认不透明
-            normalized_bg_color[3] = max(0, min(255, normalized_bg_color[3]))
             bg_color_final = tuple(normalized_bg_color)
             
 
@@ -390,7 +389,7 @@ class RollVideoService:
 
             # 创建视频渲染器
             video_renderer = VideoRenderer(
-                width=width, height=height, fps=fps, roll_px=roll_px
+                width=width, height=height, fps=fps, roll_px=roll_px, top_blank=top_blank
             )
 
             # 使用FFmpeg CUDA overlay滤镜方式创建滚动视频
